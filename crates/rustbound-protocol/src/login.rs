@@ -1,15 +1,16 @@
 //! Login state packet codecs for protocol 763 (Minecraft Java Edition 1.20.1).
 //!
-//! This module implements the Login Start (serverbound `0x00`) and Login
-//! Disconnect (clientbound `0x00`) packets. Other login packets (encryption,
-//! login success, plugin messaging) are handled in separate modules.
+//! This module implements the Login Start (serverbound `0x00`), Login
+//! Disconnect (clientbound `0x00`), Encryption Request (clientbound `0x01`),
+//! and Encryption Response (serverbound `0x01`) packets.
 
 use std::fmt;
 
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
-    CodecError, MAX_CHAT_COMPONENT_LENGTH, MAX_USERNAME_LENGTH, Uuid, decode_string, decode_uuid,
-    encode_string, encode_uuid,
+    CodecError, MAX_CHAT_COMPONENT_LENGTH, MAX_PUBLIC_KEY_LENGTH, MAX_SERVER_ID_LENGTH,
+    MAX_USERNAME_LENGTH, MAX_VERIFY_TOKEN_LENGTH, Uuid, decode_byte_array, decode_string,
+    decode_uuid, encode_byte_array, encode_string, encode_uuid,
 };
 use crate::state::ProtocolState;
 
@@ -18,6 +19,12 @@ pub const LOGIN_START_PACKET_ID: i32 = 0x00;
 
 /// Packet ID for the clientbound Login Disconnect packet.
 pub const LOGIN_DISCONNECT_PACKET_ID: i32 = 0x00;
+
+/// Packet ID for the clientbound Encryption Request packet.
+pub const ENCRYPTION_REQUEST_PACKET_ID: i32 = 0x01;
+
+/// Packet ID for the serverbound Encryption Response packet.
+pub const ENCRYPTION_RESPONSE_PACKET_ID: i32 = 0x01;
 
 /// An error encountered while encoding or decoding a login packet.
 #[derive(Debug)]
@@ -100,6 +107,10 @@ pub enum LoginPacket {
     LoginStart(LoginStart),
     /// Clientbound Login Disconnect (`0x00`).
     LoginDisconnect(LoginDisconnect),
+    /// Clientbound Encryption Request (`0x01`).
+    EncryptionRequest(EncryptionRequest),
+    /// Serverbound Encryption Response (`0x01`).
+    EncryptionResponse(EncryptionResponse),
 }
 
 /// Serverbound Login Start packet (Login `0x00`).
@@ -116,6 +127,26 @@ pub struct LoginStart {
 pub struct LoginDisconnect {
     /// The disconnect reason as a JSON chat component string.
     pub reason: String,
+}
+
+/// Clientbound Encryption Request packet (Login `0x01`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionRequest {
+    /// The server ID (max 20 UTF-16 units, may be empty).
+    pub server_id: String,
+    /// The server's public key (max 512 bytes).
+    pub public_key: Vec<u8>,
+    /// The verify token (max 16 bytes).
+    pub verify_token: Vec<u8>,
+}
+
+/// Serverbound Encryption Response packet (Login `0x01`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionResponse {
+    /// The encrypted shared secret (must be 16 bytes for AES-128).
+    pub shared_secret: Vec<u8>,
+    /// The encrypted verify token (max 16 bytes).
+    pub verify_token: Vec<u8>,
 }
 
 /// Encodes a Login Start packet (serverbound Login `0x00`).
@@ -284,14 +315,174 @@ pub fn ensure_login_state(state: ProtocolState) -> Result<(), LoginError> {
     }
 }
 
+/// Encodes an Encryption Request packet (clientbound Login `0x01`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_encryption_request(
+    packet: &EncryptionRequest,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), LoginError> {
+    let mut body = Vec::new();
+    encode_string(&packet.server_id, MAX_SERVER_ID_LENGTH, &mut body).map_err(LoginError::from)?;
+    encode_byte_array(&packet.public_key, MAX_PUBLIC_KEY_LENGTH, &mut body)
+        .map_err(LoginError::from)?;
+    encode_byte_array(&packet.verify_token, MAX_VERIFY_TOKEN_LENGTH, &mut body)
+        .map_err(LoginError::from)?;
+
+    encode_frame(
+        ENCRYPTION_REQUEST_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(LoginError::from)?;
+    Ok(())
+}
+
+/// Decodes an Encryption Request packet (clientbound Login `0x01`).
+///
+/// On [`LoginDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_encryption_request(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<LoginDecodeOutcome, LoginError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(LoginDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(LoginError::from(error));
+        }
+    };
+
+    if frame.packet_id != ENCRYPTION_REQUEST_PACKET_ID {
+        *input = source;
+        return Err(LoginError::WrongPacketId {
+            received: frame.packet_id,
+            expected: ENCRYPTION_REQUEST_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let server_id = decode_string(&mut body, MAX_SERVER_ID_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let public_key = decode_byte_array(&mut body, MAX_PUBLIC_KEY_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let verify_token = decode_byte_array(&mut body, MAX_VERIFY_TOKEN_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(LoginError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(LoginDecodeOutcome::Complete(
+        LoginPacket::EncryptionRequest(EncryptionRequest {
+            server_id: server_id.to_string(),
+            public_key: public_key.to_vec(),
+            verify_token: verify_token.to_vec(),
+        }),
+    ))
+}
+
+/// Encodes an Encryption Response packet (serverbound Login `0x01`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_encryption_response(
+    packet: &EncryptionResponse,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), LoginError> {
+    let mut body = Vec::new();
+    encode_byte_array(&packet.shared_secret, MAX_PUBLIC_KEY_LENGTH, &mut body)
+        .map_err(LoginError::from)?;
+    encode_byte_array(&packet.verify_token, MAX_VERIFY_TOKEN_LENGTH, &mut body)
+        .map_err(LoginError::from)?;
+
+    encode_frame(
+        ENCRYPTION_RESPONSE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(LoginError::from)?;
+    Ok(())
+}
+
+/// Decodes an Encryption Response packet (serverbound Login `0x01`).
+///
+/// On [`LoginDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_encryption_response(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<LoginDecodeOutcome, LoginError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(LoginDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(LoginError::from(error));
+        }
+    };
+
+    if frame.packet_id != ENCRYPTION_RESPONSE_PACKET_ID {
+        *input = source;
+        return Err(LoginError::WrongPacketId {
+            received: frame.packet_id,
+            expected: ENCRYPTION_RESPONSE_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let shared_secret = decode_byte_array(&mut body, MAX_PUBLIC_KEY_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let verify_token = decode_byte_array(&mut body, MAX_VERIFY_TOKEN_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(LoginError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(LoginDecodeOutcome::Complete(
+        LoginPacket::EncryptionResponse(EncryptionResponse {
+            shared_secret: shared_secret.to_vec(),
+            verify_token: verify_token.to_vec(),
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        LOGIN_START_PACKET_ID, LoginDirection, LoginDisconnect, LoginError, LoginPacket,
-        LoginStart, decode_login_disconnect, decode_login_packet, decode_login_start,
-        encode_login_disconnect, encode_login_start, ensure_login_state,
+        ENCRYPTION_REQUEST_PACKET_ID, ENCRYPTION_RESPONSE_PACKET_ID, EncryptionRequest,
+        EncryptionResponse, LOGIN_START_PACKET_ID, LoginDirection, LoginDisconnect, LoginError,
+        LoginPacket, LoginStart, MAX_PUBLIC_KEY_LENGTH, MAX_SERVER_ID_LENGTH,
+        MAX_VERIFY_TOKEN_LENGTH, decode_encryption_request, decode_encryption_response,
+        decode_login_disconnect, decode_login_packet, decode_login_start,
+        encode_encryption_request, encode_encryption_response, encode_login_disconnect,
+        encode_login_start, ensure_login_state,
     };
-    use crate::primitives::Uuid;
+    use crate::primitives::{SHARED_SECRET_LENGTH, Uuid};
     use crate::state::ProtocolState;
 
     const TEST_MAX_FRAME: usize = 65536;
@@ -576,5 +767,287 @@ mod tests {
         ] {
             assert!(ensure_login_state(state).is_err());
         }
+    }
+
+    fn sample_public_key() -> Vec<u8> {
+        (0..128).map(|i| i as u8).collect()
+    }
+
+    fn sample_verify_token() -> Vec<u8> {
+        vec![0xde, 0xad, 0xbe, 0xef]
+    }
+
+    fn sample_shared_secret() -> Vec<u8> {
+        vec![0x42; SHARED_SECRET_LENGTH]
+    }
+
+    #[test]
+    fn encryption_request_round_trips_with_empty_server_id() -> Result<(), LoginError> {
+        let packet = EncryptionRequest {
+            server_id: String::new(),
+            public_key: sample_public_key(),
+            verify_token: sample_verify_token(),
+        };
+        let mut wire = Vec::new();
+        encode_encryption_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_encryption_request(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::EncryptionRequest(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected EncryptionRequest"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_round_trips_with_non_empty_server_id() -> Result<(), LoginError> {
+        let packet = EncryptionRequest {
+            server_id: "myserver".to_string(),
+            public_key: sample_public_key(),
+            verify_token: sample_verify_token(),
+        };
+        let mut wire = Vec::new();
+        encode_encryption_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_encryption_request(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::EncryptionRequest(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected EncryptionRequest"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_oversized_public_key_is_rejected() -> Result<(), LoginError> {
+        let packet = EncryptionRequest {
+            server_id: String::new(),
+            public_key: vec![0xff; MAX_PUBLIC_KEY_LENGTH + 1],
+            verify_token: sample_verify_token(),
+        };
+        let result = encode_encryption_request(&packet, TEST_MAX_FRAME, &mut Vec::new());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_oversized_verify_token_is_rejected() -> Result<(), LoginError> {
+        let packet = EncryptionRequest {
+            server_id: String::new(),
+            public_key: sample_public_key(),
+            verify_token: vec![0xff; MAX_VERIFY_TOKEN_LENGTH + 1],
+        };
+        let result = encode_encryption_request(&packet, TEST_MAX_FRAME, &mut Vec::new());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_wrong_packet_id_is_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_string("", MAX_SERVER_ID_LENGTH, &mut body)
+            .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_public_key(),
+            MAX_PUBLIC_KEY_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_verify_token(),
+            MAX_VERIFY_TOKEN_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_encryption_request(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::WrongPacketId { .. })));
+        assert_eq!(input, wire.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_truncated_is_incomplete() -> Result<(), LoginError> {
+        let packet = EncryptionRequest {
+            server_id: String::new(),
+            public_key: sample_public_key(),
+            verify_token: sample_verify_token(),
+        };
+        let mut wire = Vec::new();
+        encode_encryption_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_encryption_request(&mut input, TEST_MAX_FRAME)?,
+                super::LoginDecodeOutcome::Incomplete
+            );
+            assert_eq!(input, &wire[..split]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_request_trailing_bytes_are_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_string("", MAX_SERVER_ID_LENGTH, &mut body)
+            .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_public_key(),
+            MAX_PUBLIC_KEY_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_verify_token(),
+            MAX_VERIFY_TOKEN_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        body.push(0xff);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            ENCRYPTION_REQUEST_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_encryption_request(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::TrailingBytes { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_round_trips() -> Result<(), LoginError> {
+        let packet = EncryptionResponse {
+            shared_secret: sample_shared_secret(),
+            verify_token: sample_verify_token(),
+        };
+        let mut wire = Vec::new();
+        encode_encryption_response(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_encryption_response(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::EncryptionResponse(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected EncryptionResponse"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_oversized_shared_secret_is_rejected() -> Result<(), LoginError> {
+        let packet = EncryptionResponse {
+            shared_secret: vec![0xff; MAX_PUBLIC_KEY_LENGTH + 1],
+            verify_token: sample_verify_token(),
+        };
+        let result = encode_encryption_response(&packet, TEST_MAX_FRAME, &mut Vec::new());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_oversized_verify_token_is_rejected() -> Result<(), LoginError> {
+        let packet = EncryptionResponse {
+            shared_secret: sample_shared_secret(),
+            verify_token: vec![0xff; MAX_VERIFY_TOKEN_LENGTH + 1],
+        };
+        let result = encode_encryption_response(&packet, TEST_MAX_FRAME, &mut Vec::new());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_wrong_packet_id_is_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_byte_array(
+            &sample_shared_secret(),
+            MAX_PUBLIC_KEY_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_verify_token(),
+            MAX_VERIFY_TOKEN_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_encryption_response(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::WrongPacketId { .. })));
+        assert_eq!(input, wire.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_truncated_is_incomplete() -> Result<(), LoginError> {
+        let packet = EncryptionResponse {
+            shared_secret: sample_shared_secret(),
+            verify_token: sample_verify_token(),
+        };
+        let mut wire = Vec::new();
+        encode_encryption_response(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_encryption_response(&mut input, TEST_MAX_FRAME)?,
+                super::LoginDecodeOutcome::Incomplete
+            );
+            assert_eq!(input, &wire[..split]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn encryption_response_trailing_bytes_are_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_byte_array(
+            &sample_shared_secret(),
+            MAX_PUBLIC_KEY_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        crate::primitives::encode_byte_array(
+            &sample_verify_token(),
+            MAX_VERIFY_TOKEN_LENGTH,
+            &mut body,
+        )
+        .map_err(LoginError::from)?;
+        body.push(0xff);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            ENCRYPTION_RESPONSE_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_encryption_response(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::TrailingBytes { .. })));
+        Ok(())
     }
 }
