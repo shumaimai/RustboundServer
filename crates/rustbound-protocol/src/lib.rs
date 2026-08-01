@@ -4,6 +4,7 @@ pub mod framing;
 pub mod handshake;
 pub mod primitives;
 pub mod state;
+pub mod status;
 
 /// The Minecraft Java Edition protocol version targeted by this workspace.
 pub const PROTOCOL_VERSION: u32 = 763;
