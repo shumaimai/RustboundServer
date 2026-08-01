@@ -164,6 +164,74 @@ pub fn encode_frame(
     Ok(())
 }
 
+/// Encodes a raw frame (length prefix + body, no packet ID) into `output`.
+///
+/// This is used by the compression layer where the packet ID is part of the
+/// (possibly compressed) body rather than a separate field.
+///
+/// On error, `output` is unchanged.
+pub fn encode_raw_frame(
+    body: &[u8],
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), FramingError> {
+    let maximum = effective_max_length(max_frame_length);
+    let frame_length = body.len();
+    if frame_length > maximum {
+        return Err(FramingError::FrameTooLong {
+            length: frame_length,
+            maximum,
+        });
+    }
+    let encoded_length =
+        i32::try_from(frame_length).map_err(|_| FramingError::FrameLengthOverflow)?;
+    encode_var_int(encoded_length, output);
+    output.extend_from_slice(body);
+    Ok(())
+}
+
+/// The result of attempting to decode a raw frame from incremental input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawDecodeOutcome<'a> {
+    /// One complete raw frame was consumed, borrowing the body from the input.
+    Complete(&'a [u8]),
+    /// More bytes are required and no input was consumed.
+    Incomplete,
+}
+
+/// Decodes a raw frame (length prefix + body, no packet ID) from `input`.
+///
+/// On [`RawDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_raw_frame<'a>(
+    input: &mut &'a [u8],
+    max_frame_length: usize,
+) -> Result<RawDecodeOutcome<'a>, FramingError> {
+    let source = *input;
+    let length = match decode_var_int(input) {
+        Ok(value) => value,
+        Err(CodecError::IncompleteInput) => {
+            *input = source;
+            return Ok(RawDecodeOutcome::Incomplete);
+        }
+        Err(error) => return Err(FramingError::LengthCodec(error)),
+    };
+
+    let length = usize::try_from(length).map_err(|_| FramingError::FrameLengthOverflow)?;
+    let maximum = effective_max_length(max_frame_length);
+    if length > maximum {
+        return Err(FramingError::FrameTooLong { length, maximum });
+    }
+
+    if input.len() < length {
+        *input = source;
+        return Ok(RawDecodeOutcome::Incomplete);
+    }
+
+    let (body, rest) = input.split_at(length);
+    *input = rest;
+    Ok(RawDecodeOutcome::Complete(body))
+}
+
 fn validated_frame_length(
     packet_id: i32,
     payload_length: usize,
