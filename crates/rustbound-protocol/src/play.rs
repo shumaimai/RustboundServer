@@ -17,6 +17,12 @@ use crate::state::ProtocolState;
 /// Packet ID for the clientbound Join Game packet.
 pub const JOIN_GAME_PACKET_ID: i32 = 0x01;
 
+/// Packet ID for the clientbound Keep Alive (Play) packet.
+pub const KEEP_ALIVE_CLIENTBOUND_PACKET_ID: i32 = 0x1e;
+
+/// Packet ID for the serverbound Keep Alive (Play) packet.
+pub const KEEP_ALIVE_SERVERBOUND_PACKET_ID: i32 = 0x14;
+
 /// Maximum number of dimension names in a Join Game packet.
 pub const MAX_DIMENSION_NAMES: usize = 256;
 
@@ -105,6 +111,10 @@ pub enum PlayDecodeOutcome {
 pub enum PlayPacket {
     /// Clientbound Join Game (Play `0x01`).
     JoinGame(JoinGame),
+    /// Clientbound Keep Alive (Play `0x1e`).
+    KeepAliveClientbound(KeepAlive),
+    /// Serverbound Keep Alive (Play `0x14`).
+    KeepAliveServerbound(KeepAlive),
 }
 
 /// The player's gamemode.
@@ -178,6 +188,16 @@ pub struct JoinGame {
     pub is_debug: bool,
     /// Whether the world is flat.
     pub is_flat: bool,
+}
+
+/// Keep Alive packet (clientbound Play `0x1e` and serverbound Play `0x14`).
+///
+/// The clientbound packet carries a payload that the client must echo back
+/// unchanged in the serverbound response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeepAlive {
+    /// The keep-alive payload (an arbitrary i64 that must be echoed).
+    pub payload: i64,
 }
 
 /// Encodes a Join Game packet (clientbound Play `0x01`).
@@ -395,6 +415,124 @@ pub fn decode_join_game(
     )))
 }
 
+/// Encodes a clientbound Keep Alive packet (Play `0x1e`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_keep_alive_clientbound(
+    packet: &KeepAlive,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_i64(packet.payload, &mut body);
+    encode_frame(
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a clientbound Keep Alive packet (Play `0x1e`).
+///
+/// On [`PlayDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_keep_alive_clientbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    decode_keep_alive(
+        input,
+        max_frame_length,
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
+        true,
+    )
+}
+
+/// Encodes a serverbound Keep Alive packet (Play `0x14`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_keep_alive_serverbound(
+    packet: &KeepAlive,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_i64(packet.payload, &mut body);
+    encode_frame(
+        KEEP_ALIVE_SERVERBOUND_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a serverbound Keep Alive packet (Play `0x14`).
+///
+/// On [`PlayDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_keep_alive_serverbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    decode_keep_alive(
+        input,
+        max_frame_length,
+        KEEP_ALIVE_SERVERBOUND_PACKET_ID,
+        false,
+    )
+}
+
+/// Internal helper for decoding Keep Alive packets.
+fn decode_keep_alive(
+    input: &mut &[u8],
+    max_frame_length: usize,
+    expected_id: i32,
+    clientbound: bool,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+
+    if frame.packet_id != expected_id {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: expected_id,
+        });
+    }
+
+    let mut body = frame.payload;
+    let payload = decode_i64(&mut body).map_err(|error| {
+        *input = source;
+        PlayError::from(error)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+
+    let packet = KeepAlive { payload };
+    let wrapped = if clientbound {
+        PlayPacket::KeepAliveClientbound(packet)
+    } else {
+        PlayPacket::KeepAliveServerbound(packet)
+    };
+    Ok(PlayDecodeOutcome::Complete(wrapped))
+}
+
 /// Verifies that the connection is in the Play state.
 pub fn ensure_play_state(state: ProtocolState) -> Result<(), PlayError> {
     match state {
@@ -406,8 +544,10 @@ pub fn ensure_play_state(state: ProtocolState) -> Result<(), PlayError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        GameMode, JOIN_GAME_PACKET_ID, JoinGame, PlayDecodeOutcome, PlayError, PlayPacket,
-        decode_join_game, encode_join_game, ensure_play_state,
+        GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive,
+        PlayDecodeOutcome, PlayError, PlayPacket, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, encode_join_game, encode_keep_alive_clientbound,
+        encode_keep_alive_serverbound, ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -611,5 +751,125 @@ mod tests {
         ] {
             assert!(ensure_play_state(state).is_err());
         }
+    }
+
+    #[test]
+    fn keep_alive_clientbound_round_trips() -> Result<(), PlayError> {
+        let packet = KeepAlive { payload: 12345 };
+        let mut wire = Vec::new();
+        encode_keep_alive_clientbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_keep_alive_clientbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::KeepAliveClientbound(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected KeepAliveClientbound"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_serverbound_round_trips() -> Result<(), PlayError> {
+        let packet = KeepAlive { payload: -1 };
+        let mut wire = Vec::new();
+        encode_keep_alive_serverbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_keep_alive_serverbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::KeepAliveServerbound(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected KeepAliveServerbound"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_boundary_payloads_round_trip() -> Result<(), PlayError> {
+        for payload in [0i64, -1, i64::MAX, i64::MIN] {
+            let packet = KeepAlive { payload };
+            let mut wire = Vec::new();
+            encode_keep_alive_clientbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+            let mut input = wire.as_slice();
+            match decode_keep_alive_clientbound(&mut input, TEST_MAX_FRAME)? {
+                PlayDecodeOutcome::Complete(PlayPacket::KeepAliveClientbound(decoded)) => {
+                    assert_eq!(decoded.payload, payload);
+                }
+                _ => panic!("expected KeepAliveClientbound"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_clientbound_wrong_packet_id_is_rejected() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_i64(42, &mut body);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_keep_alive_clientbound(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_truncated_is_incomplete() -> Result<(), PlayError> {
+        let packet = KeepAlive { payload: 42 };
+        let mut wire = Vec::new();
+        encode_keep_alive_clientbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_keep_alive_clientbound(&mut input, TEST_MAX_FRAME)?,
+                PlayDecodeOutcome::Incomplete
+            );
+            assert_eq!(input, &wire[..split]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_trailing_bytes_are_rejected() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_i64(42, &mut body);
+        body.push(0xff); // trailing byte
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_keep_alive_clientbound(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::TrailingBytes { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_serverbound_wrong_packet_id_is_rejected() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_i64(42, &mut body);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_keep_alive_serverbound(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
     }
 }
