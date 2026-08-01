@@ -195,11 +195,81 @@ pub fn decode_i64(input: &mut &[u8]) -> Result<i64, CodecError> {
     Ok(value)
 }
 
+/// A 128-bit UUID represented as two signed 64-bit halves.
+///
+/// In the Minecraft protocol, UUIDs are sent as two network-order `i64`
+/// values: the most-significant 64 bits followed by the least-significant
+/// 64 bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Uuid {
+    /// The most-significant 64 bits.
+    pub most_significant: i64,
+    /// The least-significant 64 bits.
+    pub least_significant: i64,
+}
+
+impl Uuid {
+    /// Creates a UUID from its two signed 64-bit halves.
+    pub const fn new(most_significant: i64, least_significant: i64) -> Self {
+        Self {
+            most_significant,
+            least_significant,
+        }
+    }
+
+    /// Creates a UUID from 16 big-endian bytes.
+    pub fn from_be_bytes(bytes: [u8; 16]) -> Self {
+        let most_significant = i64::from_be_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        let least_significant = i64::from_be_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]);
+        Self::new(most_significant, least_significant)
+    }
+
+    /// Converts the UUID to 16 big-endian bytes.
+    pub fn to_be_bytes(self) -> [u8; 16] {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&self.most_significant.to_be_bytes());
+        bytes[8..].copy_from_slice(&self.least_significant.to_be_bytes());
+        bytes
+    }
+}
+
+/// Appends a UUID as two network-order `i64` values.
+pub fn encode_uuid(value: Uuid, output: &mut Vec<u8>) {
+    encode_i64(value.most_significant, output);
+    encode_i64(value.least_significant, output);
+}
+
+/// Decodes a UUID (two network-order `i64` values) transactionally.
+pub fn decode_uuid(input: &mut &[u8]) -> Result<Uuid, CodecError> {
+    let source = *input;
+    let most_significant = decode_i64(input)?;
+    let least_significant = match decode_i64(input) {
+        Ok(value) => value,
+        Err(CodecError::IncompleteInput) => {
+            *input = source;
+            return Err(CodecError::IncompleteInput);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Uuid::new(most_significant, least_significant))
+}
+
+/// Maximum length of a Minecraft username in UTF-16 code units.
+pub const MAX_USERNAME_LENGTH: usize = 16;
+
+/// Maximum length of a chat component JSON string in UTF-16 code units.
+pub const MAX_CHAT_COMPONENT_LENGTH: usize = 32767;
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CodecError, decode_i64, decode_string, decode_u16, decode_var_int, decode_var_long,
-        encode_i64, encode_string, encode_u16, encode_var_int, encode_var_long,
+        CodecError, Uuid, decode_i64, decode_string, decode_u16, decode_uuid, decode_var_int,
+        decode_var_long, encode_i64, encode_string, encode_u16, encode_uuid, encode_var_int,
+        encode_var_long,
     };
 
     #[test]
@@ -465,6 +535,36 @@ mod tests {
         let encoded = &[0; 7][..];
         let mut input = encoded;
         assert_eq!(decode_i64(&mut input), Err(CodecError::IncompleteInput));
+        assert_eq!(input, encoded);
+    }
+
+    #[test]
+    fn uuid_round_trips_and_preserves_byte_order() -> Result<(), CodecError> {
+        let uuid = Uuid::new(0x0102_0304_0506_0708, -1);
+        let mut output = Vec::new();
+        encode_uuid(uuid, &mut output);
+        assert_eq!(output.len(), 16);
+        let mut input = output.as_slice();
+        assert_eq!(decode_uuid(&mut input), Ok(uuid));
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn uuid_from_and_to_be_bytes_are_inverses() {
+        let bytes = [
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0xff, 0xfe, 0xfd, 0xfc, 0xfb, 0xfa,
+            0xf9, 0xf8,
+        ];
+        let uuid = Uuid::from_be_bytes(bytes);
+        assert_eq!(uuid.to_be_bytes(), bytes);
+    }
+
+    #[test]
+    fn uuid_truncated_input_is_incomplete() {
+        let encoded = &[0; 15][..];
+        let mut input = encoded;
+        assert_eq!(decode_uuid(&mut input), Err(CodecError::IncompleteInput));
         assert_eq!(input, encoded);
     }
 }

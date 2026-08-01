@@ -2,6 +2,7 @@
 
 pub mod framing;
 pub mod handshake;
+pub mod login;
 pub mod primitives;
 pub mod state;
 pub mod status;
