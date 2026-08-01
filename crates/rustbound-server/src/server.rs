@@ -1,0 +1,232 @@
+//! Server orchestration: ties together the TCP listener, tick loop,
+//! and connection handler into a single runnable server.
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::config::ServerConfig;
+use crate::connection::{ConnectionConfig, default_status_response, handle_connection};
+use crate::listener::{ListenerConfig, ListenerHandle, start_listener};
+use crate::tick::{TickHandle, TickStartError, start_tick_loop};
+
+/// An error encountered while running the server.
+#[derive(Debug)]
+pub enum ServerError {
+    /// Failed to start the TCP listener.
+    Listener(crate::listener::ListenerError),
+    /// Failed to start the tick loop.
+    Tick(TickStartError),
+}
+
+impl fmt::Display for ServerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Listener(error) => write!(formatter, "listener error: {error}"),
+            Self::Tick(error) => write!(formatter, "tick error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ServerError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Listener(error) => Some(error),
+            Self::Tick(error) => Some(error),
+        }
+    }
+}
+
+impl From<crate::listener::ListenerError> for ServerError {
+    fn from(error: crate::listener::ListenerError) -> Self {
+        Self::Listener(error)
+    }
+}
+
+impl From<TickStartError> for ServerError {
+    fn from(error: TickStartError) -> Self {
+        Self::Tick(error)
+    }
+}
+
+/// A running Rustbound server.
+pub struct Server {
+    listener: ListenerHandle,
+    tick_handle: TickHandle,
+}
+
+impl Server {
+    /// Starts the server with the given configuration.
+    pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
+        let (tick_handle, _event_rx) = start_tick_loop()?;
+
+        let connection_config = Arc::new(ConnectionConfig {
+            status_response: default_status_response(),
+            online_mode: config.online_mode,
+            max_frame_length: 65536,
+        });
+
+        let listener_config = ListenerConfig {
+            host: config.host.clone(),
+            port: config.port,
+            connection_timeout: Duration::from_secs(config.connection_timeout_secs),
+            tcp_nodelay: true,
+        };
+
+        let conn_config = connection_config.clone();
+        let listener = start_listener(listener_config, move |stream, addr| {
+            let conn_config = conn_config.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = handle_connection(stream, &conn_config) {
+                    eprintln!("connection from {addr} ended with error: {e}");
+                }
+            });
+        })?;
+
+        Ok(Self {
+            listener,
+            tick_handle,
+        })
+    }
+
+    /// Returns the address the server is listening on.
+    pub fn bind_addr(&self) -> std::net::SocketAddr {
+        self.listener.bind_addr()
+    }
+
+    /// Shuts down the server gracefully.
+    pub fn shutdown(&mut self) {
+        self.listener.shutdown();
+        self.tick_handle.shutdown();
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Server;
+    use crate::config::ServerConfig;
+    use rustbound_conformance::{LoginProbeConfig, run_login_probe};
+    use rustbound_protocol::framing::encode_frame;
+    use rustbound_protocol::handshake::HandshakePacket;
+    use rustbound_protocol::primitives::Uuid;
+    use rustbound_protocol::state::NextState;
+    use rustbound_protocol::status::decode_status_response;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    #[test]
+    fn server_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+        assert!(addr.port() > 0);
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_accepts_tcp_connections() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let _stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+        std::thread::sleep(Duration::from_millis(50));
+
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_handles_status_exchange() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+        // Send handshake (next_state = Status)
+        let handshake = HandshakePacket {
+            protocol_version: 763,
+            server_address: "127.0.0.1".to_string(),
+            port: addr.port(),
+            next_state: NextState::Status,
+        };
+        let mut hs_wire = Vec::new();
+        rustbound_protocol::handshake::encode_handshake(&handshake, 65536, &mut hs_wire)?;
+        stream.write_all(&hs_wire)?;
+
+        // Send status request (empty frame with packet ID 0x00)
+        let mut req_wire = Vec::new();
+        encode_frame(0x00, &[], 65536, &mut req_wire)?;
+        stream.write_all(&req_wire)?;
+
+        // Read status response
+        let mut buf = vec![0u8; 4096];
+        let n = stream.read(&mut buf)?;
+        let mut input = &buf[..n];
+        let response = match decode_status_response(&mut input, 65536)? {
+            Some(r) => r,
+            None => panic!("expected status response"),
+        };
+        assert_eq!(response.version.protocol, 763);
+        assert_eq!(response.version.name, "1.20.1");
+
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_handles_login_conformance() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let probe_config = LoginProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "TestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(5),
+        };
+        let outcome = run_login_probe(&probe_config)?;
+        match outcome {
+            rustbound_conformance::LoginOutcome::Success { username, .. } => {
+                assert_eq!(username, "TestPlayer");
+            }
+            rustbound_conformance::LoginOutcome::Disconnect { reason } => {
+                panic!("server disconnected: {reason}");
+            }
+        }
+
+        server.shutdown();
+        Ok(())
+    }
+}

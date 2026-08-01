@@ -1,17 +1,28 @@
-use rustbound_server::listener::{ListenerConfig, start_listener};
+use rustbound_server::config::{load_config, parse_args};
+use rustbound_server::server::Server;
 
 fn main() {
-    let config = ListenerConfig::default();
-    let mut handle = match start_listener(config, |stream, addr| {
-        std::thread::spawn(move || {
-            eprintln!("accepted connection from {addr}");
-            // Connection handling will be implemented in Issue #40
-            drop(stream);
-        });
-    }) {
-        Ok(handle) => {
-            eprintln!("Rustbound server listening on {}", handle.bind_addr());
-            handle
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let server_args = match parse_args(&args) {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("failed to parse arguments: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let config = match load_config(&server_args) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("failed to load config: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut server = match Server::start(config) {
+        Ok(server) => {
+            eprintln!("Rustbound server listening on {}", server.bind_addr());
+            server
         }
         Err(error) => {
             eprintln!("failed to start server: {error}");
@@ -19,16 +30,10 @@ fn main() {
         }
     };
 
-    // Wait for Ctrl+C
-    let _ = ctrlc_handler();
-    handle.shutdown();
-    eprintln!("server shut down");
-}
-
-fn ctrlc_handler() -> std::io::Result<()> {
-    // Simple blocking wait - in a real server this would use a signal handler
-    // For now, just park the main thread; the listener handle's Drop will
-    // handle shutdown when the process exits.
+    // Wait for Ctrl+C (simplified - in production this would use a signal handler)
+    // For now, just park the main thread
     std::thread::park();
-    Ok(())
+
+    server.shutdown();
+    eprintln!("server shut down");
 }
