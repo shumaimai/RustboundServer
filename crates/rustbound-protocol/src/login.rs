@@ -2,8 +2,9 @@
 //!
 //! This module implements the Login Start (serverbound `0x00`), Login
 //! Disconnect (clientbound `0x00`), Encryption Request (clientbound `0x01`),
-//! Encryption Response (serverbound `0x01`), and Login Success (clientbound
-//! `0x02`) packets.
+//! Encryption Response (serverbound `0x01`), Login Success (clientbound
+//! `0x02`), Login Plugin Request (clientbound `0x04`), and Login Plugin
+//! Response (serverbound `0x02`) packets.
 
 use std::fmt;
 
@@ -29,6 +30,15 @@ pub const ENCRYPTION_RESPONSE_PACKET_ID: i32 = 0x01;
 
 /// Packet ID for the clientbound Login Success packet.
 pub const LOGIN_SUCCESS_PACKET_ID: i32 = 0x02;
+
+/// Packet ID for the serverbound Login Plugin Response packet.
+pub const LOGIN_PLUGIN_RESPONSE_PACKET_ID: i32 = 0x02;
+
+/// Packet ID for the clientbound Login Plugin Request packet.
+pub const LOGIN_PLUGIN_REQUEST_PACKET_ID: i32 = 0x04;
+
+/// Maximum length of a channel identifier string in UTF-16 units.
+pub const MAX_CHANNEL_IDENTIFIER_LENGTH: usize = 32767;
 
 /// Maximum number of property entries in a Login Success packet.
 pub const MAX_PROPERTIES_COUNT: usize = 1024;
@@ -126,6 +136,10 @@ pub enum LoginPacket {
     EncryptionResponse(EncryptionResponse),
     /// Clientbound Login Success (`0x02`).
     LoginSuccess(LoginSuccess),
+    /// Clientbound Login Plugin Request (`0x04`).
+    LoginPluginRequest(LoginPluginRequest),
+    /// Serverbound Login Plugin Response (`0x02`).
+    LoginPluginResponse(LoginPluginResponse),
 }
 
 /// Serverbound Login Start packet (Login `0x00`).
@@ -184,6 +198,28 @@ pub struct LoginSuccess {
     pub username: String,
     /// The player's properties (e.g. textures).
     pub properties: Vec<Property>,
+}
+
+/// Clientbound Login Plugin Request packet (Login `0x04`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginPluginRequest {
+    /// The message ID (used to match the response).
+    pub message_id: i32,
+    /// The channel identifier (e.g. "minecraft:brand").
+    pub channel: String,
+    /// The remaining data payload (may be empty).
+    pub data: Vec<u8>,
+}
+
+/// Serverbound Login Plugin Response packet (Login `0x02`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginPluginResponse {
+    /// The message ID (matching the request).
+    pub message_id: i32,
+    /// Whether the client understood the request.
+    pub understood: bool,
+    /// The remaining data payload (may be empty).
+    pub data: Vec<u8>,
 }
 
 /// Encodes a Login Start packet (serverbound Login `0x00`).
@@ -649,16 +685,171 @@ pub fn decode_login_success(
     )))
 }
 
+/// Encodes a Login Plugin Request packet (clientbound Login `0x04`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_login_plugin_request(
+    packet: &LoginPluginRequest,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), LoginError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.message_id, &mut body);
+    encode_string(&packet.channel, MAX_CHANNEL_IDENTIFIER_LENGTH, &mut body)
+        .map_err(LoginError::from)?;
+    body.extend_from_slice(&packet.data);
+
+    encode_frame(
+        LOGIN_PLUGIN_REQUEST_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(LoginError::from)?;
+    Ok(())
+}
+
+/// Decodes a Login Plugin Request packet (clientbound Login `0x04`).
+///
+/// On [`LoginDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_login_plugin_request(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<LoginDecodeOutcome, LoginError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(LoginDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(LoginError::from(error));
+        }
+    };
+
+    if frame.packet_id != LOGIN_PLUGIN_REQUEST_PACKET_ID {
+        *input = source;
+        return Err(LoginError::WrongPacketId {
+            received: frame.packet_id,
+            expected: LOGIN_PLUGIN_REQUEST_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let message_id = decode_var_int(&mut body).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let channel = decode_string(&mut body, MAX_CHANNEL_IDENTIFIER_LENGTH).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let data = body.to_vec();
+
+    Ok(LoginDecodeOutcome::Complete(
+        LoginPacket::LoginPluginRequest(LoginPluginRequest {
+            message_id,
+            channel: channel.to_string(),
+            data,
+        }),
+    ))
+}
+
+/// Encodes a Login Plugin Response packet (serverbound Login `0x02`).
+///
+/// On error, `output` is unchanged.
+pub fn encode_login_plugin_response(
+    packet: &LoginPluginResponse,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), LoginError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.message_id, &mut body);
+    body.push(if packet.understood { 0x01 } else { 0x00 });
+    body.extend_from_slice(&packet.data);
+
+    encode_frame(
+        LOGIN_PLUGIN_RESPONSE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(LoginError::from)?;
+    Ok(())
+}
+
+/// Decodes a Login Plugin Response packet (serverbound Login `0x02`).
+///
+/// On [`LoginDecodeOutcome::Incomplete`], the input is unchanged.
+pub fn decode_login_plugin_response(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<LoginDecodeOutcome, LoginError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(LoginDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(LoginError::from(error));
+        }
+    };
+
+    if frame.packet_id != LOGIN_PLUGIN_RESPONSE_PACKET_ID {
+        *input = source;
+        return Err(LoginError::WrongPacketId {
+            received: frame.packet_id,
+            expected: LOGIN_PLUGIN_RESPONSE_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let message_id = decode_var_int(&mut body).map_err(|error| {
+        *input = source;
+        LoginError::from(error)
+    })?;
+    let understood_byte = body.first().copied().ok_or_else(|| {
+        *input = source;
+        LoginError::Incomplete
+    })?;
+    let understood = match understood_byte {
+        0x00 => false,
+        0x01 => true,
+        _ => {
+            *input = source;
+            return Err(LoginError::Codec(CodecError::InvalidBoolean));
+        }
+    };
+    body = &body[1..];
+    let data = body.to_vec();
+
+    Ok(LoginDecodeOutcome::Complete(
+        LoginPacket::LoginPluginResponse(LoginPluginResponse {
+            message_id,
+            understood,
+            data,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ENCRYPTION_REQUEST_PACKET_ID, ENCRYPTION_RESPONSE_PACKET_ID, EncryptionRequest,
-        EncryptionResponse, LOGIN_START_PACKET_ID, LoginDirection, LoginDisconnect, LoginError,
-        LoginPacket, LoginStart, LoginSuccess, MAX_PUBLIC_KEY_LENGTH, MAX_SERVER_ID_LENGTH,
+        EncryptionResponse, LOGIN_PLUGIN_RESPONSE_PACKET_ID, LOGIN_START_PACKET_ID, LoginDirection,
+        LoginDisconnect, LoginError, LoginPacket, LoginPluginRequest, LoginPluginResponse,
+        LoginStart, LoginSuccess, MAX_PUBLIC_KEY_LENGTH, MAX_SERVER_ID_LENGTH,
         MAX_VERIFY_TOKEN_LENGTH, Property, decode_encryption_request, decode_encryption_response,
-        decode_login_disconnect, decode_login_packet, decode_login_start, decode_login_success,
+        decode_login_disconnect, decode_login_packet, decode_login_plugin_request,
+        decode_login_plugin_response, decode_login_start, decode_login_success,
         encode_encryption_request, encode_encryption_response, encode_login_disconnect,
-        encode_login_start, encode_login_success, ensure_login_state,
+        encode_login_plugin_request, encode_login_plugin_response, encode_login_start,
+        encode_login_success, ensure_login_state,
     };
     use crate::primitives::{SHARED_SECRET_LENGTH, Uuid};
     use crate::state::ProtocolState;
@@ -1365,6 +1556,186 @@ mod tests {
 
         let mut input = wire.as_slice();
         let result = decode_login_success(&mut input, TEST_MAX_FRAME);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_request_round_trips() -> Result<(), LoginError> {
+        let packet = LoginPluginRequest {
+            message_id: 42,
+            channel: "minecraft:brand".to_string(),
+            data: vec![0x01, 0x02, 0x03],
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_plugin_request(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginPluginRequest(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected LoginPluginRequest"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_request_empty_data_round_trips() -> Result<(), LoginError> {
+        let packet = LoginPluginRequest {
+            message_id: 0,
+            channel: "minecraft:brand".to_string(),
+            data: Vec::new(),
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_plugin_request(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginPluginRequest(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected LoginPluginRequest"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_request_wrong_packet_id_is_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(42, &mut body);
+        crate::primitives::encode_string("minecraft:brand", 32767, &mut body)
+            .map_err(LoginError::from)?;
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_login_plugin_request(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::WrongPacketId { .. })));
+        assert_eq!(input, wire.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_request_truncated_is_incomplete() -> Result<(), LoginError> {
+        let packet = LoginPluginRequest {
+            message_id: 42,
+            channel: "minecraft:brand".to_string(),
+            data: vec![0x01],
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_request(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_login_plugin_request(&mut input, TEST_MAX_FRAME)?,
+                super::LoginDecodeOutcome::Incomplete
+            );
+            assert_eq!(input, &wire[..split]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_response_round_trips_understood_true() -> Result<(), LoginError> {
+        let packet = LoginPluginResponse {
+            message_id: 42,
+            understood: true,
+            data: vec![0x04, 0x05],
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_response(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_plugin_response(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginPluginResponse(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected LoginPluginResponse"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_response_round_trips_understood_false() -> Result<(), LoginError> {
+        let packet = LoginPluginResponse {
+            message_id: 7,
+            understood: false,
+            data: Vec::new(),
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_response(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_plugin_response(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginPluginResponse(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected LoginPluginResponse"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_response_wrong_packet_id_is_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(42, &mut body);
+        body.push(0x01);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_login_plugin_response(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(LoginError::WrongPacketId { .. })));
+        assert_eq!(input, wire.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_response_truncated_is_incomplete() -> Result<(), LoginError> {
+        let packet = LoginPluginResponse {
+            message_id: 42,
+            understood: true,
+            data: vec![0x01],
+        };
+        let mut wire = Vec::new();
+        encode_login_plugin_response(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_login_plugin_response(&mut input, TEST_MAX_FRAME)?,
+                super::LoginDecodeOutcome::Incomplete
+            );
+            assert_eq!(input, &wire[..split]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_plugin_response_invalid_boolean_is_rejected() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(42, &mut body);
+        body.push(0x02); // invalid boolean
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            LOGIN_PLUGIN_RESPONSE_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_login_plugin_response(&mut input, TEST_MAX_FRAME);
         assert!(result.is_err());
         Ok(())
     }
