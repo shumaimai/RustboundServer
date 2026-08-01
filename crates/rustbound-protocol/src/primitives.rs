@@ -21,6 +21,8 @@ pub enum CodecError {
     StringTooLong,
     /// A String's bytes are not valid UTF-8.
     InvalidUtf8,
+    /// A boolean byte was not 0 or 1.
+    InvalidBoolean,
 }
 
 impl fmt::Display for CodecError {
@@ -32,6 +34,7 @@ impl fmt::Display for CodecError {
             Self::NegativeStringLength => "String has a negative byte length",
             Self::StringTooLong => "String exceeds its configured limit",
             Self::InvalidUtf8 => "String is not valid UTF-8",
+            Self::InvalidBoolean => "boolean byte was not 0 or 1",
         };
         formatter.write_str(message)
     }

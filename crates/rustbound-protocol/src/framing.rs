@@ -36,19 +36,6 @@ pub enum DecodeOutcome<'a> {
     Incomplete,
 }
 
-/// The result of attempting to decode one raw frame body from incremental input.
-///
-/// Unlike [`DecodeOutcome`], this does not extract a packet ID and returns the
-/// raw body bytes directly. It is used by the compression layer where the frame
-/// body has a different internal structure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RawDecodeOutcome<'a> {
-    /// One complete raw frame body was consumed.
-    Complete(&'a [u8]),
-    /// More bytes are required and no input was consumed.
-    Incomplete,
-}
-
 /// An error encountered while encoding or decoding a packet frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FramingError {
@@ -156,78 +143,6 @@ pub fn decode_frame<'a>(
 
     *input = &body_and_tail[frame_length..];
     Ok(DecodeOutcome::Complete(PacketFrame { packet_id, payload }))
-}
-
-/// Decodes one raw frame body (without extracting a packet ID) transactionally.
-///
-/// This is used by the compression layer where the frame body has a different
-/// internal structure (`[Data Length] [compressed data]` rather than
-/// `[Packet ID] [data]`). Returns the raw body bytes on success.
-pub fn decode_raw_frame<'a>(
-    input: &mut &'a [u8],
-    max_frame_length: usize,
-) -> Result<RawDecodeOutcome<'a>, FramingError> {
-    let source = *input;
-    let mut body_and_tail = source;
-    let encoded_length = match decode_var_int(&mut body_and_tail) {
-        Ok(length) => length,
-        Err(CodecError::IncompleteInput) => return Ok(RawDecodeOutcome::Incomplete),
-        Err(error) => return Err(FramingError::LengthCodec(error)),
-    };
-    let prefix_bytes = source.len() - body_and_tail.len();
-    if prefix_bytes > MAX_LENGTH_PREFIX_BYTES {
-        return Err(FramingError::LengthPrefixTooLong {
-            length: prefix_bytes,
-        });
-    }
-
-    let frame_length =
-        usize::try_from(encoded_length).map_err(|_| FramingError::NegativeFrameLength)?;
-
-    if frame_length == 0 {
-        return Err(FramingError::ZeroFrameLength);
-    }
-    let maximum = effective_max_length(max_frame_length);
-    if frame_length > maximum {
-        return Err(FramingError::FrameTooLong {
-            length: frame_length,
-            maximum,
-        });
-    }
-
-    let Some(body) = body_and_tail.get(..frame_length) else {
-        return Ok(RawDecodeOutcome::Incomplete);
-    };
-
-    *input = &body_and_tail[frame_length..];
-    Ok(RawDecodeOutcome::Complete(body))
-}
-
-/// Appends one raw frame (length prefix + body, no packet ID) after validation.
-///
-/// This is used by the compression layer. On error, `output` is unchanged.
-pub fn encode_raw_frame(
-    body: &[u8],
-    max_frame_length: usize,
-    output: &mut Vec<u8>,
-) -> Result<(), FramingError> {
-    let maximum = effective_max_length(max_frame_length);
-    if body.is_empty() {
-        return Err(FramingError::ZeroFrameLength);
-    }
-    let frame_length = body.len();
-    if frame_length > maximum {
-        return Err(FramingError::FrameTooLong {
-            length: frame_length,
-            maximum,
-        });
-    }
-    let frame_length_i32 =
-        i32::try_from(frame_length).map_err(|_| FramingError::FrameLengthOverflow)?;
-
-    encode_var_int(frame_length_i32, output);
-    output.extend_from_slice(body);
-    Ok(())
 }
 
 /// Appends one uncompressed packet frame after validating its complete length.
