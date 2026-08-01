@@ -8,9 +8,9 @@ use std::fmt;
 
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
-    CodecError, decode_bool, decode_byte_array, decode_i8, decode_i32, decode_i64, decode_string,
-    decode_u8, decode_var_int, encode_bool, encode_byte_array, encode_i8, encode_i32, encode_i64,
-    encode_string, encode_u8, encode_var_int,
+    CodecError, MAX_CHAT_COMPONENT_LENGTH, decode_bool, decode_byte_array, decode_i8, decode_i32,
+    decode_i64, decode_string, decode_u8, decode_var_int, encode_bool, encode_byte_array,
+    encode_i8, encode_i32, encode_i64, encode_string, encode_u8, encode_var_int,
 };
 use crate::state::ProtocolState;
 
@@ -37,6 +37,15 @@ pub const SYNCHRONIZE_PLAYER_POSITION_PACKET_ID: i32 = 0x3c;
 
 /// Packet ID for the clientbound Disconnect (Play) packet.
 pub const DISCONNECT_PLAY_PACKET_ID: i32 = 0x1a;
+
+/// Packet ID for the clientbound Chunk Data and Update Light packet.
+pub const CHUNK_DATA_PACKET_ID: i32 = 0x24;
+
+/// Maximum length of a chunk data blob.
+pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
+
+/// Maximum number of block entities in a chunk.
+pub const MAX_BLOCK_ENTITIES: usize = 1024;
 
 /// Maximum number of dimension names in a Join Game packet.
 pub const MAX_DIMENSION_NAMES: usize = 256;
@@ -138,6 +147,10 @@ pub enum PlayPacket {
     SetPlayerRotation(SetPlayerRotation),
     /// Clientbound Synchronize Player Position (Play `0x3c`).
     SynchronizePlayerPosition(SynchronizePlayerPosition),
+    /// Clientbound Disconnect (Play `0x1a`).
+    DisconnectPlay(DisconnectPlay),
+    /// Clientbound Chunk Data and Update Light (Play `0x24`).
+    ChunkData(ChunkData),
 }
 
 /// The player's gamemode.
@@ -281,6 +294,32 @@ pub struct SynchronizePlayerPosition {
     pub flags: i8,
     /// The teleport ID (must be echoed back in Confirm Teleportation).
     pub teleport_id: i32,
+}
+
+/// Clientbound Disconnect (Play) packet (`0x1a`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisconnectPlay {
+    /// The disconnect reason (JSON chat component string).
+    pub reason: String,
+}
+
+/// Clientbound Chunk Data and Update Light packet (Play `0x24`).
+///
+/// For the initial implementation, the chunk sections and light data are
+/// handled as opaque byte arrays. The heightmaps and block entities are
+/// also opaque NBT blobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkData {
+    /// The chunk X coordinate.
+    pub chunk_x: i32,
+    /// The chunk Z coordinate.
+    pub chunk_z: i32,
+    /// The heightmaps NBT blob (opaque bytes).
+    pub heightmaps: Vec<u8>,
+    /// The chunk sections and biomes data (opaque bytes).
+    pub data: Vec<u8>,
+    /// Block entity NBT blobs (opaque bytes, concatenated).
+    pub block_entities: Vec<Vec<u8>>,
 }
 
 /// Encodes a Join Game packet (clientbound Play `0x01`).
@@ -979,18 +1018,209 @@ pub fn decode_synchronize_player_position(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Disconnect (Play) (clientbound Play 0x1a)
+// ---------------------------------------------------------------------------
+
+/// Encodes a Disconnect (Play) packet (clientbound Play `0x1a`).
+pub fn encode_disconnect_play(
+    packet: &DisconnectPlay,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_string(&packet.reason, MAX_CHAT_COMPONENT_LENGTH, &mut body).map_err(PlayError::from)?;
+    encode_frame(DISCONNECT_PLAY_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Disconnect (Play) packet (clientbound Play `0x1a`).
+pub fn decode_disconnect_play(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+
+    if frame.packet_id != DISCONNECT_PLAY_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: DISCONNECT_PLAY_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let reason = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::DisconnectPlay(
+        DisconnectPlay {
+            reason: reason.to_string(),
+        },
+    )))
+}
+
+// ---------------------------------------------------------------------------
+// Chunk Data and Update Light (clientbound Play 0x24)
+// ---------------------------------------------------------------------------
+
+/// Encodes a Chunk Data and Update Light packet (clientbound Play `0x24`).
+///
+/// For the initial implementation, chunk sections, heightmaps, and block
+/// entities are encoded as opaque byte arrays.
+pub fn encode_chunk_data(
+    packet: &ChunkData,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_i32(packet.chunk_x, &mut body);
+    encode_i32(packet.chunk_z, &mut body);
+
+    // Heightmaps (NBT blob)
+    encode_byte_array(&packet.heightmaps, MAX_CHUNK_DATA_SIZE, &mut body)
+        .map_err(PlayError::from)?;
+
+    // Chunk sections and biomes (opaque)
+    encode_byte_array(&packet.data, MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
+
+    // Block entities
+    let count = i32::try_from(packet.block_entities.len())
+        .map_err(|_| PlayError::Codec(CodecError::VarIntTooLong))?;
+    if packet.block_entities.len() > MAX_BLOCK_ENTITIES {
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
+    encode_var_int(count, &mut body);
+    for be in &packet.block_entities {
+        encode_byte_array(be, MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
+    }
+
+    // Light data (opaque, empty for now)
+    encode_byte_array(&[], MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
+
+    encode_frame(CHUNK_DATA_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Chunk Data and Update Light packet (clientbound Play `0x24`).
+pub fn decode_chunk_data(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+
+    if frame.packet_id != CHUNK_DATA_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CHUNK_DATA_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let chunk_x = decode_i32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let chunk_z = decode_i32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let heightmaps = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let data = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+
+    let be_count = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let be_count = usize::try_from(be_count).map_err(|_| {
+        *input = source;
+        PlayError::Codec(CodecError::VarIntTooLong)
+    })?;
+    if be_count > MAX_BLOCK_ENTITIES {
+        *input = source;
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
+    let mut block_entities = Vec::with_capacity(be_count);
+    for _ in 0..be_count {
+        let be = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        block_entities.push(be.to_vec());
+    }
+
+    // Light data (opaque, skip for now)
+    let _light = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::ChunkData(
+        ChunkData {
+            chunk_x,
+            chunk_z,
+            heightmaps: heightmaps.to_vec(),
+            data: data.to_vec(),
+            block_entities,
+        },
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive,
-        PlayDecodeOutcome, PlayError, PlayPacket, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SynchronizePlayerPosition, decode_join_game,
+        ChunkData, DisconnectPlay, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
+        SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
+        SynchronizePlayerPosition, decode_chunk_data, decode_disconnect_play, decode_join_game,
         decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
-        decode_synchronize_player_position, encode_join_game, encode_keep_alive_clientbound,
-        encode_keep_alive_serverbound, encode_set_player_position,
-        encode_set_player_position_and_rotation, encode_set_player_rotation,
-        encode_synchronize_player_position, ensure_play_state,
+        decode_synchronize_player_position, encode_chunk_data, encode_disconnect_play,
+        encode_join_game, encode_keep_alive_clientbound, encode_keep_alive_serverbound,
+        encode_set_player_position, encode_set_player_position_and_rotation,
+        encode_set_player_rotation, encode_synchronize_player_position, ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -1468,6 +1698,147 @@ mod tests {
                 assert_eq!(decoded, packet);
             }
             _ => panic!("expected SynchronizePlayerPosition"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn disconnect_play_round_trips() -> Result<(), PlayError> {
+        let packet = DisconnectPlay {
+            reason: r#"{"text":"Kicked!"}"#.to_string(),
+        };
+        let mut wire = Vec::new();
+        encode_disconnect_play(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_disconnect_play(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::DisconnectPlay(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected DisconnectPlay"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn disconnect_play_wrong_packet_id_is_rejected() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_string(r#"{"text":"test"}"#, 32767, &mut body)
+            .map_err(PlayError::from)?;
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_disconnect_play(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn disconnect_play_truncated_is_incomplete() -> Result<(), PlayError> {
+        let packet = DisconnectPlay {
+            reason: "test".to_string(),
+        };
+        let mut wire = Vec::new();
+        encode_disconnect_play(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_disconnect_play(&mut input, TEST_MAX_FRAME)?,
+                PlayDecodeOutcome::Incomplete
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_data_empty_round_trips() -> Result<(), PlayError> {
+        let packet = ChunkData {
+            chunk_x: 0,
+            chunk_z: 0,
+            heightmaps: Vec::new(),
+            data: Vec::new(),
+            block_entities: Vec::new(),
+        };
+        let mut wire = Vec::new();
+        encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_chunk_data(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ChunkData(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected ChunkData"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_data_with_block_entities_round_trips() -> Result<(), PlayError> {
+        let packet = ChunkData {
+            chunk_x: -10,
+            chunk_z: 20,
+            heightmaps: vec![0x0a, 0x00, 0x00],
+            data: vec![0x01, 0x02, 0x03, 0x04],
+            block_entities: vec![vec![0x0a, 0x01], vec![0x0a, 0x02]],
+        };
+        let mut wire = Vec::new();
+        encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        let mut input = wire.as_slice();
+        match decode_chunk_data(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ChunkData(decoded)) => {
+                assert_eq!(decoded, packet);
+            }
+            _ => panic!("expected ChunkData"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_data_wrong_packet_id_is_rejected() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_i32(0, &mut body);
+        crate::primitives::encode_i32(0, &mut body);
+        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        crate::primitives::encode_var_int(0, &mut body);
+        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_chunk_data(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn chunk_data_truncated_is_incomplete() -> Result<(), PlayError> {
+        let packet = ChunkData {
+            chunk_x: 0,
+            chunk_z: 0,
+            heightmaps: vec![0x0a],
+            data: vec![0x01],
+            block_entities: Vec::new(),
+        };
+        let mut wire = Vec::new();
+        encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_chunk_data(&mut input, TEST_MAX_FRAME)?,
+                PlayDecodeOutcome::Incomplete
+            );
         }
         Ok(())
     }
