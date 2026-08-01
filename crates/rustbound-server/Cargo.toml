@@ -1,0 +1,12 @@
+[package]
+name = "rustbound-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rustbound-protocol = { path = "../rustbound-protocol" }
+
+[lints]
+workspace = true

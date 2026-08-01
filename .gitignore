@@ -1,0 +1,51 @@
+# Local clean-room reference installation (never commit)
+/素体データ/
+
+# Minecraft / Forge binaries, downloads, and mappings
+*.jar
+*.lzma
+*.srg
+*.tsrg
+*.tiny
+*.mapping
+/mappings/
+/libraries/
+/versions/
+/downloads/
+
+# Generated server state and worlds
+/world*/
+/logs/
+/crash-reports/
+/run/
+/eula.txt
+/server.properties
+/banned-*.json
+/ops.json
+/whitelist.json
+/usercache.json
+*.log
+*.pid
+
+# Secrets and local credentials
+.env
+.env.*
+!.env.example
+/secrets/
+/credentials*
+*.pem
+*.key
+
+# Rust build output
+/target/
+
+# IDE, editor, and OS metadata
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
