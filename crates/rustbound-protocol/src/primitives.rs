@@ -264,12 +264,64 @@ pub const MAX_USERNAME_LENGTH: usize = 16;
 /// Maximum length of a chat component JSON string in UTF-16 code units.
 pub const MAX_CHAT_COMPONENT_LENGTH: usize = 32767;
 
+/// Maximum length of a server ID string in UTF-16 units.
+pub const MAX_SERVER_ID_LENGTH: usize = 20;
+
+/// Maximum length of a public key byte array.
+pub const MAX_PUBLIC_KEY_LENGTH: usize = 512;
+
+/// Maximum length of a verify token byte array.
+pub const MAX_VERIFY_TOKEN_LENGTH: usize = 16;
+
+/// Expected length of an AES-128 shared secret.
+pub const SHARED_SECRET_LENGTH: usize = 16;
+
+/// Appends a byte array prefixed by its length as a VarInt.
+///
+/// The length is bounded by `max_length`. On error, `output` is unchanged.
+pub fn encode_byte_array(
+    value: &[u8],
+    max_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), CodecError> {
+    if value.len() > max_length {
+        return Err(CodecError::StringTooLong);
+    }
+    let length = i32::try_from(value.len()).map_err(|_| CodecError::VarIntTooLong)?;
+    encode_var_int(length, output);
+    output.extend_from_slice(value);
+    Ok(())
+}
+
+/// Decodes a length-prefixed byte array transactionally.
+///
+/// The length is bounded by `max_length`. On incomplete input, the input
+/// is unchanged.
+pub fn decode_byte_array<'a>(
+    input: &mut &'a [u8],
+    max_length: usize,
+) -> Result<&'a [u8], CodecError> {
+    let source = *input;
+    let length = decode_var_int(input)?;
+    let length = usize::try_from(length).map_err(|_| CodecError::VarIntTooLong)?;
+    if length > max_length {
+        *input = source;
+        return Err(CodecError::StringTooLong);
+    }
+    let Some(bytes) = input.get(..length) else {
+        *input = source;
+        return Err(CodecError::IncompleteInput);
+    };
+    *input = &input[length..];
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CodecError, Uuid, decode_i64, decode_string, decode_u16, decode_uuid, decode_var_int,
-        decode_var_long, encode_i64, encode_string, encode_u16, encode_uuid, encode_var_int,
-        encode_var_long,
+        CodecError, Uuid, decode_byte_array, decode_i64, decode_string, decode_u16, decode_uuid,
+        decode_var_int, decode_var_long, encode_byte_array, encode_i64, encode_string, encode_u16,
+        encode_uuid, encode_var_int, encode_var_long,
     };
 
     #[test]
@@ -566,5 +618,50 @@ mod tests {
         let mut input = encoded;
         assert_eq!(decode_uuid(&mut input), Err(CodecError::IncompleteInput));
         assert_eq!(input, encoded);
+    }
+
+    #[test]
+    fn byte_array_round_trips() -> Result<(), CodecError> {
+        let data = [0x01, 0x02, 0x03, 0x04];
+        let mut output = Vec::new();
+        encode_byte_array(&data, 16, &mut output)?;
+        let mut input = output.as_slice();
+        assert_eq!(decode_byte_array(&mut input, 16)?, &data);
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn byte_array_empty_round_trips() -> Result<(), CodecError> {
+        let data: [u8; 0] = [];
+        let mut output = Vec::new();
+        encode_byte_array(&data, 16, &mut output)?;
+        let mut input = output.as_slice();
+        assert_eq!(decode_byte_array(&mut input, 16)?, &data);
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn byte_array_oversized_is_rejected() {
+        let data = [0xff; 17];
+        let result = encode_byte_array(&data, 16, &mut Vec::new());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn byte_array_truncated_is_incomplete() -> Result<(), CodecError> {
+        let data = [0x01, 0x02, 0x03, 0x04];
+        let mut output = Vec::new();
+        encode_byte_array(&data, 16, &mut output)?;
+        for split in 0..output.len() {
+            let mut input = &output[..split];
+            assert_eq!(
+                decode_byte_array(&mut input, 16),
+                Err(CodecError::IncompleteInput)
+            );
+            assert_eq!(input, &output[..split]);
+        }
+        Ok(())
     }
 }
