@@ -1,5 +1,6 @@
 //! Protocol support for the targeted Minecraft Java Edition release.
 
+pub mod framing;
 pub mod primitives;
 
 /// The Minecraft Java Edition protocol version targeted by this workspace.
