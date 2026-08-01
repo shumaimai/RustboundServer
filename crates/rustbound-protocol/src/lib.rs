@@ -6,6 +6,7 @@ pub mod handshake;
 pub mod login;
 pub mod login_state_machine;
 pub mod play;
+pub mod play_state_machine;
 pub mod primitives;
 pub mod state;
 pub mod status;

@@ -10,9 +10,11 @@
 pub mod client;
 pub mod diff;
 pub mod login_client;
+pub mod play_client;
 pub mod snapshot;
 
 pub use client::{StatusClient, StatusClientError};
 pub use diff::{StatusDiff, StatusDiffEntry, StatusDiffResult};
 pub use login_client::{LoginClientError, LoginOutcome, LoginProbeConfig, run_login_probe};
+pub use play_client::{PlayClientError, PlayProbeConfig, PlaySnapshot, run_play_probe};
 pub use snapshot::{NormalizedSnapshot, StatusSnapshot, normalize};
