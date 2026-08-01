@@ -1,4 +1,6 @@
-//! Protocol constants for the targeted Minecraft Java Edition release.
+//! Protocol support for the targeted Minecraft Java Edition release.
+
+pub mod primitives;
 
 /// The Minecraft Java Edition protocol version targeted by this workspace.
 pub const PROTOCOL_VERSION: u32 = 763;
