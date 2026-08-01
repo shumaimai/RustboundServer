@@ -9,6 +9,7 @@ license.workspace = true
 rustbound-protocol = { path = "../rustbound-protocol" }
 
 [dev-dependencies]
+rustbound-conformance = { path = "../rustbound-conformance" }
 rustbound-server = { path = "." }
 
 [lib]
