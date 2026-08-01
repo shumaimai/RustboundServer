@@ -8,5 +8,12 @@ license.workspace = true
 [dependencies]
 rustbound-protocol = { path = "../rustbound-protocol" }
 
+[dev-dependencies]
+rustbound-server = { path = "." }
+
+[lib]
+name = "rustbound_server"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
