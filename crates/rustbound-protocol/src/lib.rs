@@ -1,5 +1,6 @@
 //! Protocol support for the targeted Minecraft Java Edition release.
 
+pub mod compression;
 pub mod framing;
 pub mod handshake;
 pub mod primitives;
