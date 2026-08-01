@@ -1,0 +1,21 @@
+[package]
+name = "rustbound-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustbound-protocol = { path = "../rustbound-protocol" }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "test-util"] }

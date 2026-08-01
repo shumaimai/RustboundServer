@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/rustbound-conformance",
     "crates/rustbound-protocol",
     "crates/rustbound-server",
 ]
