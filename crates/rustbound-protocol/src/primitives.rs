@@ -198,6 +198,96 @@ pub fn decode_i64(input: &mut &[u8]) -> Result<i64, CodecError> {
     Ok(value)
 }
 
+/// Appends a 32-bit floating-point value in network (big-endian) byte order.
+pub fn encode_f32(value: f32, output: &mut Vec<u8>) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Decodes a 32-bit network-order floating-point value transactionally.
+pub fn decode_f32(input: &mut &[u8]) -> Result<f32, CodecError> {
+    let source = *input;
+    let bytes = source.get(..4).ok_or(CodecError::IncompleteInput)?;
+    let value = f32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    *input = &source[4..];
+    Ok(value)
+}
+
+/// Appends a 64-bit floating-point value in network (big-endian) byte order.
+pub fn encode_f64(value: f64, output: &mut Vec<u8>) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Decodes a 64-bit network-order floating-point value transactionally.
+pub fn decode_f64(input: &mut &[u8]) -> Result<f64, CodecError> {
+    let source = *input;
+    let bytes = source.get(..8).ok_or(CodecError::IncompleteInput)?;
+    let value = f64::from_be_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    *input = &source[8..];
+    Ok(value)
+}
+
+/// Appends a boolean as a single byte (0x00 = false, 0x01 = true).
+pub fn encode_bool(value: bool, output: &mut Vec<u8>) {
+    output.push(if value { 0x01 } else { 0x00 });
+}
+
+/// Decodes a boolean byte transactionally.
+///
+/// Returns an error if the byte is not 0x00 or 0x01.
+pub fn decode_bool(input: &mut &[u8]) -> Result<bool, CodecError> {
+    let source = *input;
+    let byte = source.first().copied().ok_or(CodecError::IncompleteInput)?;
+    let value = match byte {
+        0x00 => false,
+        0x01 => true,
+        _ => return Err(CodecError::InvalidBoolean),
+    };
+    *input = &source[1..];
+    Ok(value)
+}
+
+/// Appends a signed 8-bit integer.
+pub fn encode_i8(value: i8, output: &mut Vec<u8>) {
+    output.push(value as u8);
+}
+
+/// Decodes a signed 8-bit integer transactionally.
+pub fn decode_i8(input: &mut &[u8]) -> Result<i8, CodecError> {
+    let source = *input;
+    let byte = source.first().copied().ok_or(CodecError::IncompleteInput)?;
+    *input = &source[1..];
+    Ok(byte as i8)
+}
+
+/// Appends an unsigned 8-bit integer.
+pub fn encode_u8(value: u8, output: &mut Vec<u8>) {
+    output.push(value);
+}
+
+/// Decodes an unsigned 8-bit integer transactionally.
+pub fn decode_u8(input: &mut &[u8]) -> Result<u8, CodecError> {
+    let source = *input;
+    let byte = source.first().copied().ok_or(CodecError::IncompleteInput)?;
+    *input = &source[1..];
+    Ok(byte)
+}
+
+/// Appends a signed 32-bit integer in network (big-endian) byte order.
+pub fn encode_i32(value: i32, output: &mut Vec<u8>) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
+/// Decodes a signed network-order 32-bit integer transactionally.
+pub fn decode_i32(input: &mut &[u8]) -> Result<i32, CodecError> {
+    let source = *input;
+    let bytes = source.get(..4).ok_or(CodecError::IncompleteInput)?;
+    let value = i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    *input = &source[4..];
+    Ok(value)
+}
+
 /// A 128-bit UUID represented as two signed 64-bit halves.
 ///
 /// In the Minecraft protocol, UUIDs are sent as two network-order `i64`
