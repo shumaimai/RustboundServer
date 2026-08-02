@@ -25,12 +25,12 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | Phase C: World Visibility | 3 | 1 | — | 完了 |
 | Phase D: Multiplayer | 3 | 1 | — | 完了 |
 | Phase E: Polish | 5 | 3 | — | 完了 |
-| Phase F–I + Mod API design | 17 | — | — | F+G **完了** / H 着手 (#113) |
+| Phase F–I + Mod API design | — | — | — | F–H **完了** / I **一部完了** (#122/#131/#123/#124–#126) |
 | **合計 (A–E まで)** | **46** | **24** | **~298** | **A–E 完了** |
 
-テスト: conformance 28 + protocol 219 + server 52（うち play conformance に既知失敗あり）+ 1 ignored。
+テスト: conformance 28 + protocol 219 + server（persist/registry 追加）+ 1 ignored。
 `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` はクリーン想定。
-詳細な次工程は GitHub Issue **#113**（Phase H）。全体マップは #102。
+残り Phase I は GitHub Issue **#134**（#127–#130, #132–#133）。全体マップは #102 / #134。
 
 ---
 
@@ -257,31 +257,31 @@ c587232 Establish clean-room Rust workspace.
 
 ---
 
-## 既知のギャップ（G 完了後）
+## 既知のギャップ（I 一部完了後）
 
-実装済みだがゲームとしては未達な点:
-
-- インベントリ / ホットバーなし（Creative 設置は固定ブロック）
-- 体力・空腹・死亡・リスポーンなし
-- チャットなし
-- Keep Alive 応答を見てもタイムアウト切断しない
-- オフライン UUID が安定導出されていない（ゼロやクライアント任せになりうる）
-- ワールド／プレイヤー永続化なし
-- online mode 未実装（#60）
-- チャンク unload パケットはストリーミングの成長側が主で、遠方 unload の完全性は要確認
+- ~~Creative 設置が石固定~~ — **#123 Done**（ホットバー所持アイテム）
+- ~~`PlayerHandle` / peer gamemode 0 固定~~ — **#122 Done**
+- ~~ブロック／プレイヤー永続化・autosave~~ — **#124–#126 Done**（leave 時も保存）
+- ~~最小 block/item ID registry~~ — **#131 Done**
+- チャンク Unload 未送信 — #127
+- リスポーン後のチャンク／インベントリ再同期不足 — #128
+- 食料消費・戦闘死なし — #129 / #130
+- Survival dig progress — #133
+- Tick-owned mutation façade — #132
+- online mode 未実装 — #60
 
 ## 今後の展望
 
-Phases F–G 完了。次は **Issue #113（Phase H）**。
+Phases A–H 完了。Phase I の正しさ＋永続化コアは本ブランチで完了。残りは **Issue #134**。
 
-1. **Phase H — ゲームループ** — #99 → #98 → #97 → #95 → #96（推奨順）
-2. **Phase I — 永続化** — #100
-3. **Online mode** — #60
-4. **Long-term — 薄い Rust Mod API（方針 A）** — #101
-
-全体チェックリスト: #102
+1. ~~正しさ — #122 / #131 / #123~~
+2. ~~永続化 — #124 / #125 / #126~~
+3. **ストリーム／リスポーン** — #127 unload → #128 respawn re-sync
+4. **Survival 感** — #129 food、#130 death、#133 dig progress
+5. **Online mode** — #60
+6. **Mod API 準備** — #132 façade → #101 設計（方針 A）
 
 ---
 
-*最終更新: Phase G 完了後 / Phase H 計画*
-*テスト数: ~337（workspace 緑）*
+*最終更新: Phase I コア（gamemode / registry / held place / persist / autosave）*
+*テスト数: workspace 緑想定*

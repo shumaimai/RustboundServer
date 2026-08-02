@@ -6,22 +6,22 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-**Pre-alpha, offline multiplayer mini-server.** Phases A–H are on `main` (or this PR): join Play, chunks/streaming, dig/place, inventory, chat, Keep Alive timeout, offline UUID, **health / void death / respawn**. Next: persistence (Phase I) and online mode.
+**Pre-alpha, offline multiplayer mini-server.** Phases A–H done; this PR lands early Phase I: gamemode wiring, item registry, held-item Creative place, block/player persistence, autosave. Remaining: unload, respawn re-sync, food/combat, Mod API prereqs ([#134](https://github.com/shumaimai/RustboundServer/issues/134)).
 
 | Layer | Status |
 |-------|--------|
 | Protocol + Login/Play + sessions/tick | Implemented |
-| Chunks, light, streaming, overrides | Working |
-| Dig / place (Creative) + inventory/hotbar | Working |
-| Multiplayer motion + chat | Working |
+| Chunks, light, streaming, overrides | Working (unload packet still incomplete — #127) |
+| Dig / place (Creative) + held-item place | Working |
+| Multiplayer motion + chat + gamemode broadcast | Working |
 | Keep Alive timeout / offline UUID | Working |
-| Health / void death / respawn | Working (minimal; no combat yet) |
-| Persistence | **Next** ([#100](https://github.com/shumaimai/RustboundServer/issues/100)) |
+| Health / void death / respawn | Working (minimal) |
+| Persistence (overrides + players + autosave) | **In this PR** (#124–#126) |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Long-term ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
 
-See [PROGRESS.md](PROGRESS.md). **Next:** [#100](https://github.com/shumaimai/RustboundServer/issues/100) (persistence) · tracking [#102](https://github.com/shumaimai/RustboundServer/issues/102).
+See [PROGRESS.md](PROGRESS.md). **Tracking:** [#134](https://github.com/shumaimai/RustboundServer/issues/134).
 
 ## Workspace
 
@@ -60,11 +60,11 @@ Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ct
 |-------|--------|--------|
 | M1–M4 + A–E | Foundations → mini Play | **Done** |
 | **F** | Play hardening (#86–#90) | **Done** |
-| **G** | Motion, chunk streaming, overrides, config (#91–#94) | **Done** |
-| **H** | Inventory, vitals, chat, KA timeout, offline UUID (#95–#99) | **In progress** — #99/#98/#97/#95 in this merge; **#96 remaining** · [#113](https://github.com/shumaimai/RustboundServer/issues/113) |
-| **I** | Persistence (#100) | Queued |
+| **G** | Motion, streaming, overrides, config (#91–#94) | **Done** |
+| **H** | Inventory, chat, KA timeout, UUID, vitals (#95–#99) | **Done** |
+| **I** | Persistence + polish (#122–#133) | **Partial** — #122/#131/#123/#124–#126 in this PR; see [#134](https://github.com/shumaimai/RustboundServer/issues/134) |
 | Later | Online mode (#60) | Queued |
-| Long-term | Thin Rust Mod API (#101); hand-port license-clean mods | After H–I |
+| Long-term | Thin Rust Mod API (#101, #131–#132) | After I |
 
 **Not a goal:** drop-in Java Forge mod compatibility or an automatic Forge→Rust compiler.
 

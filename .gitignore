@@ -49,3 +49,7 @@
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Nested runtime world dirs (e.g. crate cwd)
+**/world/
+**/test-world*/

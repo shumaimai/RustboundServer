@@ -238,6 +238,8 @@ pub enum TickMessage {
         uuid: Uuid,
         /// The player's username.
         username: String,
+        /// The player's gamemode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator).
+        gamemode: u8,
         /// The server view distance (in chunks).
         view_distance: i32,
         /// Channel for sending events back to this player's session.
@@ -271,6 +273,17 @@ pub enum TickMessage {
         position: (i32, i32, i32),
         /// The new block state ID (0 = air).
         block_state: i32,
+    },
+    /// A player attempted to place a block (UseItemOn).
+    /// The tick loop looks up the held hotbar item and places the
+    /// corresponding block from the registry.
+    PlaceBlock {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The position of the block being placed against.
+        position: (i32, i32, i32),
+        /// The face being placed on (0=bottom, 1=top, 2=north, 3=south, 4=west, 5=east).
+        face: i32,
     },
     /// A client sent its view distance via Client Information.
     SetClientViewDistance {
@@ -396,8 +409,12 @@ impl std::error::Error for TickStartError {
 ///
 /// Returns a handle for sending messages and a receiver for events.
 /// The `player_count` atomic is incremented on join and decremented on leave.
+/// The `level_name` is used to load/save block overrides and player data to disk.
+/// The `autosave_interval_secs` controls periodic saves (0 = disabled, save only on shutdown).
 pub fn start_tick_loop(
     player_count: Arc<AtomicUsize>,
+    level_name: String,
+    autosave_interval_secs: u64,
 ) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
     let (event_tx, event_rx) = channel::<TickEvent>();
@@ -407,7 +424,14 @@ pub fn start_tick_loop(
     let thread = thread::Builder::new()
         .name("rustbound-tick".to_string())
         .spawn(move || {
-            run_tick_loop(msg_rx, event_tx, shutdown_clone, player_count);
+            run_tick_loop(
+                msg_rx,
+                event_tx,
+                shutdown_clone,
+                player_count,
+                level_name,
+                autosave_interval_secs,
+            );
         })
         .map_err(TickStartError::ThreadSpawn)?;
 
@@ -426,8 +450,17 @@ fn run_tick_loop(
     event_tx: Sender<TickEvent>,
     shutdown: Arc<AtomicBool>,
     player_count: Arc<AtomicUsize>,
+    level_name: String,
+    autosave_interval_secs: u64,
 ) {
+    // Load block overrides and player data from disk on startup
+    let loaded = crate::persist::load_overrides(&level_name);
+    let mut saved_players = crate::persist::load_players(&level_name);
     let mut world = World::new();
+    world.load_block_overrides(loaded);
+    // Autosave interval in ticks (20 TPS). 0 means disabled.
+    let autosave_interval_ticks: u64 = autosave_interval_secs.saturating_mul(20);
+    let mut last_autosave_tick: u64 = 0;
     let mut tick_count: u64 = 0;
     let mut last_keep_alive_tick: u64 = 0;
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
@@ -441,6 +474,18 @@ fn run_tick_loop(
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
                 TickMessage::Shutdown => {
+                    // Save block overrides to disk before shutting down
+                    if let Err(e) =
+                        crate::persist::save_overrides(&level_name, world.block_overrides())
+                    {
+                        eprintln!("error: failed to save block overrides: {}", e);
+                    }
+                    // Merge online players into the cache, then write everyone
+                    // (including players who already left this session).
+                    merge_online_into_saved(&world, &inventories, &mut saved_players);
+                    if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
+                        eprintln!("error: failed to save player data: {}", e);
+                    }
                     let _ = event_tx.send(TickEvent::Shutdown);
                     return;
                 }
@@ -448,18 +493,51 @@ fn run_tick_loop(
                     entity_id,
                     uuid,
                     username,
+                    gamemode,
                     view_distance,
                     event_sender,
                 } => {
-                    let player =
-                        crate::world::PlayerHandle::new(entity_id, uuid, username.clone(), 0);
+                    // Check for saved player data
+                    let saved = saved_players.get(&uuid).cloned();
+                    // Prefer persisted gamemode; otherwise keep the join-message value (#122).
+                    let gamemode = saved.as_ref().map(|d| d.gamemode).unwrap_or(gamemode);
+                    let mut player = crate::world::PlayerHandle::new(
+                        entity_id,
+                        uuid,
+                        username.clone(),
+                        gamemode,
+                    );
+                    // Restore position if saved
+                    if let Some(ref d) = saved {
+                        player.set_position(d.x, d.y, d.z);
+                        player.set_rotation(d.yaw, d.pitch);
+                    }
                     let (px, py, pz) = player.position();
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
                     chunk_states.insert(entity_id, PlayerChunkState::new(view_distance));
-                    inventories.insert(entity_id, PlayerInventory::new());
+                    // Restore inventory or create new
+                    let mut inv = PlayerInventory::new();
+                    if let Some(ref d) = saved {
+                        inv.held_slot = d.held_slot;
+                        inv.health = d.health;
+                        inv.food = d.food;
+                        inv.food_saturation = d.food_saturation;
+                        // Restore slots
+                        for (i, (present, item_id, count, nbt)) in d.slots.iter().enumerate() {
+                            if i < inv.slots.len() {
+                                inv.slots[i] = rustbound_protocol::play::Slot {
+                                    present: *present,
+                                    item_id: *item_id,
+                                    count: *count,
+                                    nbt: nbt.clone(),
+                                };
+                            }
+                        }
+                    }
+                    inventories.insert(entity_id, inv);
 
-                    // Send initial inventory (empty) to the new player
+                    // Send initial inventory to the new player
                     if let Some(inv) = inventories.get(&entity_id) {
                         let _ = event_sender.send(SessionEvent::SetContainerContent {
                             window_id: 0,
@@ -482,7 +560,7 @@ fn run_tick_loop(
                                 entity_id,
                                 uuid,
                                 username: username.clone(),
-                                gamemode: 0,
+                                gamemode,
                                 x: px,
                                 y: py,
                                 z: pz,
@@ -526,6 +604,18 @@ fn run_tick_loop(
                     player_count.fetch_add(1, Ordering::AcqRel);
                 }
                 TickMessage::PlayerLeft { entity_id } => {
+                    // Persist this player before dropping them so reconnect
+                    // (even in the same process) and autosave cannot wipe them.
+                    if let Some(data) = collect_one_player_data(&world, &inventories, entity_id) {
+                        if let Some(player) = world.get_player(entity_id) {
+                            saved_players.insert(player.uuid, data);
+                            if let Err(e) =
+                                crate::persist::save_players(&level_name, &saved_players)
+                            {
+                                eprintln!("error: failed to save player on leave: {}", e);
+                            }
+                        }
+                    }
                     // Get the player's UUID before removing
                     let uuid = world.get_player(entity_id).map(|p| p.uuid);
                     world.remove_player(entity_id);
@@ -618,6 +708,45 @@ fn run_tick_loop(
                             position,
                             block_state,
                         });
+                    }
+                }
+                TickMessage::PlaceBlock {
+                    entity_id,
+                    position,
+                    face,
+                } => {
+                    // Look up the held hotbar item and place the corresponding block.
+                    if let Some(inv) = inventories.get(&entity_id) {
+                        let held_idx = inv.held_slot as usize;
+                        if let Some(slot) = inv.slots.get(held_idx) {
+                            if slot.present {
+                                // Use the registry to map item ID to block state
+                                if let Some(block_state) =
+                                    crate::registry::item_to_block_state(slot.item_id)
+                                {
+                                    if block_state != 0 {
+                                        // Not air — place the block
+                                        let target = match face {
+                                            0 => (position.0, position.1 - 1, position.2),
+                                            1 => (position.0, position.1 + 1, position.2),
+                                            2 => (position.0, position.1, position.2 - 1),
+                                            3 => (position.0, position.1, position.2 + 1),
+                                            4 => (position.0 - 1, position.1, position.2),
+                                            5 => (position.0 + 1, position.1, position.2),
+                                            _ => position,
+                                        };
+                                        world.set_block(target.0, target.1, target.2, block_state);
+                                        // Broadcast Block Update to all sessions
+                                        for sender in session_senders.values() {
+                                            let _ = sender.send(SessionEvent::BlockUpdate {
+                                                position: target,
+                                                block_state,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 TickMessage::SetClientViewDistance {
@@ -769,6 +898,19 @@ fn run_tick_loop(
             }
         }
 
+        // Periodic task: autosave block overrides and player data
+        if autosave_interval_ticks > 0 && tick_count - last_autosave_tick >= autosave_interval_ticks
+        {
+            if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
+                eprintln!("error: autosave failed for block overrides: {}", e);
+            }
+            merge_online_into_saved(&world, &inventories, &mut saved_players);
+            if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
+                eprintln!("error: autosave failed for player data: {}", e);
+            }
+            last_autosave_tick = tick_count;
+        }
+
         tick_count += 1;
 
         // Sleep for the remaining tick time
@@ -778,7 +920,71 @@ fn run_tick_loop(
         }
     }
 
+    // Flush remaining data to disk on shutdown (covers the case where the
+    // shutdown flag was set before the Shutdown message was processed).
+    // The Shutdown message handler also saves, but this is a safety net.
+    if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
+        eprintln!("error: failed to save block overrides on shutdown: {}", e);
+    }
+    merge_online_into_saved(&world, &inventories, &mut saved_players);
+    if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
+        eprintln!("error: failed to save player data on shutdown: {}", e);
+    }
+
     let _ = event_tx.send(TickEvent::Shutdown);
+}
+
+/// Merges currently online players into the in-memory saved-player cache.
+fn merge_online_into_saved(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+    saved_players: &mut HashMap<Uuid, crate::persist::PlayerData>,
+) {
+    for (uuid, data) in collect_player_data(world, inventories) {
+        saved_players.insert(uuid, data);
+    }
+}
+
+/// Collects persistence data for a single online player, if present.
+fn collect_one_player_data(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+    entity_id: i32,
+) -> Option<crate::persist::PlayerData> {
+    let player = world.get_player(entity_id)?;
+    let inv = inventories.get(&entity_id)?;
+    let slots: Vec<(bool, i32, i8, Vec<u8>)> = inv
+        .slots
+        .iter()
+        .map(|s| (s.present, s.item_id, s.count, s.nbt.clone()))
+        .collect();
+    Some(crate::persist::PlayerData {
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        yaw: player.yaw,
+        pitch: player.pitch,
+        gamemode: player.gamemode,
+        held_slot: inv.held_slot,
+        health: inv.health,
+        food: inv.food,
+        food_saturation: inv.food_saturation,
+        slots,
+    })
+}
+
+/// Collects all player data for persistence.
+fn collect_player_data(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+) -> HashMap<Uuid, crate::persist::PlayerData> {
+    let mut result = HashMap::new();
+    for player in world.players() {
+        if let Some(data) = collect_one_player_data(world, inventories, player.entity_id) {
+            result.insert(player.uuid, data);
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -793,6 +999,34 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
+    /// Ephemeral level directory for tick-loop tests.
+    ///
+    /// Using a unique name per test avoids cross-test leakage now that
+    /// shutdown/autosave persist player and block data under `level_name/`.
+    struct TestLevel(String);
+
+    impl TestLevel {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            Self(format!(
+                "test-world-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+        }
+
+        fn name(&self) -> String {
+            self.0.clone()
+        }
+    }
+
+    impl Drop for TestLevel {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn tick_duration_is_50ms() {
         assert_eq!(TICK_DURATION, Duration::from_millis(50));
@@ -806,8 +1040,12 @@ mod tests {
 
     #[test]
     fn tick_loop_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
         std::thread::sleep(Duration::from_millis(100));
         handle.shutdown();
         Ok(())
@@ -815,8 +1053,12 @@ mod tests {
 
     #[test]
     fn tick_loop_processes_player_join_and_leave() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx_session) = channel::<SessionEvent>();
 
@@ -825,6 +1067,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -867,8 +1110,12 @@ mod tests {
 
     #[test]
     fn tick_loop_shuts_down_on_message() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
         handle.send(super::TickMessage::Shutdown)?;
 
         let start = Instant::now();
@@ -891,8 +1138,12 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_block_overrides_to_new_player() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player 1 joins and digs some blocks (creates overrides)
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -900,6 +1151,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -939,6 +1191,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -990,8 +1243,12 @@ mod tests {
 
     #[test]
     fn tick_loop_no_overrides_event_when_world_clean() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player joins a clean world (no overrides)
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -999,6 +1256,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1026,8 +1284,12 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_position_update_to_peers() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1035,6 +1297,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1045,6 +1308,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1113,8 +1377,12 @@ mod tests {
     #[test]
     fn tick_loop_no_movement_event_when_position_unchanged()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1122,6 +1390,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1132,6 +1401,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1254,8 +1524,12 @@ mod tests {
     #[test]
     fn tick_loop_streams_chunks_on_chunk_border_crossing() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player joins at spawn (0, 64, 0) -> chunk (0, 0)
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1263,6 +1537,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1311,14 +1586,19 @@ mod tests {
 
     #[test]
     fn tick_loop_no_chunk_stream_when_same_chunk() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1362,14 +1642,19 @@ mod tests {
     #[test]
     fn tick_loop_client_view_distance_loads_more_chunks() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1454,14 +1739,19 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_inventory_on_join() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1497,14 +1787,19 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_updates_inventory() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1552,14 +1847,19 @@ mod tests {
 
     #[test]
     fn tick_loop_held_item_updates_send_event() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1595,14 +1895,19 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_drop_ignored() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1643,8 +1948,12 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_chat_to_other_players() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1652,6 +1961,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx1,
         })?;
@@ -1662,6 +1972,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx2,
         })?;
@@ -1739,14 +2050,19 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_health_on_join() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1797,14 +2113,19 @@ mod tests {
 
     #[test]
     fn tick_loop_void_death_kills_player() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1850,14 +2171,19 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_after_death() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1926,14 +2252,19 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_ignored_when_not_dead() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1966,6 +2297,350 @@ mod tests {
         );
 
         handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_gamemode_passed_to_handle_and_peers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
+
+        // Player 1 joins in Creative (gamemode=1)
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1,
+            view_distance: 10,
+            event_sender: event_tx1,
+        })?;
+
+        // Wait for player 1 to be added
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx1.try_recv().is_ok() {}
+
+        // Player 2 joins - should see player 1's Creative gamemode
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            gamemode: 0,
+            view_distance: 10,
+            event_sender: event_tx2,
+        })?;
+
+        // Player 2 should receive PlayerJoined for player 1 with gamemode=1
+        let start = Instant::now();
+        let mut got_creative_peer = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::PlayerJoined {
+                    entity_id,
+                    gamemode,
+                    ..
+                }) => {
+                    if entity_id == 1 && gamemode == 1 {
+                        got_creative_peer = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_creative_peer,
+            "player 2 should see player 1 with Creative gamemode (1)"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_uses_held_item() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Set hotbar slot 0 to dirt (item_id=10, block_state=10)
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: rustbound_protocol::play::Slot {
+                present: true,
+                item_id: 10, // dirt
+                count: 1,
+                nbt: Vec::new(),
+            },
+        })?;
+
+        // Wait for slot update
+        std::thread::sleep(Duration::from_millis(50));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place on top face (face=1) of block at (0,64,0)
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should receive BlockUpdate at (0,65,0) with block_state=10 (dirt)
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    assert_eq!(position, (0, 65, 0));
+                    assert_eq!(block_state, 10, "should place dirt (block_state=10)");
+                    got_block = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_block, "should receive BlockUpdate for dirt placement");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_empty_hand_no_block() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Held slot is empty (default) — place should do nothing
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should NOT receive BlockUpdate
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate { .. }) => {
+                    got_block = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            !got_block,
+            "should not receive BlockUpdate when held slot is empty"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_stone_uses_stone_block_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Set hotbar slot 0 to stone (item_id=1, block_state=1)
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: rustbound_protocol::play::Slot {
+                present: true,
+                item_id: 1, // stone
+                count: 1,
+                nbt: Vec::new(),
+            },
+        })?;
+
+        // Wait for slot update
+        std::thread::sleep(Duration::from_millis(50));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place on top face (face=1) of block at (0,64,0)
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should receive BlockUpdate at (0,65,0) with block_state=1 (stone)
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    assert_eq!(position, (0, 65, 0));
+                    assert_eq!(block_state, 1, "should place stone (block_state=1)");
+                    got_block = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_block, "should receive BlockUpdate for stone placement");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_autosave_persists_blocks() -> Result<(), Box<dyn std::error::Error>> {
+        // Use a unique level name to avoid conflicts
+        let level_name = format!(
+            "test-autosave-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Start tick loop with 1-second autosave
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level_name.clone(),
+            1, // 1 second autosave
+        )?;
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (10, 64, 20),
+            block_state: 1,
+        })?;
+
+        // Wait for autosave to trigger (at least 1 second + buffer)
+        std::thread::sleep(Duration::from_millis(1500));
+
+        // Shut down
+        handle.shutdown();
+
+        // Verify the block was saved
+        let loaded = crate::persist::load_overrides(&level_name);
+        assert_eq!(
+            loaded.get(&(10, 64, 20)),
+            Some(&1),
+            "block should be persisted by autosave"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&level_name).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_shutdown_flushes_data() -> Result<(), Box<dyn std::error::Error>> {
+        let level_name = format!(
+            "test-shutdown-flush-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Start tick loop with autosave disabled (0)
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level_name.clone(),
+            0, // autosave disabled
+        )?;
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (5, 70, -10),
+            block_state: 10,
+        })?;
+
+        // Wait a bit for the block to be processed
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Shut down - should flush data even with autosave disabled
+        handle.shutdown();
+
+        // Verify the block was saved on shutdown
+        let loaded = crate::persist::load_overrides(&level_name);
+        assert_eq!(
+            loaded.get(&(5, 70, -10)),
+            Some(&10),
+            "block should be persisted on shutdown even with autosave disabled"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&level_name).ok();
         Ok(())
     }
 }
