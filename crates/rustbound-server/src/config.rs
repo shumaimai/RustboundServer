@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 /// - `default_gamemode`: Join Game gamemode for new players
 /// - `connection_timeout_secs`: TCP connection timeout
 /// - `network_compression_threshold`: Login Set Compression + Play framing
+/// - `keep_alive_timeout_secs`: Keep Alive response timeout (idle kick)
 ///
 /// **Intentionally unused (parsed but not enforced):**
 /// - `white_list`: Whitelist enforcement is not implemented
@@ -57,6 +58,9 @@ pub struct ServerConfig {
     pub connection_timeout_secs: u64,
     /// The network compression threshold (-1 disables, >= 0 enables).
     pub network_compression_threshold: i32,
+    /// The Keep Alive timeout (in seconds). If a client does not respond
+    /// to a Keep Alive within this period, it is disconnected.
+    pub keep_alive_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -76,6 +80,7 @@ impl Default for ServerConfig {
             allow_nether: true,
             connection_timeout_secs: 30,
             network_compression_threshold: 256,
+            keep_alive_timeout_secs: 30,
         }
     }
 }
@@ -203,6 +208,9 @@ fn apply_config_values(
     }
     if let Some(v) = map.get("network-compression-threshold") {
         config.network_compression_threshold = parse_i32(v, "network-compression-threshold")?;
+    }
+    if let Some(v) = map.get("keep-alive-timeout") {
+        config.keep_alive_timeout_secs = parse_u64(v, "keep-alive-timeout")?;
     }
     Ok(())
 }
@@ -343,6 +351,7 @@ mod tests {
         assert_eq!(config.max_players, 20);
         assert!(!config.online_mode);
         assert_eq!(config.view_distance, 10);
+        assert_eq!(config.keep_alive_timeout_secs, 30);
     }
 
     #[test]

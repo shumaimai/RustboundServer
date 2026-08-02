@@ -17,15 +17,19 @@ use std::time::Duration;
 use rustbound_protocol::play::{
     ChangeDifficulty, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
     GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition,
-    SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
-    decode_client_information, decode_confirm_teleportation, decode_keep_alive_serverbound,
-    decode_player_digging, decode_set_player_position, decode_set_player_position_and_rotation,
-    decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
-    encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
-    encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
-    encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
+    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetContainerContent,
+    SetContainerSlot, SetDefaultSpawnPosition, SetHeldItem, SetRenderDistance,
+    SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage,
+    decode_chat_message_serverbound, decode_client_information, decode_confirm_teleportation,
+    decode_keep_alive_serverbound, decode_player_digging, decode_set_creative_mode_slot,
+    decode_set_held_item_serverbound, decode_set_player_position,
+    decode_set_player_position_and_rotation, decode_set_player_rotation, decode_use_item_on,
+    encode_change_difficulty, encode_chunk_data, encode_disconnect_play, encode_entity_event,
+    encode_game_event, encode_join_game, encode_keep_alive_clientbound, encode_player_abilities,
+    encode_plugin_message_clientbound, encode_set_center_chunk, encode_set_container_content,
+    encode_set_container_slot, encode_set_default_spawn_position, encode_set_held_item,
     encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
+    encode_system_chat_message,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -147,6 +151,38 @@ pub enum SessionEvent {
         /// The chunk Z coordinate.
         chunk_z: i32,
     },
+    /// Send a Set Container Content packet to initialize or sync the inventory.
+    SetContainerContent {
+        /// The window ID (0 for player inventory).
+        window_id: u8,
+        /// Server-managed state ID.
+        state_id: i32,
+        /// The slot data for all slots.
+        slots: Vec<rustbound_protocol::play::Slot>,
+        /// The carried (cursor) item.
+        carried_item: rustbound_protocol::play::Slot,
+    },
+    /// Send a Set Container Slot packet to update a single slot.
+    SetContainerSlot {
+        /// The window ID.
+        window_id: i8,
+        /// Server-managed state ID.
+        state_id: i32,
+        /// The slot index.
+        slot: i16,
+        /// The new slot data.
+        item: rustbound_protocol::play::Slot,
+    },
+    /// Send a Set Held Item (clientbound) packet to sync the hotbar selection.
+    SetHeldItemClientbound {
+        /// The hotbar slot (0-8).
+        slot: u8,
+    },
+    /// Send a system chat message to the client.
+    SystemChat {
+        /// The JSON chat component string.
+        content: String,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -166,6 +202,8 @@ pub enum SessionError {
     TeleportTimeout,
     /// The client sent a position with NaN or Inf coordinates.
     InvalidPosition,
+    /// The client did not respond to KeepAlive within the timeout.
+    KeepAliveTimeout,
 }
 
 impl fmt::Display for SessionError {
@@ -180,6 +218,7 @@ impl fmt::Display for SessionError {
             }
             Self::TeleportTimeout => formatter.write_str("teleport confirmation timeout"),
             Self::InvalidPosition => formatter.write_str("invalid position (NaN or Inf)"),
+            Self::KeepAliveTimeout => formatter.write_str("keep alive timeout"),
         }
     }
 }
@@ -238,6 +277,8 @@ pub struct SessionConfig {
     pub simulation_distance: i32,
     /// The maximum number of players.
     pub max_players: i32,
+    /// Keep Alive timeout: clients that don't respond within this duration are kicked.
+    pub keep_alive_timeout: Duration,
 }
 
 /// A player session in the Play state.
@@ -279,6 +320,14 @@ pub struct PlayerSession {
     simulation_distance: i32,
     /// The maximum number of players.
     max_players: i32,
+    /// Keep Alive timeout: clients that don't respond within this duration are kicked.
+    keep_alive_timeout: Duration,
+    /// The payload of the last KeepAlive sent to the client (0 = none pending).
+    last_keep_alive_payload: i64,
+    /// The instant the last KeepAlive was sent (None = no pending KeepAlive).
+    last_keep_alive_sent: Option<std::time::Instant>,
+    /// The instant the client last responded to a KeepAlive.
+    last_keep_alive_response: std::time::Instant,
 }
 
 impl PlayerSession {
@@ -326,6 +375,10 @@ impl PlayerSession {
             view_distance: config.view_distance,
             simulation_distance: config.simulation_distance,
             max_players: config.max_players,
+            keep_alive_timeout: config.keep_alive_timeout,
+            last_keep_alive_payload: 0,
+            last_keep_alive_sent: None,
+            last_keep_alive_response: std::time::Instant::now(),
         })
     }
 
@@ -427,7 +480,7 @@ impl PlayerSession {
     pub fn send_join_sequence(&self, stream: &mut TcpStream) -> Result<(), SessionError> {
         let mfl = self.max_frame_length;
 
-        // 1. Plugin Message (brand)  E0x17
+        // 1. Plugin Message (brand) 窶・0x17
         let brand = PluginMessageClientbound {
             channel: "minecraft:brand".to_string(),
             data: b"rustbound".to_vec(),
@@ -436,7 +489,7 @@ impl PlayerSession {
         encode_plugin_message_clientbound(&brand, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 2. Change Difficulty  E0x0C
+        // 2. Change Difficulty 窶・0x0C
         let diff = ChangeDifficulty {
             difficulty: 1, // Easy
             locked: false,
@@ -445,7 +498,7 @@ impl PlayerSession {
         encode_change_difficulty(&diff, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 3. Player Abilities  E0x34
+        // 3. Player Abilities 窶・0x34
         let abilities = PlayerAbilities {
             flags: 0x04, // allow flying bit
             flying_speed: 0.05,
@@ -455,13 +508,13 @@ impl PlayerSession {
         encode_player_abilities(&abilities, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 4. Set Held Item  E0x4D
+        // 4. Set Held Item 窶・0x4D
         let held = SetHeldItem { slot: 0 };
         wire.clear();
         encode_set_held_item(&held, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 5. Entity Event (player status: 28 = op permission level 4)  E0x1C
+        // 5. Entity Event (player status: 28 = op permission level 4) 窶・0x1C
         let entity_event = EntityEvent {
             entity_id: self.entity_id,
             entity_status: 28,
@@ -470,7 +523,7 @@ impl PlayerSession {
         encode_entity_event(&entity_event, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 6. Set Default Spawn Position  E0x50
+        // 6. Set Default Spawn Position 窶・0x50
         let spawn = SetDefaultSpawnPosition {
             location: (0, 64, 0),
             angle: 0.0,
@@ -479,7 +532,7 @@ impl PlayerSession {
         encode_set_default_spawn_position(&spawn, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 7. Set Center Chunk  E0x4E
+        // 7. Set Center Chunk 窶・0x4E
         let center = SetCenterChunk {
             chunk_x: 0,
             chunk_z: 0,
@@ -488,7 +541,7 @@ impl PlayerSession {
         encode_set_center_chunk(&center, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 8. Set Render Distance  E0x4F
+        // 8. Set Render Distance 窶・0x4F
         let render = SetRenderDistance {
             view_distance: self.view_distance,
         };
@@ -496,7 +549,7 @@ impl PlayerSession {
         encode_set_render_distance(&render, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 9. Set Simulation Distance  E0x5C
+        // 9. Set Simulation Distance 窶・0x5C
         let sim = SetSimulationDistance {
             simulation_distance: self.simulation_distance,
         };
@@ -504,7 +557,7 @@ impl PlayerSession {
         encode_set_simulation_distance(&sim, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 10. Game Event (13 = Start waiting for level chunks)  E0x1F
+        // 10. Game Event (13 = Start waiting for level chunks) 窶・0x1F
         let game_event = GameEvent {
             event_type: 13,
             value: 0.0,
@@ -566,6 +619,25 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends a System Chat Message to the client.
+    ///
+    /// The content should be a JSON chat component string. In offline mode,
+    /// all chat (player and system) is sent via this packet.
+    pub fn send_system_chat(
+        &self,
+        stream: &mut TcpStream,
+        content: &str,
+    ) -> Result<(), SessionError> {
+        let packet = SystemChatMessage {
+            content: content.to_string(),
+            overlay: false,
+        };
+        let mut wire = Vec::new();
+        encode_system_chat_message(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
     /// Sends a Synchronize Player Position packet and returns the teleport ID.
     pub fn send_synchronize_position(
         &mut self,
@@ -589,9 +661,10 @@ impl PlayerSession {
         Ok(teleport_id)
     }
 
-    /// Sends a KeepAlive packet to the client.
+    /// Sends a KeepAlive packet to the client and records the send time
+    /// for timeout enforcement.
     pub fn send_keep_alive(
-        &self,
+        &mut self,
         stream: &mut TcpStream,
         payload: i64,
     ) -> Result<(), SessionError> {
@@ -599,7 +672,19 @@ impl PlayerSession {
         let mut wire = Vec::new();
         encode_keep_alive_clientbound(&packet, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
+        self.last_keep_alive_payload = payload;
+        self.last_keep_alive_sent = Some(std::time::Instant::now());
         Ok(())
+    }
+
+    /// Returns `true` if the client has not responded to the last KeepAlive
+    /// within the configured timeout. Returns `false` if no KeepAlive is
+    /// pending or the client responded in time.
+    pub fn is_keep_alive_timed_out(&self) -> bool {
+        match self.last_keep_alive_sent {
+            Some(sent_at) => sent_at.elapsed() > self.keep_alive_timeout,
+            None => false,
+        }
     }
 
     /// Sends a Player Info Update (add player) for a remote player.
@@ -703,7 +788,7 @@ impl PlayerSession {
     /// Polls for tick loop events and handles them.
     ///
     /// Returns `true` if at least one event was processed.
-    pub fn poll_events(&self, stream: &mut TcpStream) -> Result<bool, SessionError> {
+    pub fn poll_events(&mut self, stream: &mut TcpStream) -> Result<bool, SessionError> {
         let mut processed = false;
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
@@ -777,6 +862,41 @@ impl PlayerSession {
                     self.send_single_chunk(stream, chunk_x, chunk_z)?;
                     processed = true;
                 }
+                SessionEvent::SetContainerContent {
+                    window_id,
+                    state_id,
+                    slots,
+                    carried_item,
+                } => {
+                    self.send_set_container_content(
+                        stream,
+                        window_id,
+                        state_id,
+                        &slots,
+                        &carried_item,
+                    )?;
+                    processed = true;
+                }
+                SessionEvent::SetContainerSlot {
+                    window_id,
+                    state_id,
+                    slot,
+                    item,
+                } => {
+                    self.send_set_container_slot(stream, window_id, state_id, slot, &item)?;
+                    processed = true;
+                }
+                SessionEvent::SetHeldItemClientbound { slot } => {
+                    let held = SetHeldItem { slot };
+                    let mut wire = Vec::new();
+                    encode_set_held_item(&held, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::SystemChat { content } => {
+                    self.send_system_chat(stream, &content)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -789,8 +909,13 @@ impl PlayerSession {
                 // Teleport confirmed - no action needed for now
                 Ok(None)
             }
-            PlayPacket::KeepAliveServerbound(KeepAlive { payload: _ }) => {
-                // KeepAlive response received - no action needed for now
+            PlayPacket::KeepAliveServerbound(KeepAlive { payload }) => {
+                // KeepAlive response received - clear the pending timer.
+                // Only accept the response if it matches the last sent payload.
+                if self.last_keep_alive_sent.is_some() && payload == self.last_keep_alive_payload {
+                    self.last_keep_alive_sent = None;
+                    self.last_keep_alive_response = std::time::Instant::now();
+                }
                 Ok(None)
             }
             PlayPacket::ClientInformation(ClientInformation { view_distance, .. }) => {
@@ -900,6 +1025,33 @@ impl PlayerSession {
                 // Always ACK the place packet (protocol requires it)
                 Ok(Some(place.sequence))
             }
+            PlayPacket::SetCreativeModeSlot(creative) => {
+                // Forward to tick loop for inventory tracking
+                let _ = self.tick_sender.send(TickMessage::SetCreativeSlot {
+                    entity_id: self.entity_id,
+                    slot: creative.slot,
+                    item: creative.item,
+                });
+                Ok(None)
+            }
+            PlayPacket::SetHeldItemServerbound(held) => {
+                // Forward to tick loop for held slot tracking
+                let _ = self.tick_sender.send(TickMessage::SetHeldItem {
+                    entity_id: self.entity_id,
+                    slot: held.slot,
+                });
+                Ok(None)
+            }
+            PlayPacket::ChatMessageServerbound(chat) => {
+                // Forward chat to tick loop for broadcasting
+                let _ = self.tick_sender.send(TickMessage::ChatMessage {
+                    entity_id: self.entity_id,
+                    uuid: self.uuid,
+                    username: self.username.clone(),
+                    message: chat.message,
+                });
+                Ok(None)
+            }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
     }
@@ -917,6 +1069,52 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         rustbound_protocol::play::encode_block_update(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Container Content packet to the client.
+    ///
+    /// Used to initialize or fully sync the player's inventory.
+    pub fn send_set_container_content(
+        &self,
+        stream: &mut TcpStream,
+        window_id: u8,
+        state_id: i32,
+        slots: &[rustbound_protocol::play::Slot],
+        carried_item: &rustbound_protocol::play::Slot,
+    ) -> Result<(), SessionError> {
+        let packet = SetContainerContent {
+            window_id,
+            state_id,
+            slots: slots.to_vec(),
+            carried_item: carried_item.clone(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_content(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Container Slot packet to the client.
+    ///
+    /// Used to update a single inventory slot.
+    pub fn send_set_container_slot(
+        &self,
+        stream: &mut TcpStream,
+        window_id: i8,
+        state_id: i32,
+        slot: i16,
+        item: &rustbound_protocol::play::Slot,
+    ) -> Result<(), SessionError> {
+        let packet = SetContainerSlot {
+            window_id,
+            state_id,
+            slot,
+            item: item.clone(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_slot(&packet, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
         Ok(())
     }
@@ -1291,6 +1489,48 @@ fn try_decode_play_packet_inner(
         Err(error) => return Err(SessionError::from(error)),
     }
 
+    // Set Held Item serverbound (0x28)
+    match decode_set_held_item_serverbound(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Set Creative Mode Slot (0x2B)
+    match decode_set_creative_mode_slot(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Chat Message serverbound (0x01)
+    match decode_chat_message_serverbound(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
     // Unknown packet: skip it gracefully rather than disconnecting.
     // This allows vanilla clients to send packets we don't yet handle
     // (e.g. inventory, chat, swing arm) without being kicked.
@@ -1349,6 +1589,12 @@ pub fn run_play_loop(
         // Poll for tick events (KeepAlive, etc.)
         if let Err(e) = session.poll_events(stream) {
             break Err(e);
+        }
+
+        // Check KeepAlive timeout: kick idle clients
+        if session.is_keep_alive_timed_out() {
+            session.send_disconnect(stream, "Timed out (no KeepAlive response)");
+            break Err(SessionError::KeepAliveTimeout);
         }
 
         // Try to decode a packet
@@ -1468,6 +1714,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -1507,6 +1754,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1645,6 +1893,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1691,6 +1940,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1741,6 +1991,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1782,6 +2033,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1809,6 +2061,121 @@ mod tests {
             Ok(msg) => panic!("Survival place should not send SetBlock, got {msg:?}"),
             Err(e) => panic!("channel error: {e}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_timeout_not_triggered_initially() -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, _rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0,
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+            view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
+        };
+        let session = PlayerSession::new(&config, 1, tx)?;
+        assert!(!session.is_keep_alive_timed_out());
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_timeout_triggers_after_expiry() -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, _rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0,
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+            view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
+            keep_alive_timeout: Duration::from_millis(1),
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let client = TcpStream::connect(addr)?;
+        client.set_nonblocking(true).ok();
+        let mut server = listener.accept()?.0;
+        server.set_nonblocking(true).ok();
+
+        session.send_keep_alive(&mut server, 42)?;
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(session.is_keep_alive_timed_out());
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_response_clears_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, _rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0,
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+            view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
+            keep_alive_timeout: Duration::from_secs(30),
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let client = TcpStream::connect(addr)?;
+        client.set_nonblocking(true).ok();
+        let mut server = listener.accept()?.0;
+        server.set_nonblocking(true).ok();
+
+        session.send_keep_alive(&mut server, 99)?;
+        assert!(!session.is_keep_alive_timed_out());
+        session.handle_play_packet(PlayPacket::KeepAliveServerbound(KeepAlive { payload: 99 }))?;
+        assert!(!session.is_keep_alive_timed_out());
+        Ok(())
+    }
+
+    #[test]
+    fn keep_alive_wrong_payload_does_not_clear_timeout() -> Result<(), Box<dyn std::error::Error>> {
+        let (tx, _rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0,
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+            view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
+            keep_alive_timeout: Duration::from_millis(1),
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let client = TcpStream::connect(addr)?;
+        client.set_nonblocking(true).ok();
+        let mut server = listener.accept()?.0;
+        server.set_nonblocking(true).ok();
+
+        session.send_keep_alive(&mut server, 100)?;
+        session.handle_play_packet(PlayPacket::KeepAliveServerbound(KeepAlive { payload: 999 }))?;
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(session.is_keep_alive_timed_out());
         Ok(())
     }
 }

@@ -79,6 +79,7 @@ impl Server {
             view_distance: config.view_distance,
             simulation_distance: config.simulation_distance,
             motd: config.motd.clone(),
+            keep_alive_timeout: Duration::from_secs(config.keep_alive_timeout_secs),
         });
 
         let listener_config = ListenerConfig {

@@ -45,6 +45,61 @@ struct PlayerChunkState {
     loaded_chunks: HashSet<crate::world::ChunkPos>,
 }
 
+/// The number of slots in a player inventory (36 main + 4 armor + 1 offhand + 5 crafting).
+pub const PLAYER_INVENTORY_SIZE: usize = 46;
+
+/// Per-player inventory state, owned by the tick loop.
+///
+/// Tracks the player's 46-slot inventory and the currently held hotbar slot.
+/// The tick loop is the single owner of inventory mutations; sessions forward
+/// client requests (Set Creative Mode Slot, Set Held Item) to the tick loop,
+/// which applies them and sends confirmation events back to the session.
+#[derive(Debug, Clone)]
+struct PlayerInventory {
+    /// The 46 inventory slots (0-8 hotbar, 9-35 main, 36-39 armor, 40 offhand, 41-45 crafting).
+    slots: Vec<rustbound_protocol::play::Slot>,
+    /// The currently held hotbar slot (0-8).
+    held_slot: u8,
+    /// Server-managed state ID for synchronization.
+    state_id: i32,
+}
+
+impl PlayerInventory {
+    fn new() -> Self {
+        Self {
+            slots: vec![rustbound_protocol::play::Slot::empty(); PLAYER_INVENTORY_SIZE],
+            held_slot: 0,
+            state_id: 0,
+        }
+    }
+
+    /// Sets a slot and returns true if the slot actually changed.
+    fn set_slot(&mut self, index: usize, item: rustbound_protocol::play::Slot) -> bool {
+        if index >= self.slots.len() {
+            return false;
+        }
+        let changed = self.slots[index] != item;
+        if changed {
+            self.slots[index] = item;
+            self.state_id += 1;
+        }
+        changed
+    }
+
+    /// Sets the held slot, clamping to 0-8. Returns true if changed.
+    fn set_held_slot(&mut self, slot: i16) -> bool {
+        if !(0..=8).contains(&slot) {
+            return false;
+        }
+        let new_slot = slot as u8;
+        if self.held_slot != new_slot {
+            self.held_slot = new_slot;
+            return true;
+        }
+        false
+    }
+}
+
 impl PlayerChunkState {
     /// Creates a new chunk state for a player joining at the spawn point
     /// (center chunk 0, 0) with the given server view distance.
@@ -115,6 +170,25 @@ fn chunk_z_from_world(z: f64) -> i32 {
     (z.floor() as i32) >> 4
 }
 
+/// Formats a player chat message as a JSON chat component string.
+///
+/// In offline mode, we use the System Chat Message packet (0x5D) for all
+/// chat. The content is a JSON chat component. We produce a simple
+/// `<username> <message>` format with the username in gray and the
+/// message in white, matching the vanilla chat appearance.
+fn format_chat_message(username: &str, message: &str) -> String {
+    // Build a JSON chat component: {"text":"<username> message"}
+    // Simple format: {"text":"<username> <message>"}
+    // We escape the username and message for JSON safety.
+    let escaped = format!("<{username}> {message}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("{{\"text\":\"{escaped}\"}}")
+}
+
 /// A message sent to the tick loop.
 #[derive(Debug)]
 pub enum TickMessage {
@@ -168,6 +242,33 @@ pub enum TickMessage {
         entity_id: i32,
         /// The client's requested view distance (in chunks).
         view_distance: i32,
+    },
+    /// A creative-mode player set a slot (Set Creative Mode Slot packet).
+    SetCreativeSlot {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The slot index (-1 for drop).
+        slot: i16,
+        /// The item to place in the slot.
+        item: rustbound_protocol::play::Slot,
+    },
+    /// A player changed their hotbar selection (Set Held Item serverbound).
+    SetHeldItem {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The hotbar slot (0-8).
+        slot: i16,
+    },
+    /// A player sent a chat message.
+    ChatMessage {
+        /// The entity ID of the sender.
+        entity_id: i32,
+        /// The sender's UUID.
+        uuid: Uuid,
+        /// The sender's username.
+        username: String,
+        /// The chat message text.
+        message: String,
     },
 }
 
@@ -288,6 +389,7 @@ fn run_tick_loop(
     let mut last_keep_alive_tick: u64 = 0;
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
+    let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let tick_start = Instant::now();
@@ -312,6 +414,17 @@ fn run_tick_loop(
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
                     chunk_states.insert(entity_id, PlayerChunkState::new(view_distance));
+                    inventories.insert(entity_id, PlayerInventory::new());
+
+                    // Send initial inventory (empty) to the new player
+                    if let Some(inv) = inventories.get(&entity_id) {
+                        let _ = event_sender.send(SessionEvent::SetContainerContent {
+                            window_id: 0,
+                            state_id: inv.state_id,
+                            slots: inv.slots.clone(),
+                            carried_item: rustbound_protocol::play::Slot::empty(),
+                        });
+                    }
 
                     // Broadcast join to all OTHER existing sessions
                     for (&eid, sender) in &session_senders {
@@ -369,6 +482,7 @@ fn run_tick_loop(
                     world.remove_player(entity_id);
                     session_senders.remove(&entity_id);
                     chunk_states.remove(&entity_id);
+                    inventories.remove(&entity_id);
                     player_count.fetch_sub(1, Ordering::AcqRel);
 
                     // Broadcast leave to all remaining sessions
@@ -470,6 +584,61 @@ fn run_tick_loop(
                                     chunk_z: chunk.z,
                                 });
                             }
+                        }
+                    }
+                }
+                TickMessage::SetCreativeSlot {
+                    entity_id,
+                    slot,
+                    item,
+                } => {
+                    // Creative mode: the client tells us what to put in a slot.
+                    // Slot -1 means dropping the item (we just ignore it for now).
+                    if slot >= 0 {
+                        if let Some(inv) = inventories.get_mut(&entity_id) {
+                            let idx = slot as usize;
+                            if idx < inv.slots.len() {
+                                let state_id = inv.state_id + 1;
+                                inv.set_slot(idx, item.clone());
+                                if let Some(sender) = session_senders.get(&entity_id) {
+                                    let _ = sender.send(SessionEvent::SetContainerSlot {
+                                        window_id: 0,
+                                        state_id,
+                                        slot,
+                                        item,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                TickMessage::SetHeldItem { entity_id, slot } => {
+                    if let Some(inv) = inventories.get_mut(&entity_id) {
+                        if inv.set_held_slot(slot) {
+                            if let Some(sender) = session_senders.get(&entity_id) {
+                                let _ = sender.send(SessionEvent::SetHeldItemClientbound {
+                                    slot: inv.held_slot,
+                                });
+                            }
+                        }
+                    }
+                }
+                TickMessage::ChatMessage {
+                    entity_id,
+                    uuid: _,
+                    username,
+                    message,
+                } => {
+                    // Broadcast chat to all sessions as a System Chat Message.
+                    // In offline mode, we use the unsigned/system chat path
+                    // (no signed Player Chat Message).
+                    let content = format_chat_message(&username, &message);
+                    for (eid, sender) in &session_senders {
+                        // Don't echo back to the sender
+                        if *eid != entity_id {
+                            let _ = sender.send(SessionEvent::SystemChat {
+                                content: content.clone(),
+                            });
                         }
                     }
                 }
@@ -1118,5 +1287,335 @@ mod tests {
 
         handle.shutdown();
         Ok(())
+    }
+
+    #[test]
+    fn player_inventory_default_is_empty() {
+        let inv = super::PlayerInventory::new();
+        assert_eq!(inv.slots.len(), super::PLAYER_INVENTORY_SIZE);
+        for slot in &inv.slots {
+            assert!(!slot.present, "all slots should be empty by default");
+        }
+        assert_eq!(inv.held_slot, 0);
+        assert_eq!(inv.state_id, 0);
+    }
+
+    #[test]
+    fn player_inventory_set_slot_changes_state() {
+        let mut inv = super::PlayerInventory::new();
+        let item = rustbound_protocol::play::Slot::item(10, 64);
+        assert!(inv.set_slot(0, item.clone()));
+        assert!(inv.slots[0].present);
+        assert_eq!(inv.slots[0].item_id, 10);
+        assert_eq!(inv.state_id, 1);
+
+        // Setting the same slot to the same value should not change state
+        assert!(!inv.set_slot(0, item.clone()));
+        assert_eq!(inv.state_id, 1);
+
+        // Out of bounds is a no-op
+        assert!(!inv.set_slot(999, item));
+        assert_eq!(inv.state_id, 1);
+    }
+
+    #[test]
+    fn player_inventory_set_held_slot_clamps() {
+        let mut inv = super::PlayerInventory::new();
+        assert!(inv.set_held_slot(3));
+        assert_eq!(inv.held_slot, 3);
+
+        // Same slot is no-op
+        assert!(!inv.set_held_slot(3));
+
+        // Out of range is rejected
+        assert!(!inv.set_held_slot(-1));
+        assert!(!inv.set_held_slot(9));
+        assert_eq!(inv.held_slot, 3);
+
+        // Valid edge values
+        assert!(inv.set_held_slot(0));
+        assert!(inv.set_held_slot(8));
+    }
+
+    #[test]
+    fn tick_loop_sends_initial_inventory_on_join() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        let start = Instant::now();
+        let mut got_content = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetContainerContent {
+                    window_id,
+                    slots,
+                    carried_item,
+                    ..
+                }) => {
+                    got_content = true;
+                    assert_eq!(window_id, 0);
+                    assert_eq!(slots.len(), super::PLAYER_INVENTORY_SIZE);
+                    assert!(!carried_item.present);
+                    for slot in &slots {
+                        assert!(!slot.present);
+                    }
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_content, "should receive SetContainerContent on join");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_slot_updates_inventory() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join to be processed
+        std::thread::sleep(Duration::from_millis(100));
+        // Drain initial events
+        while event_rx.try_recv().is_ok() {}
+
+        // Send a SetCreativeSlot to put an item in slot 0
+        let item = rustbound_protocol::play::Slot::item(5, 32);
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: item.clone(),
+        })?;
+
+        let start = Instant::now();
+        let mut got_slot_update = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetContainerSlot {
+                    window_id,
+                    slot,
+                    item: recv_item,
+                    ..
+                }) => {
+                    got_slot_update = true;
+                    assert_eq!(window_id, 0);
+                    assert_eq!(slot, 0);
+                    assert!(recv_item.present);
+                    assert_eq!(recv_item.item_id, 5);
+                    assert_eq!(recv_item.count, 32);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_slot_update, "should receive SetContainerSlot event");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_held_item_updates_send_event() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join to be processed
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Change held slot to 5
+        handle.send(super::TickMessage::SetHeldItem {
+            entity_id: 1,
+            slot: 5,
+        })?;
+
+        let start = Instant::now();
+        let mut got_held = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHeldItemClientbound { slot }) => {
+                    got_held = true;
+                    assert_eq!(slot, 5);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_held, "should receive SetHeldItemClientbound event");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_slot_drop_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Slot -1 means dropping an item - server should not update inventory
+        let item = rustbound_protocol::play::Slot::item(1, 1);
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: -1,
+            item,
+        })?;
+
+        // Should NOT receive a SetContainerSlot event for slot -1
+        let start = Instant::now();
+        let mut got_slot_update = false;
+        while start.elapsed() < Duration::from_millis(200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetContainerSlot { slot, .. }) => {
+                    if slot == -1 {
+                        got_slot_update = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            !got_slot_update,
+            "should not receive SetContainerSlot for slot -1 (drop)"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_broadcasts_chat_to_other_players() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 2,
+            event_sender: event_tx1,
+        })?;
+
+        // Player 2 joins
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            view_distance: 2,
+            event_sender: event_tx2,
+        })?;
+
+        // Wait for join events
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx1.try_recv().is_ok() {}
+        while event_rx2.try_recv().is_ok() {}
+
+        // Player 1 sends a chat message
+        handle.send(super::TickMessage::ChatMessage {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            message: "Hello world!".to_string(),
+        })?;
+
+        // Player 2 should receive the chat
+        let start = Instant::now();
+        let mut got_chat = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::SystemChat { content }) => {
+                    assert!(
+                        content.contains("Hello world!"),
+                        "content should contain message: {content}"
+                    );
+                    assert!(
+                        content.contains("Steve"),
+                        "content should contain username: {content}"
+                    );
+                    got_chat = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_chat, "player 2 should have received the chat message");
+
+        // Player 1 should NOT receive its own chat
+        let mut self_received = false;
+        while let Ok(event) = event_rx1.try_recv() {
+            if matches!(event, SessionEvent::SystemChat { .. }) {
+                self_received = true;
+            }
+        }
+        assert!(!self_received, "player 1 should not receive its own chat");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn format_chat_message_basic() {
+        let msg = super::format_chat_message("Alex", "Hi!");
+        assert_eq!(msg, r#"{"text":"<Alex> Hi!"}"#);
+    }
+
+    #[test]
+    fn format_chat_message_escapes_quotes() {
+        let msg = super::format_chat_message("Steve", r#"say "hi""#);
+        assert!(msg.contains(r#"\""#), "quotes should be escaped: {msg}");
+        assert!(msg.starts_with(r#"{"text":"#), "should be JSON: {msg}");
+    }
+
+    #[test]
+    fn format_chat_message_escapes_backslash() {
+        let msg = super::format_chat_message("Steve", r"back\slash");
+        assert!(msg.contains(r"\\"), "backslash should be escaped: {msg}");
     }
 }

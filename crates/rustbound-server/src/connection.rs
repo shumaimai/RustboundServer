@@ -182,6 +182,8 @@ pub struct ConnectionConfig {
     pub simulation_distance: i32,
     /// Server MOTD (message of the day).
     pub motd: String,
+    /// Keep Alive timeout: clients that don't respond within this duration are kicked.
+    pub keep_alive_timeout: Duration,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -240,7 +242,7 @@ pub fn handle_connection(
                             online_mode: config.online_mode,
                             compression_threshold: config.compression_threshold,
                             max_frame_length: config.max_frame_length,
-                            offline_uuid: Uuid::new(0, 0),
+                            offline_uuid: Uuid::new(0, 0), // placeholder, replaced below
                         };
                         let mut login_sm = LoginStateMachine::new(login_config);
 
@@ -297,7 +299,8 @@ pub fn handle_connection(
 
                                     let username =
                                         login_sm.username().unwrap_or("Player").to_string();
-                                    let uuid = Uuid::new(0, 0);
+                                    let uuid =
+                                        crate::offline_uuid::offline_uuid_from_username(&username);
 
                                     // Transition to Play - enter the play loop
                                     match run_play_loop(
@@ -312,6 +315,7 @@ pub fn handle_connection(
                                             view_distance: config.view_distance,
                                             simulation_distance: config.simulation_distance,
                                             max_players: config.max_players,
+                                            keep_alive_timeout: config.keep_alive_timeout,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
@@ -570,6 +574,7 @@ mod tests {
             view_distance: 10,
             simulation_distance: 10,
             motd: "Test Server".to_string(),
+            keep_alive_timeout: Duration::from_secs(30),
         }
     }
 
