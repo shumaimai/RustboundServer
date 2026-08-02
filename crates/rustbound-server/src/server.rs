@@ -65,6 +65,7 @@ impl Server {
             player_count.clone(),
             config.level_name.clone(),
             config.autosave_interval_secs,
+            Vec::new(), // no mods registered yet
         )?;
 
         let tick_sender = tick_handle.sender();
