@@ -9,9 +9,9 @@ use std::fmt;
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
     CodecError, MAX_CHAT_COMPONENT_LENGTH, Uuid, decode_bool, decode_byte_array, decode_f32,
-    decode_i8, decode_i32, decode_i64, decode_position, decode_string, decode_u8, decode_var_int,
-    encode_bool, encode_byte_array, encode_f32, encode_f64, encode_i8, encode_i32, encode_i64,
-    encode_position, encode_string, encode_u8, encode_var_int,
+    decode_f64, decode_i8, decode_i16, decode_i32, decode_i64, decode_position, decode_string,
+    decode_u8, decode_var_int, encode_bool, encode_byte_array, encode_f32, encode_f64, encode_i8,
+    encode_i16, encode_i32, encode_i64, encode_position, encode_string, encode_u8, encode_var_int,
 };
 use crate::state::ProtocolState;
 
@@ -107,6 +107,18 @@ pub const BLOCK_UPDATE_PACKET_ID: i32 = 0x0A;
 
 /// Packet ID for the clientbound Acknowledge Block Change packet.
 pub const ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID: i32 = 0x06;
+
+/// Packet ID for the clientbound Move Entity (Pos) packet.
+pub const MOVE_ENTITY_POS_PACKET_ID: i32 = 0x29;
+
+/// Packet ID for the clientbound Move Entity (Pos+Rot) packet.
+pub const MOVE_ENTITY_POS_ROT_PACKET_ID: i32 = 0x2A;
+
+/// Packet ID for the clientbound Move Entity (Rot) packet.
+pub const MOVE_ENTITY_ROT_PACKET_ID: i32 = 0x2B;
+
+/// Packet ID for the clientbound Entity Teleport packet.
+pub const ENTITY_TELEPORT_PACKET_ID: i32 = 0x57;
 
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
@@ -271,6 +283,14 @@ pub enum PlayPacket {
     BlockUpdate(BlockUpdate),
     /// Clientbound Acknowledge Block Change (Play `0x06`).
     AcknowledgeBlockChange(AcknowledgeBlockChange),
+    /// Clientbound Move Entity (Pos) (Play `0x29`).
+    MoveEntityPos(MoveEntityPos),
+    /// Clientbound Move Entity (Pos+Rot) (Play `0x2A`).
+    MoveEntityPosRot(MoveEntityPosRot),
+    /// Clientbound Move Entity (Rot) (Play `0x2B`).
+    MoveEntityRot(MoveEntityRot),
+    /// Clientbound Entity Teleport (Play `0x57`).
+    EntityTeleport(EntityTeleport),
 }
 
 /// The player's gamemode.
@@ -931,15 +951,15 @@ pub fn decode_set_player_position(
     }
 
     let mut body = frame.payload;
-    let x = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let x = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let y = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let y = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let z = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let z = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -1012,15 +1032,15 @@ pub fn decode_set_player_position_and_rotation(
     }
 
     let mut body = frame.payload;
-    let x = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let x = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let y = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let y = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let z = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let z = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -1187,15 +1207,15 @@ pub fn decode_synchronize_player_position(
     }
 
     let mut body = frame.payload;
-    let x = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let x = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let y = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let y = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let z = crate::primitives::decode_f64(&mut body).map_err(|e| {
+    let z = decode_f64(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -2243,6 +2263,82 @@ pub struct RemoveEntities {
     pub entity_ids: Vec<i32>,
 }
 
+/// Clientbound Move Entity (Pos) packet (Play `0x29`).
+///
+/// Sends a relative position update. The delta values are in 1/4096 of a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveEntityPos {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// Change in X, in 1/4096 of a block.
+    pub delta_x: i16,
+    /// Change in Y, in 1/4096 of a block.
+    pub delta_y: i16,
+    /// Change in Z, in 1/4096 of a block.
+    pub delta_z: i16,
+    /// Whether the entity is on the ground.
+    pub on_ground: bool,
+}
+
+/// Clientbound Move Entity (Pos+Rot) packet (Play `0x2A`).
+///
+/// Sends a relative position and rotation update. The delta values are in
+/// 1/4096 of a block. Angles are in steps of 1/256 of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveEntityPosRot {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// Change in X, in 1/4096 of a block.
+    pub delta_x: i16,
+    /// Change in Y, in 1/4096 of a block.
+    pub delta_y: i16,
+    /// Change in Z, in 1/4096 of a block.
+    pub delta_z: i16,
+    /// The yaw angle (0-255, representing 0-360 degrees).
+    pub yaw: u8,
+    /// The pitch angle (0-255, representing 0-360 degrees).
+    pub pitch: u8,
+    /// Whether the entity is on the ground.
+    pub on_ground: bool,
+}
+
+/// Clientbound Move Entity (Rot) packet (Play `0x2B`).
+///
+/// Sends a rotation-only update. Angles are in steps of 1/256 of a turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveEntityRot {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// The yaw angle (0-255, representing 0-360 degrees).
+    pub yaw: u8,
+    /// The pitch angle (0-255, representing 0-360 degrees).
+    pub pitch: u8,
+    /// Whether the entity is on the ground.
+    pub on_ground: bool,
+}
+
+/// Clientbound Entity Teleport packet (Play `0x57`).
+///
+/// Sends an absolute position and rotation update. Used when the delta
+/// exceeds the range of a relative move (more than ~8 blocks).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityTeleport {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// The absolute X coordinate.
+    pub x: f64,
+    /// The absolute Y coordinate.
+    pub y: f64,
+    /// The absolute Z coordinate.
+    pub z: f64,
+    /// The yaw angle (0-255, representing 0-360 degrees).
+    pub yaw: u8,
+    /// The pitch angle (0-255, representing 0-360 degrees).
+    pub pitch: u8,
+    /// Whether the entity is on the ground.
+    pub on_ground: bool,
+}
+
 /// Encodes a Player Info Update packet (clientbound Play `0x3A`).
 pub fn encode_player_info_update(
     packet: &PlayerInfoUpdate,
@@ -2384,6 +2480,341 @@ pub fn encode_remove_entities(
     encode_frame(REMOVE_ENTITIES_PACKET_ID, &body, max_frame_length, output)
         .map_err(PlayError::from)?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Entity movement packets (protocol 763)
+// ---------------------------------------------------------------------------
+
+/// Encodes a Move Entity (Pos) packet (clientbound Play `0x29`).
+pub fn encode_move_entity_pos(
+    packet: &MoveEntityPos,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    encode_i16(packet.delta_x, &mut body);
+    encode_i16(packet.delta_y, &mut body);
+    encode_i16(packet.delta_z, &mut body);
+    encode_bool(packet.on_ground, &mut body);
+    encode_frame(MOVE_ENTITY_POS_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Move Entity (Pos) packet (clientbound Play `0x29`).
+pub fn decode_move_entity_pos(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != MOVE_ENTITY_POS_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: MOVE_ENTITY_POS_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_x = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_y = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_z = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let on_ground = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::MoveEntityPos(
+        MoveEntityPos {
+            entity_id,
+            delta_x,
+            delta_y,
+            delta_z,
+            on_ground,
+        },
+    )))
+}
+
+/// Encodes a Move Entity (Pos+Rot) packet (clientbound Play `0x2A`).
+pub fn encode_move_entity_pos_rot(
+    packet: &MoveEntityPosRot,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    encode_i16(packet.delta_x, &mut body);
+    encode_i16(packet.delta_y, &mut body);
+    encode_i16(packet.delta_z, &mut body);
+    encode_u8(packet.yaw, &mut body);
+    encode_u8(packet.pitch, &mut body);
+    encode_bool(packet.on_ground, &mut body);
+    encode_frame(
+        MOVE_ENTITY_POS_ROT_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Move Entity (Pos+Rot) packet (clientbound Play `0x2A`).
+pub fn decode_move_entity_pos_rot(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != MOVE_ENTITY_POS_ROT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: MOVE_ENTITY_POS_ROT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_x = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_y = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let delta_z = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let yaw = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let pitch = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let on_ground = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::MoveEntityPosRot(
+        MoveEntityPosRot {
+            entity_id,
+            delta_x,
+            delta_y,
+            delta_z,
+            yaw,
+            pitch,
+            on_ground,
+        },
+    )))
+}
+
+/// Encodes a Move Entity (Rot) packet (clientbound Play `0x2B`).
+pub fn encode_move_entity_rot(
+    packet: &MoveEntityRot,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    encode_u8(packet.yaw, &mut body);
+    encode_u8(packet.pitch, &mut body);
+    encode_bool(packet.on_ground, &mut body);
+    encode_frame(MOVE_ENTITY_ROT_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Move Entity (Rot) packet (clientbound Play `0x2B`).
+pub fn decode_move_entity_rot(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != MOVE_ENTITY_ROT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: MOVE_ENTITY_ROT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let yaw = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let pitch = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let on_ground = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::MoveEntityRot(
+        MoveEntityRot {
+            entity_id,
+            yaw,
+            pitch,
+            on_ground,
+        },
+    )))
+}
+
+/// Encodes an Entity Teleport packet (clientbound Play `0x57`).
+pub fn encode_entity_teleport(
+    packet: &EntityTeleport,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
+    encode_u8(packet.yaw, &mut body);
+    encode_u8(packet.pitch, &mut body);
+    encode_bool(packet.on_ground, &mut body);
+    encode_frame(ENTITY_TELEPORT_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Entity Teleport packet (clientbound Play `0x57`).
+pub fn decode_entity_teleport(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != ENTITY_TELEPORT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: ENTITY_TELEPORT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let x = decode_f64(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let y = decode_f64(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let z = decode_f64(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let yaw = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let pitch = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let on_ground = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::EntityTeleport(
+        EntityTeleport {
+            entity_id,
+            x,
+            y,
+            z,
+            yaw,
+            pitch,
+            on_ground,
+        },
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -2910,33 +3341,35 @@ pub fn decode_chunk_data(
 mod tests {
     use super::{
         AcknowledgeBlockChange, BlockUpdate, ChangeDifficulty, ChatMode, ChunkData,
-        ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent, GameEvent, GameMode,
-        JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand,
-        PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities, PlayerDigging,
-        PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
-        PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, SetCenterChunk,
-        SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, SpawnPlayer,
-        SynchronizePlayerPosition, UseItemOn, decode_acknowledge_block_change, decode_block_update,
-        decode_change_difficulty, decode_chunk_data, decode_client_information,
-        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
-        decode_game_event, decode_join_game, decode_keep_alive_clientbound,
-        decode_keep_alive_serverbound, decode_player_abilities, decode_player_digging,
-        decode_plugin_message_clientbound, decode_set_center_chunk,
-        decode_set_default_spawn_position, decode_set_held_item, decode_set_player_position,
-        decode_set_player_position_and_rotation, decode_set_player_rotation,
-        decode_set_render_distance, decode_set_simulation_distance,
+        ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent, EntityTeleport,
+        GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
+        KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome,
+        PlayError, PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction,
+        PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
+        PluginMessageClientbound, RemoveEntities, SetCenterChunk, SetDefaultSpawnPosition,
+        SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
+        SetRenderDistance, SetSimulationDistance, SpawnPlayer, SynchronizePlayerPosition,
+        UseItemOn, decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
+        decode_chunk_data, decode_client_information, decode_confirm_teleportation,
+        decode_disconnect_play, decode_entity_event, decode_entity_teleport, decode_game_event,
+        decode_join_game, decode_keep_alive_clientbound, decode_keep_alive_serverbound,
+        decode_move_entity_pos, decode_move_entity_pos_rot, decode_move_entity_rot,
+        decode_player_abilities, decode_player_digging, decode_plugin_message_clientbound,
+        decode_set_center_chunk, decode_set_default_spawn_position, decode_set_held_item,
+        decode_set_player_position, decode_set_player_position_and_rotation,
+        decode_set_player_rotation, decode_set_render_distance, decode_set_simulation_distance,
         decode_synchronize_player_position, decode_use_item_on, encode_acknowledge_block_change,
         encode_block_update, encode_change_difficulty, encode_chunk_data,
         encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
-        encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
-        encode_keep_alive_serverbound, encode_player_abilities, encode_player_digging,
-        encode_player_info_remove, encode_player_info_update, encode_plugin_message_clientbound,
-        encode_remove_entities, encode_set_center_chunk, encode_set_default_spawn_position,
-        encode_set_held_item, encode_set_player_position, encode_set_player_position_and_rotation,
-        encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
-        encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
-        ensure_play_state,
+        encode_entity_event, encode_entity_teleport, encode_game_event, encode_join_game,
+        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_move_entity_pos,
+        encode_move_entity_pos_rot, encode_move_entity_rot, encode_player_abilities,
+        encode_player_digging, encode_player_info_remove, encode_player_info_update,
+        encode_plugin_message_clientbound, encode_remove_entities, encode_set_center_chunk,
+        encode_set_default_spawn_position, encode_set_held_item, encode_set_player_position,
+        encode_set_player_position_and_rotation, encode_set_player_rotation,
+        encode_set_render_distance, encode_set_simulation_distance, encode_spawn_player,
+        encode_synchronize_player_position, encode_use_item_on, ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -4140,5 +4573,139 @@ mod tests {
             Some(PlayerDiggingAction::DropAllItems)
         );
         assert_eq!(PlayerDiggingAction::from_wire(99), None);
+    }
+
+    // --- Entity movement packets ---
+
+    #[test]
+    fn move_entity_pos_roundtrip() -> Result<(), PlayError> {
+        let packet = MoveEntityPos {
+            entity_id: 42,
+            delta_x: 100,
+            delta_y: -200,
+            delta_z: 300,
+            on_ground: true,
+        };
+        let mut wire = Vec::new();
+        encode_move_entity_pos(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_move_entity_pos(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::MoveEntityPos(decoded)) => {
+                assert_eq!(decoded.entity_id, 42);
+                assert_eq!(decoded.delta_x, 100);
+                assert_eq!(decoded.delta_y, -200);
+                assert_eq!(decoded.delta_z, 300);
+                assert!(decoded.on_ground);
+            }
+            other => panic!("expected MoveEntityPos, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn move_entity_pos_rot_roundtrip() -> Result<(), PlayError> {
+        let packet = MoveEntityPosRot {
+            entity_id: 7,
+            delta_x: 4096, // 1 block
+            delta_y: 0,
+            delta_z: -4096, // -1 block
+            yaw: 128,       // 180 degrees
+            pitch: 64,      // 90 degrees
+            on_ground: false,
+        };
+        let mut wire = Vec::new();
+        encode_move_entity_pos_rot(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_move_entity_pos_rot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::MoveEntityPosRot(decoded)) => {
+                assert_eq!(decoded.entity_id, 7);
+                assert_eq!(decoded.delta_x, 4096);
+                assert_eq!(decoded.delta_y, 0);
+                assert_eq!(decoded.delta_z, -4096);
+                assert_eq!(decoded.yaw, 128);
+                assert_eq!(decoded.pitch, 64);
+                assert!(!decoded.on_ground);
+            }
+            other => panic!("expected MoveEntityPosRot, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn move_entity_rot_roundtrip() -> Result<(), PlayError> {
+        let packet = MoveEntityRot {
+            entity_id: 99,
+            yaw: 0,
+            pitch: 255,
+            on_ground: true,
+        };
+        let mut wire = Vec::new();
+        encode_move_entity_rot(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_move_entity_rot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::MoveEntityRot(decoded)) => {
+                assert_eq!(decoded.entity_id, 99);
+                assert_eq!(decoded.yaw, 0);
+                assert_eq!(decoded.pitch, 255);
+                assert!(decoded.on_ground);
+            }
+            other => panic!("expected MoveEntityRot, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn entity_teleport_roundtrip() -> Result<(), PlayError> {
+        let packet = EntityTeleport {
+            entity_id: 123,
+            x: 100.5,
+            y: -64.0,
+            z: 0.25,
+            yaw: 64, // 90 degrees
+            pitch: 0,
+            on_ground: true,
+        };
+        let mut wire = Vec::new();
+        encode_entity_teleport(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_entity_teleport(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::EntityTeleport(decoded)) => {
+                assert_eq!(decoded.entity_id, 123);
+                assert_eq!(decoded.x, 100.5);
+                assert_eq!(decoded.y, -64.0);
+                assert_eq!(decoded.z, 0.25);
+                assert_eq!(decoded.yaw, 64);
+                assert_eq!(decoded.pitch, 0);
+                assert!(decoded.on_ground);
+            }
+            other => panic!("expected EntityTeleport, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn move_entity_pos_max_delta() -> Result<(), PlayError> {
+        let packet = MoveEntityPos {
+            entity_id: 1,
+            delta_x: 32767,
+            delta_y: -32768,
+            delta_z: 0,
+            on_ground: false,
+        };
+        let mut wire = Vec::new();
+        encode_move_entity_pos(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_move_entity_pos(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::MoveEntityPos(decoded)) => {
+                assert_eq!(decoded.delta_x, 32767);
+                assert_eq!(decoded.delta_y, -32768);
+            }
+            other => panic!("expected MoveEntityPos, got {other:?}"),
+        }
+        Ok(())
     }
 }

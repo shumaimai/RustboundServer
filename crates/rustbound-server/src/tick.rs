@@ -283,11 +283,37 @@ fn run_tick_loop(
                     z,
                     yaw,
                     pitch,
-                    on_ground: _,
+                    on_ground,
                 } => {
                     if let Some(player) = world.get_player_mut(entity_id) {
+                        let (old_x, old_y, old_z) = player.position();
+                        let (old_yaw, old_pitch) = player.rotation();
                         player.set_position(x, y, z);
                         player.set_rotation(yaw, pitch);
+                        let pos_changed = (x - old_x).abs() > f64::EPSILON
+                            || (y - old_y).abs() > f64::EPSILON
+                            || (z - old_z).abs() > f64::EPSILON;
+                        let rot_changed = (yaw - old_yaw).abs() > f32::EPSILON
+                            || (pitch - old_pitch).abs() > f32::EPSILON;
+                        if pos_changed || rot_changed {
+                            // Broadcast movement to all OTHER sessions
+                            for (&eid, sender) in &session_senders {
+                                if eid != entity_id {
+                                    let _ = sender.send(SessionEvent::EntityMovement {
+                                        entity_id,
+                                        old_x,
+                                        old_y,
+                                        old_z,
+                                        new_x: x,
+                                        new_y: y,
+                                        new_z: z,
+                                        new_yaw: yaw,
+                                        new_pitch: pitch,
+                                        on_ground,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 TickMessage::SetBlock {
@@ -557,6 +583,147 @@ mod tests {
         assert!(
             !got_chunk_overrides,
             "should not receive ChunkBlockOverrides when world has no overrides"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_broadcasts_position_update_to_peers() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            event_sender: event_tx1,
+        })?;
+
+        // Player 2 joins
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            event_sender: event_tx2,
+        })?;
+
+        // Wait for join events to be processed
+        std::thread::sleep(Duration::from_millis(100));
+        // Drain join events
+        while event_rx1.try_recv().is_ok() {}
+        while event_rx2.try_recv().is_ok() {}
+
+        // Player 1 moves from (0, 64, 0) to (1, 64, 0)
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 1.0,
+            y: 64.0,
+            z: 0.0,
+            yaw: 90.0,
+            pitch: 0.0,
+            on_ground: true,
+        })?;
+
+        // Player 2 should receive EntityMovement for player 1
+        let start = Instant::now();
+        let mut got_movement = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::EntityMovement {
+                    entity_id,
+                    old_x,
+                    new_x,
+                    new_yaw,
+                    ..
+                }) => {
+                    assert_eq!(entity_id, 1, "should be player 1's movement");
+                    assert_eq!(old_x, 0.0);
+                    assert_eq!(new_x, 1.0);
+                    assert_eq!(new_yaw, 90.0);
+                    got_movement = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_movement,
+            "player 2 should have received EntityMovement for player 1"
+        );
+
+        // Player 1 should NOT receive its own movement
+        let mut self_received = false;
+        while let Ok(event) = event_rx1.try_recv() {
+            if matches!(event, SessionEvent::EntityMovement { entity_id: 1, .. }) {
+                self_received = true;
+            }
+        }
+        assert!(
+            !self_received,
+            "player 1 should not receive its own movement"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_no_movement_event_when_position_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            event_sender: event_tx1,
+        })?;
+
+        // Player 2 joins
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            event_sender: event_tx2,
+        })?;
+
+        // Wait for join events
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx1.try_recv().is_ok() {}
+        while event_rx2.try_recv().is_ok() {}
+
+        // Player 1 sends the SAME position (spawn point 0, 64, 0)
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.0,
+            y: 64.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        })?;
+
+        // Wait and check that player 2 does NOT receive EntityMovement
+        std::thread::sleep(Duration::from_millis(100));
+        let mut got_movement = false;
+        while let Ok(event) = event_rx2.try_recv() {
+            if matches!(event, SessionEvent::EntityMovement { .. }) {
+                got_movement = true;
+            }
+        }
+        assert!(
+            !got_movement,
+            "should not receive EntityMovement when position is unchanged"
         );
 
         handle.shutdown();

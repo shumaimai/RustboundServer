@@ -31,6 +31,41 @@ use rustbound_protocol::primitives::Uuid;
 
 use crate::tick::TickMessage;
 
+/// Converts a yaw/pitch angle in degrees to the protocol byte format.
+///
+/// Minecraft encodes angles as a single byte where 256 steps = 360 degrees.
+/// The value wraps around (modulo 256).
+fn degrees_to_angle_byte(degrees: f32) -> u8 {
+    let normalized = degrees.rem_euclid(360.0);
+    let steps = normalized / 360.0 * 256.0;
+    steps.round() as u8
+}
+
+/// Movement data for a remote entity, used to choose the correct packet type.
+#[derive(Debug, Clone, Copy)]
+pub struct EntityMovementData {
+    /// The moving entity's ID.
+    pub entity_id: i32,
+    /// Previous absolute X.
+    pub old_x: f64,
+    /// Previous absolute Y.
+    pub old_y: f64,
+    /// Previous absolute Z.
+    pub old_z: f64,
+    /// New absolute X.
+    pub new_x: f64,
+    /// New absolute Y.
+    pub new_y: f64,
+    /// New absolute Z.
+    pub new_z: f64,
+    /// New yaw (degrees).
+    pub new_yaw: f32,
+    /// New pitch (degrees).
+    pub new_pitch: f32,
+    /// Whether the entity is on the ground.
+    pub on_ground: bool,
+}
+
 /// Events delivered from the tick loop to a player session.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -73,6 +108,30 @@ pub enum SessionEvent {
     ChunkBlockOverrides {
         /// List of (position, block_state) pairs to apply.
         overrides: Vec<((i32, i32, i32), i32)>,
+    },
+    /// A remote player moved and/or rotated; send the appropriate entity
+    /// movement packet to this client.
+    EntityMovement {
+        /// The moving player's entity ID.
+        entity_id: i32,
+        /// Previous absolute X.
+        old_x: f64,
+        /// Previous absolute Y.
+        old_y: f64,
+        /// Previous absolute Z.
+        old_z: f64,
+        /// New absolute X.
+        new_x: f64,
+        /// New absolute Y.
+        new_y: f64,
+        /// New absolute Z.
+        new_z: f64,
+        /// New yaw (degrees).
+        new_yaw: f32,
+        /// New pitch (degrees).
+        new_pitch: f32,
+        /// Whether the player is on the ground.
+        on_ground: bool,
     },
 }
 
@@ -623,6 +682,33 @@ impl PlayerSession {
                     }
                     processed = true;
                 }
+                SessionEvent::EntityMovement {
+                    entity_id,
+                    old_x,
+                    old_y,
+                    old_z,
+                    new_x,
+                    new_y,
+                    new_z,
+                    new_yaw,
+                    new_pitch,
+                    on_ground,
+                } => {
+                    let movement = EntityMovementData {
+                        entity_id,
+                        old_x,
+                        old_y,
+                        old_z,
+                        new_x,
+                        new_y,
+                        new_z,
+                        new_yaw,
+                        new_pitch,
+                        on_ground,
+                    };
+                    self.send_entity_movement(stream, &movement)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -782,6 +868,99 @@ impl PlayerSession {
             &mut wire,
         )?;
         self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends an entity movement packet to the client.
+    ///
+    /// Chooses the appropriate packet type based on the position/rotation delta:
+    /// - No change: nothing is sent
+    /// - Position only (small delta): Move Entity (Pos) `0x29`
+    /// - Rotation only: Move Entity (Rot) `0x2B`
+    /// - Both (small delta): Move Entity (Pos+Rot) `0x2A`
+    /// - Large position delta (>8 blocks): Entity Teleport `0x57`
+    ///
+    /// The delta values for relative moves are in 1/4096 of a block.
+    /// Angles are converted from degrees to byte steps (256 = 360 degrees).
+    pub fn send_entity_movement(
+        &self,
+        stream: &mut TcpStream,
+        movement: &EntityMovementData,
+    ) -> Result<(), SessionError> {
+        let dx = movement.new_x - movement.old_x;
+        let dy = movement.new_y - movement.old_y;
+        let dz = movement.new_z - movement.old_z;
+        let pos_changed = dx != 0.0 || dy != 0.0 || dz != 0.0;
+        // We always send rotation since we don't track old rotation per-entity
+        // in the session. The tick loop only sends EntityMovement when something
+        // changed (position or rotation).
+        let yaw_byte = degrees_to_angle_byte(movement.new_yaw);
+        let pitch_byte = degrees_to_angle_byte(movement.new_pitch);
+
+        if !pos_changed {
+            // Rotation only
+            let packet = rustbound_protocol::play::MoveEntityRot {
+                entity_id: movement.entity_id,
+                yaw: yaw_byte,
+                pitch: pitch_byte,
+                on_ground: movement.on_ground,
+            };
+            let mut wire = Vec::new();
+            rustbound_protocol::play::encode_move_entity_rot(
+                &packet,
+                self.max_frame_length,
+                &mut wire,
+            )?;
+            self.send_wire(stream, &wire)?;
+            return Ok(());
+        }
+
+        // Check if delta fits in i16 (max ~8 blocks at 1/4096 resolution)
+        const DELTA_SCALE: f64 = 4096.0;
+        const MAX_DELTA: f64 = 32767.0 / DELTA_SCALE; // ~7.999 blocks
+        let abs_dx = dx.abs();
+        let abs_dy = dy.abs();
+        let abs_dz = dz.abs();
+        if abs_dx > MAX_DELTA || abs_dy > MAX_DELTA || abs_dz > MAX_DELTA {
+            // Use Entity Teleport (absolute position)
+            let packet = rustbound_protocol::play::EntityTeleport {
+                entity_id: movement.entity_id,
+                x: movement.new_x,
+                y: movement.new_y,
+                z: movement.new_z,
+                yaw: yaw_byte,
+                pitch: pitch_byte,
+                on_ground: movement.on_ground,
+            };
+            let mut wire = Vec::new();
+            rustbound_protocol::play::encode_entity_teleport(
+                &packet,
+                self.max_frame_length,
+                &mut wire,
+            )?;
+            self.send_wire(stream, &wire)?;
+        } else {
+            // Relative move
+            let delta_x = (dx * DELTA_SCALE).round() as i16;
+            let delta_y = (dy * DELTA_SCALE).round() as i16;
+            let delta_z = (dz * DELTA_SCALE).round() as i16;
+            let packet = rustbound_protocol::play::MoveEntityPosRot {
+                entity_id: movement.entity_id,
+                delta_x,
+                delta_y,
+                delta_z,
+                yaw: yaw_byte,
+                pitch: pitch_byte,
+                on_ground: movement.on_ground,
+            };
+            let mut wire = Vec::new();
+            rustbound_protocol::play::encode_move_entity_pos_rot(
+                &packet,
+                self.max_frame_length,
+                &mut wire,
+            )?;
+            self.send_wire(stream, &wire)?;
+        }
         Ok(())
     }
 
@@ -1173,6 +1352,27 @@ mod tests {
         assert_eq!(allocator.allocate(), 1);
         assert_eq!(allocator.allocate(), 2);
         assert_eq!(allocator.allocate(), 3);
+    }
+
+    #[test]
+    fn degrees_to_angle_byte_basic() {
+        assert_eq!(degrees_to_angle_byte(0.0), 0);
+        assert_eq!(degrees_to_angle_byte(90.0), 64);
+        assert_eq!(degrees_to_angle_byte(180.0), 128);
+        assert_eq!(degrees_to_angle_byte(270.0), 192);
+        assert_eq!(degrees_to_angle_byte(360.0), 0);
+    }
+
+    #[test]
+    fn degrees_to_angle_byte_negative() {
+        assert_eq!(degrees_to_angle_byte(-90.0), 192); // 270 degrees
+        assert_eq!(degrees_to_angle_byte(-180.0), 128); // 180 degrees
+    }
+
+    #[test]
+    fn degrees_to_angle_byte_wrap() {
+        assert_eq!(degrees_to_angle_byte(720.0), 0); // 2 full turns
+        assert_eq!(degrees_to_angle_byte(450.0), 64); // 90 + 360 = 90 normalized
     }
 
     #[test]
