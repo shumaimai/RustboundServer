@@ -149,7 +149,7 @@ impl PlayStateMachine {
             gamemode: config.gamemode,
             previous_gamemode: None,
             dimension_names: vec![config.dimension_name.clone()],
-            registry_codec: Vec::new(),
+            registry_codec: crate::registry_codec::build_registry_codec(),
             dimension_type: config.dimension_name.clone(),
             dimension_name: config.dimension_name.clone(),
             hashed_seed: config.hashed_seed,
