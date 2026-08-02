@@ -409,8 +409,10 @@ impl std::error::Error for TickStartError {
 ///
 /// Returns a handle for sending messages and a receiver for events.
 /// The `player_count` atomic is incremented on join and decremented on leave.
+/// The `level_name` is used to load/save block overrides to disk.
 pub fn start_tick_loop(
     player_count: Arc<AtomicUsize>,
+    level_name: String,
 ) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
     let (event_tx, event_rx) = channel::<TickEvent>();
@@ -420,7 +422,7 @@ pub fn start_tick_loop(
     let thread = thread::Builder::new()
         .name("rustbound-tick".to_string())
         .spawn(move || {
-            run_tick_loop(msg_rx, event_tx, shutdown_clone, player_count);
+            run_tick_loop(msg_rx, event_tx, shutdown_clone, player_count, level_name);
         })
         .map_err(TickStartError::ThreadSpawn)?;
 
@@ -439,8 +441,12 @@ fn run_tick_loop(
     event_tx: Sender<TickEvent>,
     shutdown: Arc<AtomicBool>,
     player_count: Arc<AtomicUsize>,
+    level_name: String,
 ) {
+    // Load block overrides from disk on startup
+    let loaded = crate::persist::load_overrides(&level_name);
     let mut world = World::new();
+    world.load_block_overrides(loaded);
     let mut tick_count: u64 = 0;
     let mut last_keep_alive_tick: u64 = 0;
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
@@ -454,6 +460,12 @@ fn run_tick_loop(
         while let Ok(msg) = msg_rx.try_recv() {
             match msg {
                 TickMessage::Shutdown => {
+                    // Save block overrides to disk before shutting down
+                    if let Err(e) =
+                        crate::persist::save_overrides(&level_name, world.block_overrides())
+                    {
+                        eprintln!("error: failed to save block overrides: {}", e);
+                    }
                     let _ = event_tx.send(TickEvent::Shutdown);
                     return;
                 }
@@ -863,8 +875,10 @@ mod tests {
 
     #[test]
     fn tick_loop_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
         std::thread::sleep(Duration::from_millis(100));
         handle.shutdown();
         Ok(())
@@ -872,8 +886,10 @@ mod tests {
 
     #[test]
     fn tick_loop_processes_player_join_and_leave() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx_session) = channel::<SessionEvent>();
 
@@ -925,8 +941,10 @@ mod tests {
 
     #[test]
     fn tick_loop_shuts_down_on_message() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
         handle.send(super::TickMessage::Shutdown)?;
 
         let start = Instant::now();
@@ -949,8 +967,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_block_overrides_to_new_player() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player 1 joins and digs some blocks (creates overrides)
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1050,8 +1070,10 @@ mod tests {
 
     #[test]
     fn tick_loop_no_overrides_event_when_world_clean() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player joins a clean world (no overrides)
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1087,8 +1109,10 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_position_update_to_peers() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1176,8 +1200,10 @@ mod tests {
     #[test]
     fn tick_loop_no_movement_event_when_position_unchanged()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1319,8 +1345,10 @@ mod tests {
     #[test]
     fn tick_loop_streams_chunks_on_chunk_border_crossing() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player joins at spawn (0, 64, 0) -> chunk (0, 0)
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1377,8 +1405,10 @@ mod tests {
 
     #[test]
     fn tick_loop_no_chunk_stream_when_same_chunk() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1429,8 +1459,10 @@ mod tests {
     #[test]
     fn tick_loop_client_view_distance_loads_more_chunks() -> Result<(), Box<dyn std::error::Error>>
     {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1522,8 +1554,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_inventory_on_join() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1566,8 +1600,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_updates_inventory() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1622,8 +1658,10 @@ mod tests {
 
     #[test]
     fn tick_loop_held_item_updates_send_event() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1666,8 +1704,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_drop_ignored() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1715,8 +1755,10 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_chat_to_other_players() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         // Player 1 joins
         let (event_tx1, event_rx1) = channel::<SessionEvent>();
@@ -1813,8 +1855,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_health_on_join() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1872,8 +1916,10 @@ mod tests {
 
     #[test]
     fn tick_loop_void_death_kills_player() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -1926,8 +1972,10 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_after_death() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
@@ -2003,8 +2051,10 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_ignored_when_not_dead() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) =
-            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            "test-world".to_string(),
+        )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
