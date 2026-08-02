@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 ctrlc = "3.5.2"
+md-5 = "0.11.0"
 rustbound-protocol = { path = "../rustbound-protocol" }
 
 [dev-dependencies]
