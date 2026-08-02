@@ -56,7 +56,7 @@ pub const DEFAULT_FOOD: i32 = 20;
 pub const DEFAULT_FOOD_SATURATION: f32 = 5.0;
 /// The Y coordinate below which the void kills players.
 pub const VOID_DEATH_Y: f64 = -64.0;
-/// Food drain interval in ticks (every 4 ticks = 5 times per second).
+/// Food drain interval in ticks (80 ticks = 4 seconds at 20 TPS).
 /// This is a stub approximation of vanilla exhaustion; real Minecraft
 /// ties this to exhaustion level (0.1/tick passive), but for the minimal
 /// implementation we use a simple tick-count-based drain.
@@ -718,6 +718,7 @@ fn run_tick_loop(
                     session_senders.remove(&entity_id);
                     chunk_states.remove(&entity_id);
                     inventories.remove(&entity_id);
+                    break_progress.remove(&entity_id);
                     player_count.fetch_sub(1, Ordering::AcqRel);
 
                     // Broadcast leave to all remaining sessions
@@ -879,31 +880,48 @@ fn run_tick_loop(
                     action,
                     position,
                 } => {
-                    match action {
-                        0 => {
-                            // StartDestroy: begin tracking break progress
-                            let progress = BlockBreakProgress {
-                                position,
-                                ticks_elapsed: 0,
-                                total_ticks: DEFAULT_BLOCK_HARDNESS_TICKS,
-                                last_stage: -1,
-                            };
-                            break_progress.insert(entity_id, progress);
-                        }
-                        1 | 2 => {
-                            // AbortDestroy or StopDestroy: cancel break
-                            if let Some(progress) = break_progress.remove(&entity_id) {
-                                // Remove the break animation
-                                if let Some(sender) = session_senders.get(&entity_id) {
-                                    let _ = sender.send(SessionEvent::SetBlockDestroyStage {
-                                        entity_id,
-                                        position: progress.position,
-                                        destroy_stage: -1, // remove animation
-                                    });
-                                }
+                    // Ignore dig while dead (death screen); clear any in-flight break.
+                    let is_dead = inventories
+                        .get(&entity_id)
+                        .map(|inv| inv.is_dead)
+                        .unwrap_or(true);
+                    if is_dead {
+                        if let Some(progress) = break_progress.remove(&entity_id) {
+                            if let Some(sender) = session_senders.get(&entity_id) {
+                                let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                    entity_id,
+                                    position: progress.position,
+                                    destroy_stage: -1,
+                                });
                             }
                         }
-                        _ => {}
+                    } else {
+                        match action {
+                            0 => {
+                                // StartDestroy: begin tracking break progress
+                                let progress = BlockBreakProgress {
+                                    position,
+                                    ticks_elapsed: 0,
+                                    total_ticks: DEFAULT_BLOCK_HARDNESS_TICKS,
+                                    last_stage: -1,
+                                };
+                                break_progress.insert(entity_id, progress);
+                            }
+                            1 | 2 => {
+                                // AbortDestroy or StopDestroy: cancel break
+                                if let Some(progress) = break_progress.remove(&entity_id) {
+                                    // Remove the break animation
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                            entity_id,
+                                            position: progress.position,
+                                            destroy_stage: -1, // remove animation
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 TickMessage::SetCreativeSlot {
@@ -966,6 +984,16 @@ fn run_tick_loop(
                     if action == 0 {
                         if let Some(inv) = inventories.get_mut(&entity_id) {
                             if inv.is_dead {
+                                // Cancel any in-flight Survival dig animation.
+                                if let Some(progress) = break_progress.remove(&entity_id) {
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                            entity_id,
+                                            position: progress.position,
+                                            destroy_stage: -1,
+                                        });
+                                    }
+                                }
                                 inv.respawn();
                                 let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
                                 let gamemode = world
@@ -1085,6 +1113,7 @@ fn run_tick_loop(
             if let Some(player) = world.get_player(entity_id) {
                 if player.y < VOID_DEATH_Y {
                     inv.kill();
+                    clear_break_animation(&mut break_progress, &session_senders, entity_id);
                     let username = player.username.clone();
                     if let Some(sender) = session_senders.get(&entity_id) {
                         let _ = sender.send(SessionEvent::SetHealth {
@@ -1094,7 +1123,7 @@ fn run_tick_loop(
                         });
                         let _ = sender.send(SessionEvent::CombatDeath {
                             player_id: entity_id,
-                            message: format!("{{\"text\":\"{} fell out of the world\"}}", username),
+                            message: combat_death_message(&username, "fell out of the world"),
                         });
                     }
                 }
@@ -1126,13 +1155,14 @@ fn run_tick_loop(
                         });
                         // If starvation killed the player, send Combat Death
                         if inv.is_dead {
+                            clear_break_animation(&mut break_progress, &session_senders, entity_id);
                             let username = world
                                 .get_player(entity_id)
                                 .map(|p| p.username.clone())
                                 .unwrap_or_else(|| "Player".to_string());
                             let _ = sender.send(SessionEvent::CombatDeath {
                                 player_id: entity_id,
-                                message: format!("{{\"text\":\"{} starved to death\"}}", username),
+                                message: combat_death_message(&username, "starved to death"),
                             });
                         }
                     }
@@ -1224,6 +1254,36 @@ fn merge_online_into_saved(
     for (uuid, data) in collect_player_data(world, inventories) {
         saved_players.insert(uuid, data);
     }
+}
+
+/// Clears in-flight Survival dig animation for a player, if any.
+fn clear_break_animation(
+    break_progress: &mut HashMap<i32, BlockBreakProgress>,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    entity_id: i32,
+) {
+    if let Some(progress) = break_progress.remove(&entity_id) {
+        if let Some(sender) = session_senders.get(&entity_id) {
+            let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                entity_id,
+                position: progress.position,
+                destroy_stage: -1,
+            });
+        }
+    }
+}
+
+/// Builds a minimal JSON chat component for Combat Death (`{"text":"..."}`).
+fn combat_death_message(username: &str, reason: &str) -> String {
+    let mut escaped = String::with_capacity(username.len());
+    for ch in username.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            _ => escaped.push(ch),
+        }
+    }
+    format!(r#"{{"text":"{escaped} {reason}"}}"#)
 }
 
 /// Collects persistence data for a single online player, if present.
