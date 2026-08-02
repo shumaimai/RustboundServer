@@ -8,6 +8,7 @@ pub mod config;
 pub mod connection;
 pub mod listener;
 pub mod offline_uuid;
+pub mod registry;
 pub mod server;
 pub mod session;
 pub mod tick;
