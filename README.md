@@ -6,7 +6,7 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-**Pre-alpha, offline multiplayer mini-server.** Phases A–G are on `main`: join Play, flat chunks + light, dig/place (Creative), compression, remote spawn + **motion broadcast**, chunk streaming, config MOTD/view distance. Next focus is the **gameplay loop** (inventory, vitals, chat).
+**Pre-alpha, offline multiplayer mini-server.** Phases A–G are on `main`. This branch / Phase H adds offline UUID, Keep Alive timeout, Creative inventory/hotbar, and chat. Remaining Phase H: health/death/respawn (#96).
 
 | Layer | Status |
 |-------|--------|
@@ -15,14 +15,16 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 | Tick (20 TPS) + sessions + World | Wired |
 | Flat chunks, light, streaming, overrides | Working |
 | Dig / place | Creative + ACK; Survival denies with ACK |
-| Multiplayer | Tab list, spawn/despawn, movement broadcast |
-| Inventory / health / chat / KA timeout | **Next (Phase H)** |
-| Persistence | Phase I |
+| Multiplayer | Tab list, spawn/despawn, movement broadcast, chat |
+| Inventory / hotbar (Creative) | Wired (#95) |
+| Keep Alive timeout / offline UUID | Wired (#98, #99) |
+| Health / death / respawn | **Next (#96)** |
+| Persistence | Phase I (#100) |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Long-term ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
 
-See [PROGRESS.md](PROGRESS.md). **Next:** [#113](https://github.com/shumaimai/RustboundServer/issues/113) (Phase H).
+See [PROGRESS.md](PROGRESS.md). **Next remaining H:** [#96](https://github.com/shumaimai/RustboundServer/issues/96) · tracking [#113](https://github.com/shumaimai/RustboundServer/issues/113).
 
 ## Workspace
 
@@ -62,7 +64,7 @@ Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ct
 | M1–M4 + A–E | Foundations → mini Play | **Done** |
 | **F** | Play hardening (#86–#90) | **Done** |
 | **G** | Motion, chunk streaming, overrides, config (#91–#94) | **Done** |
-| **H** | Inventory, vitals, chat, KA timeout, offline UUID (#95–#99) | **Next → [#113](https://github.com/shumaimai/RustboundServer/issues/113)** |
+| **H** | Inventory, vitals, chat, KA timeout, offline UUID (#95–#99) | **In progress** — #99/#98/#97/#95 in this merge; **#96 remaining** · [#113](https://github.com/shumaimai/RustboundServer/issues/113) |
 | **I** | Persistence (#100) | Queued |
 | Later | Online mode (#60) | Queued |
 | Long-term | Thin Rust Mod API (#101); hand-port license-clean mods | After H–I |
