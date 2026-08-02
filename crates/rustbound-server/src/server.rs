@@ -76,6 +76,7 @@ impl Server {
             player_count: player_count.clone(),
             max_players,
             default_gamemode: config.default_gamemode,
+            view_distance: config.view_distance,
         });
 
         let listener_config = ListenerConfig {

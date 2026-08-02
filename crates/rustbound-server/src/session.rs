@@ -133,6 +133,20 @@ pub enum SessionEvent {
         /// Whether the player is on the ground.
         on_ground: bool,
     },
+    /// Update the client's center chunk; send Set Center Chunk packet.
+    SetCenterChunkEvent {
+        /// The new center chunk X.
+        chunk_x: i32,
+        /// The new center chunk Z.
+        chunk_z: i32,
+    },
+    /// Send a Chunk Data packet for a newly loaded chunk.
+    LoadChunk {
+        /// The chunk X coordinate.
+        chunk_x: i32,
+        /// The chunk Z coordinate.
+        chunk_z: i32,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -218,6 +232,8 @@ pub struct SessionConfig {
     pub read_timeout: Duration,
     /// Compression threshold (-1 = disabled, >= 0 = enabled).
     pub compression_threshold: i32,
+    /// The server view distance (in chunks).
+    pub view_distance: i32,
 }
 
 /// A player session in the Play state.
@@ -277,6 +293,7 @@ impl PlayerSession {
                 entity_id,
                 uuid: config.uuid,
                 username: config.username.clone(),
+                view_distance: config.view_distance,
                 event_sender: event_tx,
             })
             .map_err(|_| SessionError::Disconnected)?;
@@ -506,6 +523,34 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends a single Chunk Data packet for the given chunk coordinates.
+    pub fn send_single_chunk(
+        &self,
+        stream: &mut TcpStream,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Result<(), SessionError> {
+        let chunk_data = crate::chunk::build_chunk_data_packet(chunk_x, chunk_z);
+        let mut wire = Vec::new();
+        encode_chunk_data(&chunk_data, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Center Chunk packet with the given coordinates.
+    pub fn send_set_center_chunk(
+        &self,
+        stream: &mut TcpStream,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Result<(), SessionError> {
+        let packet = SetCenterChunk { chunk_x, chunk_z };
+        let mut wire = Vec::new();
+        encode_set_center_chunk(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
     /// Sends a Synchronize Player Position packet and returns the teleport ID.
     pub fn send_synchronize_position(
         &mut self,
@@ -709,6 +754,14 @@ impl PlayerSession {
                     self.send_entity_movement(stream, &movement)?;
                     processed = true;
                 }
+                SessionEvent::SetCenterChunkEvent { chunk_x, chunk_z } => {
+                    self.send_set_center_chunk(stream, chunk_x, chunk_z)?;
+                    processed = true;
+                }
+                SessionEvent::LoadChunk { chunk_x, chunk_z } => {
+                    self.send_single_chunk(stream, chunk_x, chunk_z)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -726,9 +779,12 @@ impl PlayerSession {
                 Ok(None)
             }
             PlayPacket::ClientInformation(ClientInformation { view_distance, .. }) => {
-                // Store client view distance - for now just accept it
-                // Phase C will use min(server, client) view distance for chunk loading
-                let _ = view_distance;
+                // Forward the client's view distance to the tick loop so it
+                // can adjust the chunk loading set.
+                let _ = self.tick_sender.send(TickMessage::SetClientViewDistance {
+                    entity_id: self.entity_id,
+                    view_distance: view_distance as i32,
+                });
                 Ok(None)
             }
             PlayPacket::SetPlayerPosition(pos) => {
@@ -1394,6 +1450,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -1430,6 +1487,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1565,6 +1623,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1608,6 +1667,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1655,6 +1715,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1693,6 +1754,7 @@ mod tests {
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
+            view_distance: 10,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 

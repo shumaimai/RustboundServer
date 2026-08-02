@@ -176,6 +176,8 @@ pub struct ConnectionConfig {
     pub max_players: i32,
     /// Default gamemode for new players (0=Survival, 1=Creative).
     pub default_gamemode: u8,
+    /// Server view distance (in chunks).
+    pub view_distance: i32,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -303,6 +305,7 @@ pub fn handle_connection(
                                             max_frame_length: config.max_frame_length,
                                             read_timeout: config.play_read_timeout,
                                             compression_threshold: config.compression_threshold,
+                                            view_distance: config.view_distance,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
@@ -535,6 +538,7 @@ mod tests {
             player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_players: 20,
             default_gamemode: 0,
+            view_distance: 10,
         }
     }
 
