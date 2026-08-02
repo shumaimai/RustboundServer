@@ -2434,6 +2434,8 @@ pub struct PlayerDigging {
     pub position: (i32, i32, i32),
     /// The face being dug (0-5).
     pub face: u8,
+    /// The sequence number for Acknowledge Block Change.
+    pub sequence: i32,
 }
 
 /// Serverbound Use Item On (Place Block) packet (Play `0x31`).
@@ -2453,6 +2455,8 @@ pub struct UseItemOn {
     pub cursor_z: f32,
     /// Whether the player's head is inside a block.
     pub inside_block: bool,
+    /// The sequence number for Acknowledge Block Change.
+    pub sequence: i32,
 }
 
 /// Clientbound Block Update packet (Play `0x0A`).
@@ -2467,8 +2471,8 @@ pub struct BlockUpdate {
 /// Clientbound Acknowledge Block Change packet (Play `0x06`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AcknowledgeBlockChange {
-    /// The block position.
-    pub position: (i32, i32, i32),
+    /// The sequence number to acknowledge.
+    pub sequence: i32,
 }
 
 /// Encodes a Player Digging packet (serverbound Play `0x1D`).
@@ -2486,6 +2490,7 @@ pub fn encode_player_digging(
         &mut body,
     );
     encode_u8(packet.face, &mut body);
+    encode_var_int(packet.sequence, &mut body);
     encode_frame(PLAYER_DIGGING_PACKET_ID, &body, max_frame_length, output)
         .map_err(PlayError::from)?;
     Ok(())
@@ -2532,6 +2537,10 @@ pub fn decode_player_digging(
         *input = source;
         PlayError::from(e)
     })?;
+    let sequence = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
     if !body.is_empty() {
         *input = source;
         return Err(PlayError::TrailingBytes { count: body.len() });
@@ -2541,6 +2550,7 @@ pub fn decode_player_digging(
             action,
             position: (x, y, z),
             face,
+            sequence,
         },
     )))
 }
@@ -2564,6 +2574,7 @@ pub fn encode_use_item_on(
     encode_f32(packet.cursor_y, &mut body);
     encode_f32(packet.cursor_z, &mut body);
     encode_bool(packet.inside_block, &mut body);
+    encode_var_int(packet.sequence, &mut body);
     encode_frame(USE_ITEM_ON_PACKET_ID, &body, max_frame_length, output)
         .map_err(PlayError::from)?;
     Ok(())
@@ -2622,6 +2633,10 @@ pub fn decode_use_item_on(
         *input = source;
         PlayError::from(e)
     })?;
+    let sequence = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
     if !body.is_empty() {
         *input = source;
         return Err(PlayError::TrailingBytes { count: body.len() });
@@ -2635,6 +2650,7 @@ pub fn decode_use_item_on(
             cursor_y,
             cursor_z,
             inside_block,
+            sequence,
         },
     )))
 }
@@ -2710,12 +2726,7 @@ pub fn encode_acknowledge_block_change(
     output: &mut Vec<u8>,
 ) -> Result<(), PlayError> {
     let mut body = Vec::new();
-    encode_position(
-        packet.position.0,
-        packet.position.1,
-        packet.position.2,
-        &mut body,
-    );
+    encode_var_int(packet.sequence, &mut body);
     encode_frame(
         ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID,
         &body,
@@ -2751,7 +2762,7 @@ pub fn decode_acknowledge_block_change(
         });
     }
     let mut body = frame.payload;
-    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+    let sequence = decode_var_int(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -2760,9 +2771,7 @@ pub fn decode_acknowledge_block_change(
         return Err(PlayError::TrailingBytes { count: body.len() });
     }
     Ok(PlayDecodeOutcome::Complete(
-        PlayPacket::AcknowledgeBlockChange(AcknowledgeBlockChange {
-            position: (x, y, z),
-        }),
+        PlayPacket::AcknowledgeBlockChange(AcknowledgeBlockChange { sequence }),
     ))
 }
 
@@ -4038,6 +4047,7 @@ mod tests {
             action: PlayerDiggingAction::StartDestroy,
             position: (10, 64, -20),
             face: 1,
+            sequence: 0,
         };
         let mut wire = Vec::new();
         encode_player_digging(&packet, TEST_MAX_FRAME, &mut wire)?;
@@ -4064,6 +4074,7 @@ mod tests {
             cursor_y: 0.5,
             cursor_z: 0.5,
             inside_block: false,
+            sequence: 0,
         };
         let mut wire = Vec::new();
         encode_use_item_on(&packet, TEST_MAX_FRAME, &mut wire)?;
@@ -4104,15 +4115,13 @@ mod tests {
 
     #[test]
     fn acknowledge_block_change_roundtrip() -> Result<(), PlayError> {
-        let packet = AcknowledgeBlockChange {
-            position: (10, 64, -20),
-        };
+        let packet = AcknowledgeBlockChange { sequence: 42 };
         let mut wire = Vec::new();
         encode_acknowledge_block_change(&packet, TEST_MAX_FRAME, &mut wire)?;
         let mut input = wire.as_slice();
         match decode_acknowledge_block_change(&mut input, TEST_MAX_FRAME)? {
             PlayDecodeOutcome::Complete(PlayPacket::AcknowledgeBlockChange(decoded)) => {
-                assert_eq!(decoded.position, (10, 64, -20));
+                assert_eq!(decoded.sequence, 42);
             }
             other => panic!("expected AcknowledgeBlockChange, got {other:?}"),
         }

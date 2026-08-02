@@ -75,6 +75,7 @@ impl Server {
             play_read_timeout: Duration::from_secs(30),
             player_count: player_count.clone(),
             max_players,
+            default_gamemode: config.default_gamemode,
         });
 
         let listener_config = ListenerConfig {

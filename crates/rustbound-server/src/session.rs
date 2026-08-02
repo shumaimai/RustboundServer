@@ -617,21 +617,21 @@ impl PlayerSession {
     }
 
     /// Handles a decoded play packet from the client.
-    pub fn handle_play_packet(&mut self, packet: PlayPacket) -> Result<(), SessionError> {
+    pub fn handle_play_packet(&mut self, packet: PlayPacket) -> Result<Option<i32>, SessionError> {
         match packet {
             PlayPacket::ConfirmTeleportation(ConfirmTeleportation { teleport_id: _ }) => {
                 // Teleport confirmed - no action needed for now
-                Ok(())
+                Ok(None)
             }
             PlayPacket::KeepAliveServerbound(KeepAlive { payload: _ }) => {
                 // KeepAlive response received - no action needed for now
-                Ok(())
+                Ok(None)
             }
             PlayPacket::ClientInformation(ClientInformation { view_distance, .. }) => {
                 // Store client view distance - for now just accept it
                 // Phase C will use min(server, client) view distance for chunk loading
                 let _ = view_distance;
-                Ok(())
+                Ok(None)
             }
             PlayPacket::SetPlayerPosition(pos) => {
                 if !is_finite_position(pos.x, pos.y, pos.z) {
@@ -649,7 +649,7 @@ impl PlayerSession {
                     pitch: self.last_pitch,
                     on_ground: pos.on_ground,
                 });
-                Ok(())
+                Ok(None)
             }
             PlayPacket::SetPlayerPositionAndRotation(pos) => {
                 if !is_finite_position(pos.x, pos.y, pos.z)
@@ -672,7 +672,7 @@ impl PlayerSession {
                     pitch: pos.pitch,
                     on_ground: pos.on_ground,
                 });
-                Ok(())
+                Ok(None)
             }
             PlayPacket::SetPlayerRotation(rot) => {
                 if !rot.yaw.is_finite() || !rot.pitch.is_finite() {
@@ -689,40 +689,47 @@ impl PlayerSession {
                     pitch: rot.pitch,
                     on_ground: rot.on_ground,
                 });
-                Ok(())
+                Ok(None)
             }
             PlayPacket::PlayerDigging(dig) => {
                 // Creative mode: instant break on StartDestroy
-                if matches!(
-                    dig.action,
-                    rustbound_protocol::play::PlayerDiggingAction::StartDestroy
-                ) {
+                // Survival: deny (no break progress yet) but still ACK
+                if self.gamemode == GameMode::Creative
+                    && matches!(
+                        dig.action,
+                        rustbound_protocol::play::PlayerDiggingAction::StartDestroy
+                    )
+                {
                     // Set block to air (state 0)
                     let _ = self.tick_sender.send(TickMessage::SetBlock {
                         position: dig.position,
                         block_state: 0,
                     });
                 }
-                // Survival: acknowledge and ignore (no physics yet)
-                Ok(())
+                // Always ACK the dig packet (protocol requires it)
+                Ok(Some(dig.sequence))
             }
             PlayPacket::UseItemOn(place) => {
                 // Creative mode: place block (stone = state 1) on the face
-                let (x, y, z) = place.position;
-                let target = match place.face {
-                    0 => (x, y - 1, z), // bottom
-                    1 => (x, y + 1, z), // top
-                    2 => (x, y, z - 1), // north
-                    3 => (x, y, z + 1), // south
-                    4 => (x - 1, y, z), // west
-                    5 => (x + 1, y, z), // east
-                    _ => (x, y, z),
-                };
-                let _ = self.tick_sender.send(TickMessage::SetBlock {
-                    position: target,
-                    block_state: 1, // stone
-                });
-                Ok(())
+                // Survival: deny (no placement yet) but still ACK
+                if self.gamemode == GameMode::Creative {
+                    let (x, y, z) = place.position;
+                    let target = match place.face {
+                        0 => (x, y - 1, z), // bottom
+                        1 => (x, y + 1, z), // top
+                        2 => (x, y, z - 1), // north
+                        3 => (x, y, z + 1), // south
+                        4 => (x - 1, y, z), // west
+                        5 => (x + 1, y, z), // east
+                        _ => (x, y, z),
+                    };
+                    let _ = self.tick_sender.send(TickMessage::SetBlock {
+                        position: target,
+                        block_state: 1, // stone
+                    });
+                }
+                // Always ACK the place packet (protocol requires it)
+                Ok(Some(place.sequence))
             }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
@@ -741,6 +748,27 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         rustbound_protocol::play::encode_block_update(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends an Acknowledge Block Change packet to the client.
+    ///
+    /// This confirms that the server has processed a block change initiated
+    /// by the client (dig/place). The sequence number must match the one
+    /// from the client's Player Digging or Use Item On packet.
+    pub fn send_acknowledge_block_change(
+        &self,
+        stream: &mut TcpStream,
+        sequence: i32,
+    ) -> Result<(), SessionError> {
+        let packet = rustbound_protocol::play::AcknowledgeBlockChange { sequence };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_acknowledge_block_change(
+            &packet,
+            self.max_frame_length,
+            &mut wire,
+        )?;
         self.send_wire(stream, &wire)?;
         Ok(())
     }
@@ -1068,18 +1096,28 @@ pub fn run_play_loop(
             session_config.compression_threshold,
         ) {
             Ok(Some(packet)) => {
-                if let Err(e) = session.handle_play_packet(packet) {
-                    // Send disconnect before returning the error
-                    match &e {
-                        SessionError::InvalidPosition => {
-                            session.send_disconnect(stream, "Invalid position");
+                match session.handle_play_packet(packet) {
+                    Ok(Some(ack_sequence)) => {
+                        // Send Acknowledge Block Change for dig/place packets
+                        if let Err(e) = session.send_acknowledge_block_change(stream, ack_sequence)
+                        {
+                            break Err(e);
                         }
-                        SessionError::UnexpectedPacket(_) => {
-                            session.send_disconnect(stream, "Unexpected packet");
-                        }
-                        _ => {}
                     }
-                    break Err(e);
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Send disconnect before returning the error
+                        match &e {
+                            SessionError::InvalidPosition => {
+                                session.send_disconnect(stream, "Invalid position");
+                            }
+                            SessionError::UnexpectedPacket(_) => {
+                                session.send_disconnect(stream, "Unexpected packet");
+                            }
+                            _ => {}
+                        }
+                        break Err(e);
+                    }
                 }
             }
             Ok(None) => {
@@ -1231,6 +1269,7 @@ mod tests {
             action: PlayerDiggingAction::StartDestroy,
             position: (10, 64, -5),
             face: 1,
+            sequence: 0,
         };
         let mut wire = Vec::new();
         encode_player_digging(&dig, PROTOCOL_MAX_FRAME_LENGTH, &mut wire)?;
@@ -1262,6 +1301,7 @@ mod tests {
             cursor_y: 1.0,
             cursor_z: 0.5,
             inside_block: false,
+            sequence: 0,
         };
         let mut wire = Vec::new();
         encode_use_item_on(&place, PROTOCOL_MAX_FRAME_LENGTH, &mut wire)?;
@@ -1320,11 +1360,15 @@ mod tests {
         let _ = rx.recv()?;
 
         // Send a StartDestroy dig packet
-        session.handle_play_packet(PlayPacket::PlayerDigging(PlayerDigging {
+        let ack = session.handle_play_packet(PlayPacket::PlayerDigging(PlayerDigging {
             action: PlayerDiggingAction::StartDestroy,
             position: (5, 10, 15),
             face: 1,
+            sequence: 7,
         }))?;
+
+        // Should return ACK sequence
+        assert_eq!(ack, Some(7));
 
         // Should receive SetBlock with block_state=0 (air)
         match rx.recv()? {
@@ -1359,7 +1403,7 @@ mod tests {
         let _ = rx.recv()?;
 
         // Place on top face (face=1) of block at (0,64,0)
-        session.handle_play_packet(PlayPacket::UseItemOn(UseItemOn {
+        let ack = session.handle_play_packet(PlayPacket::UseItemOn(UseItemOn {
             position: (0, 64, 0),
             face: 1,
             hand: 0,
@@ -1367,7 +1411,11 @@ mod tests {
             cursor_y: 1.0,
             cursor_z: 0.5,
             inside_block: false,
+            sequence: 3,
         }))?;
+
+        // Should return ACK sequence
+        assert_eq!(ack, Some(3));
 
         // Should receive SetBlock at (0,65,0) with block_state=1 (stone)
         match rx.recv()? {
@@ -1379,6 +1427,86 @@ mod tests {
                 assert_eq!(block_state, 1);
             }
             other => panic!("expected SetBlock, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn survival_dig_does_not_modify_world_but_acks() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::{PlayerDigging, PlayerDiggingAction};
+
+        let (tx, rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0, // Survival
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        // Consume PlayerJoined
+        let _ = rx.recv()?;
+
+        // Send a StartDestroy dig packet in Survival mode
+        let ack = session.handle_play_packet(PlayPacket::PlayerDigging(PlayerDigging {
+            action: PlayerDiggingAction::StartDestroy,
+            position: (5, 10, 15),
+            face: 1,
+            sequence: 99,
+        }))?;
+
+        // Should still return ACK sequence (protocol requires it)
+        assert_eq!(ack, Some(99));
+
+        // Should NOT receive SetBlock (Survival doesn't instant-break)
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {} // Good: no SetBlock
+            Ok(msg) => panic!("Survival dig should not send SetBlock, got {msg:?}"),
+            Err(e) => panic!("channel error: {e}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn survival_place_does_not_modify_world_but_acks() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::UseItemOn;
+
+        let (tx, rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 0, // Survival
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        // Consume PlayerJoined
+        let _ = rx.recv()?;
+
+        // Send a UseItemOn packet in Survival mode
+        let ack = session.handle_play_packet(PlayPacket::UseItemOn(UseItemOn {
+            position: (0, 64, 0),
+            face: 1,
+            hand: 0,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+            sequence: 55,
+        }))?;
+
+        // Should still return ACK sequence
+        assert_eq!(ack, Some(55));
+
+        // Should NOT receive SetBlock
+        match rx.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {} // Good: no SetBlock
+            Ok(msg) => panic!("Survival place should not send SetBlock, got {msg:?}"),
+            Err(e) => panic!("channel error: {e}"),
         }
         Ok(())
     }
