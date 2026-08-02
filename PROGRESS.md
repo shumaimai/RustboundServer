@@ -25,10 +25,12 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | Phase C: World Visibility | 3 | 1 | — | 完了 |
 | Phase D: Multiplayer | 3 | 1 | — | 完了 |
 | Phase E: Polish | 5 | 3 | — | 完了 |
-| **合計** | **46** | **24** | **299** | **全完了** |
+| Phase F–I + Mod API design | 17 | — | — | **計画中 (#102)** |
+| **合計 (A–E まで)** | **46** | **24** | **~298** | **A–E 完了** |
 
-全299テスト合格 (28 conformance + 219 protocol + 52 server, 1 ignored)
-`cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` クリーン
+テスト: conformance 28 + protocol 219 + server 52（うち play conformance に既知失敗あり）+ 1 ignored。
+`cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` はクリーン想定。
+詳細な次工程は GitHub Issue #102（Phase F+）。
 
 ---
 
@@ -255,19 +257,30 @@ c587232 Establish clean-room Rust workspace.
 
 ---
 
+## 既知のギャップ（A–E 完了後）
+
+実装は載っているが、本番相当の「遊べる」状態には未達な点:
+
+- `server_handles_play_conformance` が失敗しうる（framing / connection reset）
+- dig/place コーデックとハンドラはあるが、Play デコード経路に未配線で未知パケット切断になりうる
+- Login で圧縮を有効にしたあと Play が非圧縮フレーミングのままになりうる
+- チャンクライトが空、初期送出半径が小さい、移動後のストリーミングなし
+- 他プレイヤーの継続的な移動ブロードキャストなし
+- インベントリ / 体力 / チャット / 永続化なし
+- online mode 未実装（#60）
+
 ## 今後の展望
 
-M1-M4でMinecraft 1.20.1サーバーの基盤が完成。次のステップ候補:
+Phases A–E でオフライン最小 Play まで到達。次は **Issue #102**（Phase F+）を正とする。
 
-1. **Play状態の完全統合** — コネクションハンドラーにPlay状態のパケット処理を統合 (Join Game送信、Keep Alive、位置更新)
-2. **チャンク生成** — プロシージャルチャンク生成 (バニラワールド生成アルゴリズム)
-3. **ブロック・エンティティシステム** — ブロック状態、エンティティ管理、AI
-4. **インベントリ** — アイテムスロット、コンテナ、クラフト
-5. **オンラインモード** — Mojang認証、暗号化、プロパティ署名
-6. **マルチプレイヤー** — プレイヤー間ブロードキャスト、チャット、コマンド
-7. **パフォーマンス最適化** — 並列チャンク生成、ネットワークI/O最適化
+1. **Phase F — Play hardening** — #86–#90（回帰、dig/place 配線、圧縮、ライト、gamemode）
+2. **Phase G — 世界と多人** — #91–#94
+3. **Phase H — ゲームループ** — #95–#99
+4. **Phase I — 永続化** — #100
+5. **Online mode** — #60
+6. **Long-term — 薄い Rust Mod API（方針 A）** — #101。Forge jar 互換は目標外。改変許可のある有名 Mod を手で Rust 移植する。
 
 ---
 
-*最終更新: M4完了時点*
-*テスト数: 240 (全合格)*
+*最終更新: Phase A–E 完了後 / Phase F+ 計画*
+*テスト数: 298+（server play conformance に既知の失敗あり — Phase F で対処）*

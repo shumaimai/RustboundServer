@@ -6,27 +6,32 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-Pre-alpha. Protocol codecs and a runnable server skeleton exist; **a client cannot yet enter Play** (Login Success currently ends the connection). Open issues describe the remaining work.
+**Pre-alpha, joinable offline mini-server.** Phases A–E are merged: offline Login → Play, join sequence, flat chunks, keep-alive, tab list, remote spawn/despawn, dig/place codecs, conformance helpers. It is **not** a full survival/creative game yet.
 
 | Layer | Status |
 |-------|--------|
 | Protocol codecs (Handshake / Status / Login / Play core) | Implemented |
-| Login / Play state machines (in-memory) | Implemented |
+| Login / Play state machines | Wired into the live server |
 | Conformance probes (Status / Login / Play) | Implemented |
-| TCP listener + connection handler | Status + offline Login work |
-| Tick loop (20 TPS) + World / PlayerHandle | Exist but **not wired** to connections |
-| Play session (Join Game → world) | **Not integrated** |
-| Chunk delivery / gameplay | Not started |
+| TCP listener + connection handler | Status + offline Login + Play |
+| Tick loop (20 TPS) + World / sessions | Wired |
+| Flat chunk join + initial columns | Working (limited radius; light incomplete) |
+| Multiplayer tab list / spawn | Partial (no continuous motion broadcast) |
+| Dig / place | Codecs + handlers present; **decode path / compression gaps remain** |
+| Inventory / health / chat / persistence | Not started |
+| Online mode | Not started ([#60](https://github.com/shumaimai/RustboundServer/issues/60)) |
+| Forge jar mods / JVM | **Out of scope** |
+| Thin Rust Mod API | **Long-term goal** (after a solid vanilla loop) |
 
-Closed foundations: Issues [#1](https://github.com/shumaimai/RustboundServer/issues/1)–[#44](https://github.com/shumaimai/RustboundServer/issues/44).
+See [PROGRESS.md](PROGRESS.md) for milestone history. Next work: **[#102](https://github.com/shumaimai/RustboundServer/issues/102)** (Phase F+ tracking).
 
 ## Workspace
 
 ```
 crates/
   rustbound-protocol/     # Wire codecs + Login/Play state machines
-  rustbound-server/       # Listener, connection router, tick, world, config
-  rustbound-conformance/  # Black-box probes + Status diff normalizer
+  rustbound-server/       # Listener, connection, session, tick, world, chunks
+  rustbound-conformance/  # Black-box probes + Status/Play diff helpers
 ```
 
 ## Build and test
@@ -44,28 +49,28 @@ Run the server (defaults: `0.0.0.0:25565`, offline mode):
 cargo run -p rustbound-server
 ```
 
-Optional: `--config path/to/server.properties`, `--host`, `--port`.
+Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ctrl+C.
 
 ## Architecture notes
 
-- One authoritative tick thread (20 TPS); connection threads talk via `mpsc` messages — avoid global `Arc<Mutex<_>>` world state.
+- One authoritative tick thread (20 TPS); connection threads talk via `mpsc` — avoid global `Arc<Mutex<_>>` world state.
 - Prefer existing `LoginStateMachine` / `PlayStateMachine` over re-implementing flows in the server.
 - Conformance probes should drive integration; Forge may be used as a local oracle only (never commit its artifacts).
 - `unsafe` only in isolated, documented, audited modules (`forbid` at workspace level today).
 
-## Roadmap (next)
+## Roadmap
 
-Tracked in **[#74](https://github.com/shumaimai/RustboundServer/issues/74)** (Phases A–E checklist). Start here:
+| Phase | Focus | Tracking |
+|-------|--------|----------|
+| M1–M4 + A–E | Foundations through mini Play | Done — see PROGRESS.md / [#74](https://github.com/shumaimai/RustboundServer/issues/74) |
+| **F** | Play hardening (regression, dig/place wire-up, compression, light, gamemode) | [#102](https://github.com/shumaimai/RustboundServer/issues/102) · start [#86](https://github.com/shumaimai/RustboundServer/issues/86)–[#90](https://github.com/shumaimai/RustboundServer/issues/90) |
+| **G** | Multiplayer motion + chunk streaming + config wiring | [#91](https://github.com/shumaimai/RustboundServer/issues/91)–[#94](https://github.com/shumaimai/RustboundServer/issues/94) |
+| **H** | Inventory, vitals, chat, keep-alive timeout | [#95](https://github.com/shumaimai/RustboundServer/issues/95)–[#99](https://github.com/shumaimai/RustboundServer/issues/99) |
+| **I** | Persistence | [#100](https://github.com/shumaimai/RustboundServer/issues/100) |
+| Later | Online mode [#60](https://github.com/shumaimai/RustboundServer/issues/60) | |
+| **Long-term** | Thin **Rust Mod API** (not Forge jar compatibility); port license-clean famous mods to Rust | [#101](https://github.com/shumaimai/RustboundServer/issues/101) |
 
-| Phase | Focus | Issues |
-|-------|--------|--------|
-| **A (P0)** | Play integration — Join Game on the live server | [#51](https://github.com/shumaimai/RustboundServer/issues/51)–[#55](https://github.com/shumaimai/RustboundServer/issues/55) |
-| **B (P1)** | Compression, login SM, registry codec, join sequence, online mode | [#56](https://github.com/shumaimai/RustboundServer/issues/56)–[#62](https://github.com/shumaimai/RustboundServer/issues/62) |
-| **C (P2)** | Chunk generation and delivery | [#63](https://github.com/shumaimai/RustboundServer/issues/63)–[#65](https://github.com/shumaimai/RustboundServer/issues/65) |
-| **D (P3)** | Movement, tab list, remote players, dig/place, cleanup | [#66](https://github.com/shumaimai/RustboundServer/issues/66)–[#70](https://github.com/shumaimai/RustboundServer/issues/70) |
-| **E (P3)** | Play differentials, live status counts, signal shutdown | [#71](https://github.com/shumaimai/RustboundServer/issues/71)–[#73](https://github.com/shumaimai/RustboundServer/issues/73) |
-
-Recommended first slice: **#52 → #53 → #51 → #54 → #55** (Confirm Teleportation, session, wire Play, tick KeepAlive, conformance).
+**Not a goal:** drop-in Java Forge mod compatibility or an automatic Forge→Rust compiler.
 
 ## Contributing
 
