@@ -11,6 +11,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::mod_api::{ModHost, PlayerInfo, PlayerView};
 use crate::session::SessionEvent;
 use crate::world::World;
 use rustbound_protocol::primitives::Uuid;
@@ -510,11 +511,21 @@ pub fn start_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
     autosave_interval_secs: u64,
+    mods: Vec<Arc<dyn crate::mod_api::Mod>>,
 ) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
     let (event_tx, event_rx) = channel::<TickEvent>();
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
+
+    // Build ModHost with the real tick sender so mod callbacks can
+    // send messages to the tick loop.
+    let mut mod_host = ModHost::from_sender(msg_tx.clone());
+    for m in mods {
+        if let Err(e) = mod_host.register(m) {
+            eprintln!("warning: failed to register mod: {}", e);
+        }
+    }
 
     let thread = thread::Builder::new()
         .name("rustbound-tick".to_string())
@@ -526,6 +537,7 @@ pub fn start_tick_loop(
                 player_count,
                 level_name,
                 autosave_interval_secs,
+                mod_host,
             );
         })
         .map_err(TickStartError::ThreadSpawn)?;
@@ -547,6 +559,7 @@ fn run_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
     autosave_interval_secs: u64,
+    mod_host: ModHost,
 ) {
     // Load block overrides and player data from disk on startup
     let loaded = crate::persist::load_overrides(&level_name);
@@ -562,6 +575,14 @@ fn run_tick_loop(
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
     let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
     let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
+
+    // Initialize all registered mods before the first tick
+    {
+        let player_view = build_player_view(&world, &inventories);
+        if let Err(e) = mod_host.init_all(player_view, tick_count) {
+            eprintln!("error: mod init failed: {}", e);
+        }
+    }
 
     while !shutdown.load(Ordering::Acquire) {
         let tick_start = Instant::now();
@@ -1222,6 +1243,12 @@ fn run_tick_loop(
             last_autosave_tick = tick_count;
         }
 
+        // Call mod tick callbacks
+        let player_view = build_player_view(&world, &inventories);
+        if let Err(e) = mod_host.tick_all(player_view, tick_count) {
+            eprintln!("error: mod tick failed: {}", e);
+        }
+
         tick_count += 1;
 
         // Sleep for the remaining tick time
@@ -1241,6 +1268,10 @@ fn run_tick_loop(
     if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
         eprintln!("error: failed to save player data on shutdown: {}", e);
     }
+
+    // Notify all mods that the server is shutting down
+    let player_view = build_player_view(&world, &inventories);
+    mod_host.shutdown_all(player_view, tick_count);
 
     let _ = event_tx.send(TickEvent::Shutdown);
 }
@@ -1328,6 +1359,28 @@ fn collect_player_data(
     result
 }
 
+/// Builds a read-only [`PlayerView`] snapshot from the current world and
+/// inventory state. Called at tick start so mod callbacks see a consistent
+/// view of all online players.
+fn build_player_view(world: &World, inventories: &HashMap<i32, PlayerInventory>) -> PlayerView {
+    let players: Vec<PlayerInfo> = world
+        .players()
+        .map(|player| {
+            let inv = inventories.get(&player.entity_id);
+            PlayerInfo {
+                entity_id: player.entity_id,
+                uuid: player.uuid,
+                username: player.username.clone(),
+                gamemode: player.gamemode,
+                position: player.position(),
+                health: inv.map(|i| i.health).unwrap_or(DEFAULT_HEALTH),
+                food: inv.map(|i| i.food).unwrap_or(DEFAULT_FOOD),
+            }
+        })
+        .collect();
+    PlayerView::new(players)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1386,6 +1439,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
         std::thread::sleep(Duration::from_millis(100));
         handle.shutdown();
@@ -1399,6 +1453,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx_session) = channel::<SessionEvent>();
@@ -1456,6 +1511,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
         handle.send(super::TickMessage::Shutdown)?;
 
@@ -1484,6 +1540,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player 1 joins and digs some blocks (creates overrides)
@@ -1589,6 +1646,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player joins a clean world (no overrides)
@@ -1630,6 +1688,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player 1 joins
@@ -1723,6 +1782,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player 1 joins
@@ -1882,6 +1942,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player joins at spawn (0, 64, 0) -> chunk (0, 0)
@@ -1944,6 +2005,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2000,6 +2062,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2097,6 +2160,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2145,6 +2209,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2205,6 +2270,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2253,6 +2319,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2306,6 +2373,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player 1 joins
@@ -2408,6 +2476,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2471,6 +2540,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2541,6 +2611,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2649,6 +2720,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2700,6 +2772,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         // Player 1 joins in Creative (gamemode=1)
@@ -2763,6 +2836,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2833,6 +2907,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2886,6 +2961,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2966,6 +3042,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level_name.clone(),
             1, // 1 second autosave
+            Vec::new(),
         )?;
 
         // Place a block
@@ -3009,6 +3086,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level_name.clone(),
             0, // autosave disabled
+            Vec::new(),
         )?;
 
         // Place a block
@@ -3132,6 +3210,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0,
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -3203,6 +3282,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0,
+            Vec::new(),
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -3270,6 +3350,55 @@ mod tests {
         );
 
         handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn tick_loop_calls_mod_tick_callbacks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::Mutex;
+
+        /// A test mod that counts tick calls.
+        struct CountingMod {
+            ticks: Mutex<u64>,
+        }
+
+        impl crate::mod_api::Mod for CountingMod {
+            fn id(&self) -> &str {
+                "counting_mod"
+            }
+
+            fn tick(
+                &self,
+                _ctx: &crate::mod_api::ModContext,
+            ) -> Result<(), crate::mod_api::ModError> {
+                *self.ticks.lock().unwrap() += 1;
+                Ok(())
+            }
+        }
+
+        let level = TestLevel::new();
+        let counting_mod = std::sync::Arc::new(CountingMod {
+            ticks: Mutex::new(0),
+        });
+        let mods: Vec<std::sync::Arc<dyn crate::mod_api::Mod>> = vec![counting_mod.clone()];
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0, // disable autosave in tests
+            mods,
+        )?;
+
+        // Let the tick loop run for ~500ms (should be ~10 ticks at 20 TPS)
+        std::thread::sleep(Duration::from_millis(500));
+        handle.shutdown();
+
+        let tick_count = *counting_mod.ticks.lock().unwrap();
+        assert!(
+            tick_count >= 5,
+            "mod tick should be called at least 5 times in 500ms, got {tick_count}"
+        );
+
         Ok(())
     }
 }

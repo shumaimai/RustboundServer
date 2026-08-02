@@ -8,11 +8,12 @@
 //! The traits are defined but not yet wired into the tick loop.
 
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
 use rustbound_protocol::primitives::Uuid;
 
 use crate::mutation::WorldFacade;
-use crate::tick::TickHandle;
+use crate::tick::{TickHandle, TickMessage};
 
 /// Unique identifier for an entity (player, mob, etc.).
 pub type EntityId = i32;
@@ -305,8 +306,8 @@ impl Default for ModRegistry {
 
 /// A mod host that manages the lifecycle of registered mods.
 ///
-/// Created from a `TickHandle`, this provides the integration point
-/// between the tick loop and the mod system.
+/// Created from a `TickHandle` or a `Sender<TickMessage>`, this provides
+/// the integration point between the tick loop and the mod system.
 pub struct ModHost {
     registry: ModRegistry,
     facade: WorldFacade,
@@ -318,6 +319,17 @@ impl ModHost {
         Self {
             registry: ModRegistry::new(),
             facade: handle.world_facade(),
+        }
+    }
+
+    /// Creates a new `ModHost` from a tick message sender.
+    ///
+    /// This is useful when the `TickHandle` doesn't exist yet (e.g.,
+    /// the sender is being passed into `start_tick_loop`).
+    pub fn from_sender(sender: Sender<TickMessage>) -> Self {
+        Self {
+            registry: ModRegistry::new(),
+            facade: WorldFacade::new(sender),
         }
     }
 
