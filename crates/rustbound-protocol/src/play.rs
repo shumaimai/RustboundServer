@@ -87,6 +87,15 @@ pub const GAME_EVENT_PACKET_ID: i32 = 0x1F;
 /// Packet ID for the clientbound Set Center Chunk packet.
 pub const SET_CENTER_CHUNK_PACKET_ID: i32 = 0x4E;
 
+/// Packet ID for the clientbound Unload Chunk packet.
+pub const UNLOAD_CHUNK_PACKET_ID: i32 = 0x1E;
+
+/// Packet ID for the clientbound Combat Death packet.
+pub const COMBAT_DEATH_PACKET_ID: i32 = 0x38;
+
+/// Packet ID for the clientbound Set Block Destroy Stage packet.
+pub const SET_BLOCK_DESTROY_STAGE_PACKET_ID: i32 = 0x07;
+
 /// Packet ID for the clientbound Set Render Distance packet.
 pub const SET_RENDER_DISTANCE_PACKET_ID: i32 = 0x4F;
 
@@ -296,6 +305,12 @@ pub enum PlayPacket {
     SetDefaultSpawnPosition(SetDefaultSpawnPosition),
     /// Clientbound Set Center Chunk (Play `0x4E`).
     SetCenterChunk(SetCenterChunk),
+    /// Clientbound Unload Chunk (Play `0x1E`).
+    UnloadChunk(UnloadChunk),
+    /// Clientbound Combat Death (Play `0x38`).
+    CombatDeath(CombatDeath),
+    /// Clientbound Set Block Destroy Stage (Play `0x07`).
+    SetBlockDestroyStage(SetBlockDestroyStage),
     /// Clientbound Set Render Distance (Play `0x4F`).
     SetRenderDistance(SetRenderDistance),
     /// Clientbound Set Simulation Distance (Play `0x5C`).
@@ -1626,6 +1641,44 @@ pub struct SetCenterChunk {
     pub chunk_z: i32,
 }
 
+/// Clientbound Unload Chunk packet (Play `0x1E`).
+///
+/// Tells the client to unload a chunk column. It is legal to send this
+/// packet even if the given chunk is not currently loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnloadChunk {
+    /// The chunk X coordinate.
+    pub chunk_x: i32,
+    /// The chunk Z coordinate.
+    pub chunk_z: i32,
+}
+
+/// Clientbound Combat Death packet (Play `0x38`).
+///
+/// Sent to display the death screen with a death message.
+/// The player ID should match the client's own entity ID.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CombatDeath {
+    /// The entity ID of the player that died.
+    pub player_id: i32,
+    /// The death message as a JSON chat component string.
+    pub message: String,
+}
+
+/// Clientbound Set Block Destroy Stage packet (Play `0x07`).
+///
+/// Sent to display the block break animation. Destroy stage 0–9 sets
+/// the animation; any other value removes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetBlockDestroyStage {
+    /// The entity ID breaking the block (does not need to be a real entity).
+    pub entity_id: i32,
+    /// The block position.
+    pub position: (i32, i32, i32),
+    /// The destroy stage (0–9 to set, any other value to remove).
+    pub destroy_stage: i8,
+}
+
 /// Clientbound Set Render Distance packet (Play `0x4F`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SetRenderDistance {
@@ -2106,6 +2159,207 @@ pub fn decode_set_center_chunk(
     Ok(PlayDecodeOutcome::Complete(PlayPacket::SetCenterChunk(
         SetCenterChunk { chunk_x, chunk_z },
     )))
+}
+
+/// Encodes an Unload Chunk packet (clientbound Play `0x1E`).
+///
+/// Fields are written as Int (big-endian i32), X first then Z.
+pub fn encode_unload_chunk(
+    packet: &UnloadChunk,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::with_capacity(8);
+    body.extend_from_slice(&packet.chunk_x.to_be_bytes());
+    body.extend_from_slice(&packet.chunk_z.to_be_bytes());
+    encode_frame(UNLOAD_CHUNK_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Unload Chunk packet (clientbound Play `0x1E`).
+pub fn decode_unload_chunk(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != UNLOAD_CHUNK_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: UNLOAD_CHUNK_PACKET_ID,
+        });
+    }
+    let body = &frame.payload;
+    if body.len() < 8 {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: 0 });
+    }
+    let chunk_x = i32::from_be_bytes(
+        body[0..4]
+            .try_into()
+            .map_err(|_| PlayError::TrailingBytes { count: 0 })?,
+    );
+    let chunk_z = i32::from_be_bytes(
+        body[4..8]
+            .try_into()
+            .map_err(|_| PlayError::TrailingBytes { count: 0 })?,
+    );
+    let trailing = &body[8..];
+    if !trailing.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes {
+            count: trailing.len(),
+        });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::UnloadChunk(
+        UnloadChunk { chunk_x, chunk_z },
+    )))
+}
+
+/// Encodes a Combat Death packet (clientbound Play `0x38`).
+pub fn encode_combat_death(
+    packet: &CombatDeath,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.player_id, &mut body);
+    encode_string(&packet.message, 32767, &mut body).map_err(PlayError::Codec)?;
+    encode_frame(COMBAT_DEATH_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Combat Death packet (clientbound Play `0x38`).
+pub fn decode_combat_death(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != COMBAT_DEATH_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: COMBAT_DEATH_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let player_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let message = decode_string(&mut body, 32767).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::CombatDeath(
+        CombatDeath {
+            player_id,
+            message: message.to_string(),
+        },
+    )))
+}
+
+/// Encodes a Set Block Destroy Stage packet (clientbound Play `0x07`).
+pub fn encode_set_block_destroy_stage(
+    packet: &SetBlockDestroyStage,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    encode_position(
+        packet.position.0,
+        packet.position.1,
+        packet.position.2,
+        &mut body,
+    );
+    encode_i8(packet.destroy_stage, &mut body);
+    encode_frame(
+        SET_BLOCK_DESTROY_STAGE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Block Destroy Stage packet (clientbound Play `0x07`).
+pub fn decode_set_block_destroy_stage(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_BLOCK_DESTROY_STAGE_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_BLOCK_DESTROY_STAGE_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let position = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let destroy_stage = decode_i8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetBlockDestroyStage(SetBlockDestroyStage {
+            entity_id,
+            position,
+            destroy_stage,
+        }),
+    ))
 }
 
 /// Encodes a Set Render Distance packet (clientbound Play `0x4F`).
@@ -4532,42 +4786,44 @@ mod tests {
     use super::{
         AcknowledgeBlockChange, BlockUpdate, CHAT_MESSAGE_SERVERBOUND_PACKET_ID,
         CLIENT_STATUS_PACKET_ID, ChangeDifficulty, ChatMode, ChunkData, ClientInformation,
-        ConfirmTeleportation, DisconnectPlay, EntityEvent, EntityTeleport, GameEvent, GameMode,
-        JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand,
-        MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome, PlayError, PlayPacket,
-        PlayerAbilities, PlayerDigging, PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry,
-        PlayerInfoRemove, PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, Respawn,
-        SET_CREATIVE_MODE_SLOT_PACKET_ID, SET_HELD_ITEM_SERVERBOUND_PACKET_ID,
-        SYSTEM_CHAT_MESSAGE_PACKET_ID, SetCenterChunk, SetContainerContent, SetContainerSlot,
-        SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetPlayerPosition,
-        SetPlayerPositionAndRotation, SetPlayerRotation, SetRenderDistance, SetSimulationDistance,
-        Slot, SpawnPlayer, SynchronizePlayerPosition, SystemChatMessage, UseItemOn,
-        decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
-        decode_chat_message_serverbound, decode_chunk_data, decode_client_information,
-        decode_client_status, decode_confirm_teleportation, decode_disconnect_play,
-        decode_entity_event, decode_entity_teleport, decode_game_event, decode_join_game,
-        decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_move_entity_pos,
-        decode_move_entity_pos_rot, decode_move_entity_rot, decode_player_abilities,
-        decode_player_digging, decode_plugin_message_clientbound, decode_respawn,
+        CombatDeath, ConfirmTeleportation, DisconnectPlay, EntityEvent, EntityTeleport, GameEvent,
+        GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive,
+        MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome, PlayError,
+        PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction, PlayerInfoActions,
+        PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, PluginMessageClientbound,
+        RemoveEntities, Respawn, SET_CREATIVE_MODE_SLOT_PACKET_ID,
+        SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SYSTEM_CHAT_MESSAGE_PACKET_ID, SetBlockDestroyStage,
+        SetCenterChunk, SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth,
+        SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
+        SetRenderDistance, SetSimulationDistance, Slot, SpawnPlayer, SynchronizePlayerPosition,
+        SystemChatMessage, UnloadChunk, UseItemOn, decode_acknowledge_block_change,
+        decode_block_update, decode_change_difficulty, decode_chat_message_serverbound,
+        decode_chunk_data, decode_client_information, decode_client_status, decode_combat_death,
+        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
+        decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
+        decode_move_entity_rot, decode_player_abilities, decode_player_digging,
+        decode_plugin_message_clientbound, decode_respawn, decode_set_block_destroy_stage,
         decode_set_center_chunk, decode_set_container_content, decode_set_container_slot,
         decode_set_creative_mode_slot, decode_set_default_spawn_position, decode_set_health,
         decode_set_held_item, decode_set_held_item_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
         decode_set_render_distance, decode_set_simulation_distance, decode_slot,
-        decode_synchronize_player_position, decode_use_item_on, encode_acknowledge_block_change,
-        encode_block_update, encode_change_difficulty, encode_chunk_data,
-        encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
-        encode_entity_event, encode_entity_teleport, encode_game_event, encode_join_game,
-        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_move_entity_pos,
-        encode_move_entity_pos_rot, encode_move_entity_rot, encode_player_abilities,
-        encode_player_digging, encode_player_info_remove, encode_player_info_update,
-        encode_plugin_message_clientbound, encode_remove_entities, encode_respawn,
+        decode_synchronize_player_position, decode_unload_chunk, decode_use_item_on,
+        encode_acknowledge_block_change, encode_block_update, encode_change_difficulty,
+        encode_chunk_data, encode_client_information, encode_combat_death,
+        encode_confirm_teleportation, encode_disconnect_play, encode_entity_event,
+        encode_entity_teleport, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
+        encode_keep_alive_serverbound, encode_move_entity_pos, encode_move_entity_pos_rot,
+        encode_move_entity_rot, encode_player_abilities, encode_player_digging,
+        encode_player_info_remove, encode_player_info_update, encode_plugin_message_clientbound,
+        encode_remove_entities, encode_respawn, encode_set_block_destroy_stage,
         encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
         encode_set_default_spawn_position, encode_set_health, encode_set_held_item,
         encode_set_player_position, encode_set_player_position_and_rotation,
         encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
         encode_slot, encode_spawn_player, encode_synchronize_player_position,
-        encode_system_chat_message, encode_use_item_on, ensure_play_state,
+        encode_system_chat_message, encode_unload_chunk, encode_use_item_on, ensure_play_state,
     };
     use crate::primitives::{decode_bool, decode_string};
     use crate::state::ProtocolState;
@@ -5561,6 +5817,108 @@ mod tests {
                 assert_eq!(sc.chunk_z, -5);
             }
             other => panic!("expected SetCenterChunk, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_chunk_roundtrip() -> Result<(), PlayError> {
+        let packet = UnloadChunk {
+            chunk_x: 10,
+            chunk_z: -5,
+        };
+        let mut wire = Vec::new();
+        encode_unload_chunk(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_unload_chunk(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::UnloadChunk(uc)) => {
+                assert_eq!(uc.chunk_x, 10);
+                assert_eq!(uc.chunk_z, -5);
+            }
+            other => panic!("expected UnloadChunk, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_chunk_negative_coords_roundtrip() -> Result<(), PlayError> {
+        let packet = UnloadChunk {
+            chunk_x: -100,
+            chunk_z: -200,
+        };
+        let mut wire = Vec::new();
+        encode_unload_chunk(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_unload_chunk(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::UnloadChunk(uc)) => {
+                assert_eq!(uc.chunk_x, -100);
+                assert_eq!(uc.chunk_z, -200);
+            }
+            other => panic!("expected UnloadChunk, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn unload_chunk_zero_coords_roundtrip() -> Result<(), PlayError> {
+        let packet = UnloadChunk {
+            chunk_x: 0,
+            chunk_z: 0,
+        };
+        let mut wire = Vec::new();
+        encode_unload_chunk(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_unload_chunk(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::UnloadChunk(uc)) => {
+                assert_eq!(uc.chunk_x, 0);
+                assert_eq!(uc.chunk_z, 0);
+            }
+            other => panic!("expected UnloadChunk, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn combat_death_roundtrip() -> Result<(), PlayError> {
+        let packet = CombatDeath {
+            player_id: 42,
+            message: r#"{"text":"Player was slain"}"#.to_string(),
+        };
+        let mut wire = Vec::new();
+        encode_combat_death(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_combat_death(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::CombatDeath(cd)) => {
+                assert_eq!(cd.player_id, 42);
+                assert_eq!(cd.message, packet.message);
+            }
+            other => panic!("expected CombatDeath, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_block_destroy_stage_roundtrip() -> Result<(), PlayError> {
+        let packet = SetBlockDestroyStage {
+            entity_id: 100,
+            position: (10, -64, 20),
+            destroy_stage: 5,
+        };
+        let mut wire = Vec::new();
+        encode_set_block_destroy_stage(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_block_destroy_stage(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetBlockDestroyStage(s)) => {
+                assert_eq!(s.entity_id, 100);
+                assert_eq!(s.position, (10, -64, 20));
+                assert_eq!(s.destroy_stage, 5);
+            }
+            other => panic!("expected SetBlockDestroyStage, got {other:?}"),
         }
         assert!(input.is_empty());
         Ok(())

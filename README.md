@@ -62,9 +62,9 @@ Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ct
 | **F** | Play hardening (#86–#90) | **Done** |
 | **G** | Motion, streaming, overrides, config (#91–#94) | **Done** |
 | **H** | Inventory, chat, KA timeout, UUID, vitals (#95–#99) | **Done** |
-| **I** | Persistence + polish (#122–#133) | **Partial** — #122/#131/#123/#124–#126 in this PR; see [#134](https://github.com/shumaimai/RustboundServer/issues/134) |
+| **I** | Persistence + polish (#122–#133) | **Done** — see [#134](https://github.com/shumaimai/RustboundServer/issues/134) leftovers (#60) |
 | Later | Online mode (#60) | Queued |
-| Long-term | Thin Rust Mod API (#101, #131–#132) | After I |
+| Long-term | Thin Rust Mod API (#101, #132) | Design + façade landed; wire next |
 
 **Not a goal:** drop-in Java Forge mod compatibility or an automatic Forge→Rust compiler.
 

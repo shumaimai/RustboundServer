@@ -56,6 +56,33 @@ pub const DEFAULT_FOOD: i32 = 20;
 pub const DEFAULT_FOOD_SATURATION: f32 = 5.0;
 /// The Y coordinate below which the void kills players.
 pub const VOID_DEATH_Y: f64 = -64.0;
+/// Food drain interval in ticks (80 ticks = 4 seconds at 20 TPS).
+/// This is a stub approximation of vanilla exhaustion; real Minecraft
+/// ties this to exhaustion level (0.1/tick passive), but for the minimal
+/// implementation we use a simple tick-count-based drain.
+pub const FOOD_DRAIN_INTERVAL_TICKS: u64 = 80; // 4 seconds per drain tick
+/// Starvation damage applied when food reaches 0.
+pub const STARVATION_DAMAGE: f32 = 1.0;
+/// Gamemode Creative (exempt from food drain).
+pub const GAMEMODE_CREATIVE: u8 = 1;
+/// Default block hardness for the minimal stub (seconds to break by hand).
+/// Real Minecraft varies per block type; this is a uniform approximation.
+pub const DEFAULT_BLOCK_HARDNESS_TICKS: u64 = 30; // 1.5 seconds at 20 TPS
+/// Number of destroy stages (0–9).
+pub const MAX_DESTROY_STAGE: i8 = 9;
+
+/// Tracks per-player block break progress.
+#[derive(Debug, Clone)]
+struct BlockBreakProgress {
+    /// The block position being broken.
+    position: (i32, i32, i32),
+    /// Ticks elapsed since break started.
+    ticks_elapsed: u64,
+    /// Total ticks needed to break (based on hardness).
+    total_ticks: u64,
+    /// Last destroy stage sent to client.
+    last_stage: i8,
+}
 
 /// Per-player inventory state, owned by the tick loop.
 ///
@@ -134,6 +161,34 @@ impl PlayerInventory {
         self.food_saturation = DEFAULT_FOOD_SATURATION;
         self.is_dead = false;
     }
+
+    /// Applies one food drain tick: deplete saturation first, then food.
+    /// Returns true if food or saturation changed.
+    fn drain_food(&mut self) -> bool {
+        if self.food_saturation > 0.0 {
+            self.food_saturation = (self.food_saturation - 1.0).max(0.0);
+            true
+        } else if self.food > 0 {
+            self.food -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Applies starvation damage if food is 0 and player is not dead.
+    /// Returns true if damage was applied.
+    fn starve(&mut self) -> bool {
+        if self.food == 0 && !self.is_dead {
+            self.health = (self.health - STARVATION_DAMAGE).max(0.0);
+            if self.health <= 0.0 {
+                self.is_dead = true;
+            }
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl PlayerChunkState {
@@ -159,11 +214,20 @@ impl PlayerChunkState {
             .collect()
     }
 
-    /// Updates the center chunk. Returns (center_changed, new_chunks) where
-    /// new_chunks is the set of chunks to load (in desired but not in loaded).
-    fn update_center(&mut self, new_cx: i32, new_cz: i32) -> (bool, Vec<crate::world::ChunkPos>) {
+    /// Updates the center chunk. Returns (center_changed, new_chunks, unloaded_chunks) where
+    /// new_chunks is the set of chunks to load (in desired but not in loaded) and
+    /// unloaded_chunks is the set of chunks to unload (in loaded but not in desired).
+    fn update_center(
+        &mut self,
+        new_cx: i32,
+        new_cz: i32,
+    ) -> (
+        bool,
+        Vec<crate::world::ChunkPos>,
+        Vec<crate::world::ChunkPos>,
+    ) {
         if self.center_x == new_cx && self.center_z == new_cz {
-            return (false, Vec::new());
+            return (false, Vec::new(), Vec::new());
         }
         self.center_x = new_cx;
         self.center_z = new_cz;
@@ -173,16 +237,26 @@ impl PlayerChunkState {
             .filter(|pos| !self.loaded_chunks.contains(pos))
             .copied()
             .collect();
+        let unloaded_chunks: Vec<_> = self
+            .loaded_chunks
+            .iter()
+            .filter(|pos| !desired.contains(pos))
+            .copied()
+            .collect();
         self.loaded_chunks = desired;
-        (true, new_chunks)
+        (true, new_chunks, unloaded_chunks)
     }
 
-    /// Updates the view distance. Returns the list of new chunks to load
-    /// (chunks that are now in range but weren't before).
-    fn update_view_distance(&mut self, new_vd: i32) -> Vec<crate::world::ChunkPos> {
+    /// Updates the view distance. Returns (new_chunks, unloaded_chunks) where
+    /// new_chunks are chunks now in range but weren't before, and
+    /// unloaded_chunks are chunks no longer in range.
+    fn update_view_distance(
+        &mut self,
+        new_vd: i32,
+    ) -> (Vec<crate::world::ChunkPos>, Vec<crate::world::ChunkPos>) {
         let new_vd = new_vd.max(0);
         if self.view_distance == new_vd {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         self.view_distance = new_vd;
         let desired = self.desired_chunk_set();
@@ -191,8 +265,14 @@ impl PlayerChunkState {
             .filter(|pos| !self.loaded_chunks.contains(pos))
             .copied()
             .collect();
+        let unloaded_chunks: Vec<_> = self
+            .loaded_chunks
+            .iter()
+            .filter(|pos| !desired.contains(pos))
+            .copied()
+            .collect();
         self.loaded_chunks = desired;
-        new_chunks
+        (new_chunks, unloaded_chunks)
     }
 }
 
@@ -292,6 +372,15 @@ pub enum TickMessage {
         /// The client's requested view distance (in chunks).
         view_distance: i32,
     },
+    /// A Survival player started/aborted/stopped destroying a block.
+    DigBlock {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The dig action (0=start, 1=abort, 2=stop).
+        action: i32,
+        /// The block position.
+        position: (i32, i32, i32),
+    },
     /// A creative-mode player set a slot (Set Creative Mode Slot packet).
     SetCreativeSlot {
         /// The entity ID of the player.
@@ -364,6 +453,12 @@ impl TickHandle {
     /// Returns a clone of the sender for sending messages to the tick loop.
     pub fn sender(&self) -> Sender<TickMessage> {
         self.sender.clone()
+    }
+
+    /// Returns a [`WorldFacade`](crate::mutation::WorldFacade) for tick-owned
+    /// world mutations via a typed API.
+    pub fn world_facade(&self) -> crate::mutation::WorldFacade {
+        crate::mutation::WorldFacade::new(self.sender.clone())
     }
 
     /// Signals the tick loop to shut down and waits for it to exit.
@@ -466,6 +561,7 @@ fn run_tick_loop(
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
     let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
+    let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let tick_start = Instant::now();
@@ -622,6 +718,7 @@ fn run_tick_loop(
                     session_senders.remove(&entity_id);
                     chunk_states.remove(&entity_id);
                     inventories.remove(&entity_id);
+                    break_progress.remove(&entity_id);
                     player_count.fetch_sub(1, Ordering::AcqRel);
 
                     // Broadcast leave to all remaining sessions
@@ -677,7 +774,7 @@ fn run_tick_loop(
                             let new_cx = chunk_x_from_world(x);
                             let new_cz = chunk_z_from_world(z);
                             if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                                let (center_changed, new_chunks) =
+                                let (center_changed, new_chunks, unloaded_chunks) =
                                     chunk_state.update_center(new_cx, new_cz);
                                 if let Some(sender) = session_senders.get(&entity_id) {
                                     if center_changed {
@@ -688,6 +785,12 @@ fn run_tick_loop(
                                     }
                                     for chunk in new_chunks {
                                         let _ = sender.send(SessionEvent::LoadChunk {
+                                            chunk_x: chunk.x,
+                                            chunk_z: chunk.z,
+                                        });
+                                    }
+                                    for chunk in unloaded_chunks {
+                                        let _ = sender.send(SessionEvent::UnloadChunk {
                                             chunk_x: chunk.x,
                                             chunk_z: chunk.z,
                                         });
@@ -754,7 +857,8 @@ fn run_tick_loop(
                     view_distance,
                 } => {
                     if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                        let new_chunks = chunk_state.update_view_distance(view_distance);
+                        let (new_chunks, unloaded_chunks) =
+                            chunk_state.update_view_distance(view_distance);
                         if let Some(sender) = session_senders.get(&entity_id) {
                             for chunk in new_chunks {
                                 let _ = sender.send(SessionEvent::LoadChunk {
@@ -762,6 +866,61 @@ fn run_tick_loop(
                                     chunk_z: chunk.z,
                                 });
                             }
+                            for chunk in unloaded_chunks {
+                                let _ = sender.send(SessionEvent::UnloadChunk {
+                                    chunk_x: chunk.x,
+                                    chunk_z: chunk.z,
+                                });
+                            }
+                        }
+                    }
+                }
+                TickMessage::DigBlock {
+                    entity_id,
+                    action,
+                    position,
+                } => {
+                    // Ignore dig while dead (death screen); clear any in-flight break.
+                    let is_dead = inventories
+                        .get(&entity_id)
+                        .map(|inv| inv.is_dead)
+                        .unwrap_or(true);
+                    if is_dead {
+                        if let Some(progress) = break_progress.remove(&entity_id) {
+                            if let Some(sender) = session_senders.get(&entity_id) {
+                                let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                    entity_id,
+                                    position: progress.position,
+                                    destroy_stage: -1,
+                                });
+                            }
+                        }
+                    } else {
+                        match action {
+                            0 => {
+                                // StartDestroy: begin tracking break progress
+                                let progress = BlockBreakProgress {
+                                    position,
+                                    ticks_elapsed: 0,
+                                    total_ticks: DEFAULT_BLOCK_HARDNESS_TICKS,
+                                    last_stage: -1,
+                                };
+                                break_progress.insert(entity_id, progress);
+                            }
+                            1 | 2 => {
+                                // AbortDestroy or StopDestroy: cancel break
+                                if let Some(progress) = break_progress.remove(&entity_id) {
+                                    // Remove the break animation
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                            entity_id,
+                                            position: progress.position,
+                                            destroy_stage: -1, // remove animation
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -825,6 +984,16 @@ fn run_tick_loop(
                     if action == 0 {
                         if let Some(inv) = inventories.get_mut(&entity_id) {
                             if inv.is_dead {
+                                // Cancel any in-flight Survival dig animation.
+                                if let Some(progress) = break_progress.remove(&entity_id) {
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                            entity_id,
+                                            position: progress.position,
+                                            destroy_stage: -1,
+                                        });
+                                    }
+                                }
                                 inv.respawn();
                                 let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
                                 let gamemode = world
@@ -857,10 +1026,67 @@ fn run_tick_loop(
                                         food: inv.food,
                                         food_saturation: inv.food_saturation,
                                     });
+                                    // Re-sync inventory container content
+                                    let _ = sender.send(SessionEvent::SetContainerContent {
+                                        window_id: 0,
+                                        state_id: inv.state_id,
+                                        slots: inv.slots.clone(),
+                                        carried_item: rustbound_protocol::play::Slot::empty(),
+                                    });
+                                    // Re-sync held item
+                                    let _ = sender.send(SessionEvent::SetHeldItemClientbound {
+                                        slot: inv.held_slot,
+                                    });
                                 }
                                 // Reset player position in world to spawn
                                 if let Some(player) = world.get_player_mut(entity_id) {
                                     player.set_position(spawn_x, spawn_y, spawn_z);
+                                }
+                                // Re-sync chunks: reset center to spawn, unload old, load new
+                                let spawn_cx = chunk_x_from_world(spawn_x);
+                                let spawn_cz = chunk_z_from_world(spawn_z);
+                                if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
+                                    // Unload all currently loaded chunks
+                                    let old_loaded: Vec<_> =
+                                        chunk_state.loaded_chunks.iter().copied().collect();
+                                    // Reset center and loaded set to spawn
+                                    chunk_state.center_x = spawn_cx;
+                                    chunk_state.center_z = spawn_cz;
+                                    let new_desired = chunk_state.desired_chunk_set();
+                                    // Chunks to load: in new desired but not in old loaded
+                                    let new_chunks: Vec<_> = new_desired
+                                        .iter()
+                                        .filter(|pos| !chunk_state.loaded_chunks.contains(pos))
+                                        .copied()
+                                        .collect();
+                                    // Chunks to unload: in old loaded but not in new desired
+                                    let unloaded: Vec<_> = old_loaded
+                                        .iter()
+                                        .filter(|pos| !new_desired.contains(pos))
+                                        .copied()
+                                        .collect();
+                                    chunk_state.loaded_chunks = new_desired;
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        // Send Set Center Chunk
+                                        let _ = sender.send(SessionEvent::SetCenterChunkEvent {
+                                            chunk_x: spawn_cx,
+                                            chunk_z: spawn_cz,
+                                        });
+                                        // Unload old chunks
+                                        for chunk in unloaded {
+                                            let _ = sender.send(SessionEvent::UnloadChunk {
+                                                chunk_x: chunk.x,
+                                                chunk_z: chunk.z,
+                                            });
+                                        }
+                                        // Load new chunks
+                                        for chunk in new_chunks {
+                                            let _ = sender.send(SessionEvent::LoadChunk {
+                                                chunk_x: chunk.x,
+                                                chunk_z: chunk.z,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -887,14 +1113,99 @@ fn run_tick_loop(
             if let Some(player) = world.get_player(entity_id) {
                 if player.y < VOID_DEATH_Y {
                     inv.kill();
+                    clear_break_animation(&mut break_progress, &session_senders, entity_id);
+                    let username = player.username.clone();
                     if let Some(sender) = session_senders.get(&entity_id) {
                         let _ = sender.send(SessionEvent::SetHealth {
                             health: inv.health,
                             food: inv.food,
                             food_saturation: inv.food_saturation,
                         });
+                        let _ = sender.send(SessionEvent::CombatDeath {
+                            player_id: entity_id,
+                            message: combat_death_message(&username, "fell out of the world"),
+                        });
                     }
                 }
+            }
+        }
+
+        // Periodic task: Survival food drain and starvation damage
+        // Creative players are exempt. Food drains every FOOD_DRAIN_INTERVAL_TICKS.
+        if tick_count % FOOD_DRAIN_INTERVAL_TICKS == 0 && tick_count > 0 {
+            for (&entity_id, inv) in inventories.iter_mut() {
+                if inv.is_dead {
+                    continue;
+                }
+                // Check gamemode — Creative is exempt
+                let gamemode = world.get_player(entity_id).map(|p| p.gamemode).unwrap_or(0);
+                if gamemode == GAMEMODE_CREATIVE {
+                    continue;
+                }
+                // Drain food (saturation first, then food)
+                let food_changed = inv.drain_food();
+                // Apply starvation damage if food is 0
+                let damaged = inv.starve();
+                if food_changed || damaged {
+                    if let Some(sender) = session_senders.get(&entity_id) {
+                        let _ = sender.send(SessionEvent::SetHealth {
+                            health: inv.health,
+                            food: inv.food,
+                            food_saturation: inv.food_saturation,
+                        });
+                        // If starvation killed the player, send Combat Death
+                        if inv.is_dead {
+                            clear_break_animation(&mut break_progress, &session_senders, entity_id);
+                            let username = world
+                                .get_player(entity_id)
+                                .map(|p| p.username.clone())
+                                .unwrap_or_else(|| "Player".to_string());
+                            let _ = sender.send(SessionEvent::CombatDeath {
+                                player_id: entity_id,
+                                message: combat_death_message(&username, "starved to death"),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Periodic task: update block break progress for Survival players
+        let mut completed_breaks: Vec<(i32, (i32, i32, i32))> = Vec::new();
+        for (&entity_id, progress) in break_progress.iter_mut() {
+            progress.ticks_elapsed += 1;
+            // Calculate destroy stage: 0 to MAX_DESTROY_STAGE
+            let stage = u64::checked_div(
+                progress.ticks_elapsed * (MAX_DESTROY_STAGE as u64 + 1),
+                progress.total_ticks,
+            )
+            .map(|v| (v as i8).min(MAX_DESTROY_STAGE))
+            .unwrap_or(MAX_DESTROY_STAGE);
+            if stage != progress.last_stage {
+                progress.last_stage = stage;
+                if let Some(sender) = session_senders.get(&entity_id) {
+                    let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                        entity_id,
+                        position: progress.position,
+                        destroy_stage: stage,
+                    });
+                }
+            }
+            // Check if break is complete
+            if progress.ticks_elapsed >= progress.total_ticks {
+                completed_breaks.push((entity_id, progress.position));
+            }
+        }
+        // Complete breaks: set block to air and remove progress
+        for (entity_id, position) in completed_breaks {
+            break_progress.remove(&entity_id);
+            world.set_block(position.0, position.1, position.2, 0);
+            // Broadcast Block Update to all sessions
+            for sender in session_senders.values() {
+                let _ = sender.send(SessionEvent::BlockUpdate {
+                    position,
+                    block_state: 0,
+                });
             }
         }
 
@@ -945,6 +1256,36 @@ fn merge_online_into_saved(
     }
 }
 
+/// Clears in-flight Survival dig animation for a player, if any.
+fn clear_break_animation(
+    break_progress: &mut HashMap<i32, BlockBreakProgress>,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    entity_id: i32,
+) {
+    if let Some(progress) = break_progress.remove(&entity_id) {
+        if let Some(sender) = session_senders.get(&entity_id) {
+            let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                entity_id,
+                position: progress.position,
+                destroy_stage: -1,
+            });
+        }
+    }
+}
+
+/// Builds a minimal JSON chat component for Combat Death (`{"text":"..."}`).
+fn combat_death_message(username: &str, reason: &str) -> String {
+    let mut escaped = String::with_capacity(username.len());
+    for ch in username.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            _ => escaped.push(ch),
+        }
+    }
+    format!(r#"{{"text":"{escaped} {reason}"}}"#)
+}
+
 /// Collects persistence data for a single online player, if present.
 fn collect_one_player_data(
     world: &World,
@@ -990,9 +1331,9 @@ fn collect_player_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, KEEP_ALIVE_INTERVAL_TICKS,
-        PlayerChunkState, TICK_DURATION, TPS, TickEvent, VOID_DEATH_Y, chunk_x_from_world,
-        chunk_z_from_world, start_tick_loop,
+        DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, FOOD_DRAIN_INTERVAL_TICKS,
+        KEEP_ALIVE_INTERVAL_TICKS, PlayerChunkState, PlayerInventory, TICK_DURATION, TPS,
+        TickEvent, VOID_DEATH_Y, chunk_x_from_world, chunk_z_from_world, start_tick_loop,
     };
     use crate::session::SessionEvent;
     use rustbound_protocol::primitives::Uuid;
@@ -1453,16 +1794,17 @@ mod tests {
     #[test]
     fn chunk_state_update_center_same_no_change() {
         let mut state = PlayerChunkState::new(10);
-        let (changed, new_chunks) = state.update_center(0, 0);
+        let (changed, new_chunks, unloaded) = state.update_center(0, 0);
         assert!(!changed);
         assert!(new_chunks.is_empty());
+        assert!(unloaded.is_empty());
     }
 
     #[test]
     fn chunk_state_update_center_new_chunks() {
         let mut state = PlayerChunkState::new(2);
         // Move from (0,0) to (1,0) - center shifts by 1 chunk
-        let (changed, new_chunks) = state.update_center(1, 0);
+        let (changed, new_chunks, unloaded) = state.update_center(1, 0);
         assert!(changed);
         assert_eq!(state.center_x, 1);
         assert_eq!(state.center_z, 0);
@@ -1475,6 +1817,12 @@ mod tests {
             assert_eq!(chunk.x, 3);
             assert!(chunk.z >= -2 && chunk.z <= 2);
         }
+        // Unloaded chunks: cx=-2, cz in [-2,2] -> 5 chunks
+        assert_eq!(unloaded.len(), 5);
+        for chunk in &unloaded {
+            assert_eq!(chunk.x, -2);
+            assert!(chunk.z >= -2 && chunk.z <= 2);
+        }
     }
 
     #[test]
@@ -1483,24 +1831,29 @@ mod tests {
         // Initial view distance is min(10, 2) = 2
         assert_eq!(state.view_distance, 2);
         // Client requests view distance 5
-        let new_chunks = state.update_view_distance(5);
+        let (new_chunks, unloaded) = state.update_view_distance(5);
         assert_eq!(state.view_distance, 5);
         // New chunks: those in radius 5 but not in radius 2
         // Radius 5: 11x11 = 121, radius 2: 5x5 = 25, new = 96
         assert_eq!(new_chunks.len(), 96);
+        // Growing should not unload any chunks
+        assert!(unloaded.is_empty());
     }
 
     #[test]
     fn chunk_state_update_view_distance_shrinks() {
         let mut state = PlayerChunkState::new(10);
         // Grow to 5 first
-        state.update_view_distance(5);
+        let _ = state.update_view_distance(5);
         assert_eq!(state.view_distance, 5);
         // Shrink to 3
-        let new_chunks = state.update_view_distance(3);
+        let (new_chunks, unloaded) = state.update_view_distance(3);
         assert_eq!(state.view_distance, 3);
         // No new chunks when shrinking
         assert!(new_chunks.is_empty());
+        // Unloaded chunks: those in radius 5 but not in radius 3
+        // Radius 5: 11x11 = 121, radius 3: 7x7 = 49, unloaded = 72
+        assert_eq!(unloaded.len(), 72);
     }
 
     #[test]
@@ -1691,7 +2044,7 @@ mod tests {
 
     #[test]
     fn player_inventory_default_is_empty() {
-        let inv = super::PlayerInventory::new();
+        let inv = PlayerInventory::new();
         assert_eq!(inv.slots.len(), super::PLAYER_INVENTORY_SIZE);
         for slot in &inv.slots {
             assert!(!slot.present, "all slots should be empty by default");
@@ -1702,7 +2055,7 @@ mod tests {
 
     #[test]
     fn player_inventory_set_slot_changes_state() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         let item = rustbound_protocol::play::Slot::item(10, 64);
         assert!(inv.set_slot(0, item.clone()));
         assert!(inv.slots[0].present);
@@ -1720,7 +2073,7 @@ mod tests {
 
     #[test]
     fn player_inventory_set_held_slot_clamps() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         assert!(inv.set_held_slot(3));
         assert_eq!(inv.held_slot, 3);
 
@@ -2028,7 +2381,7 @@ mod tests {
 
     #[test]
     fn player_inventory_default_vitals() {
-        let inv = super::PlayerInventory::new();
+        let inv = PlayerInventory::new();
         assert_eq!(inv.health, DEFAULT_HEALTH);
         assert_eq!(inv.food, DEFAULT_FOOD);
         assert_eq!(inv.food_saturation, DEFAULT_FOOD_SATURATION);
@@ -2037,7 +2390,7 @@ mod tests {
 
     #[test]
     fn player_inventory_kill_and_respawn() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         assert!(!inv.is_dead);
         inv.kill();
         assert_eq!(inv.health, 0.0);
@@ -2148,13 +2501,21 @@ mod tests {
         // Wait for the tick loop to detect void death and send SetHealth(0)
         let start = Instant::now();
         let mut got_death = false;
+        let mut got_combat_death = false;
         while start.elapsed() < Duration::from_millis(500) {
             match event_rx.try_recv() {
                 Ok(SessionEvent::SetHealth { health, .. }) => {
                     if health <= 0.0 {
                         got_death = true;
-                        break;
                     }
+                }
+                Ok(SessionEvent::CombatDeath { player_id, message }) => {
+                    assert_eq!(player_id, 1);
+                    assert!(
+                        message.contains("Steve"),
+                        "death message should contain username"
+                    );
+                    got_combat_death = true;
                 }
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -2163,6 +2524,10 @@ mod tests {
         assert!(
             got_death,
             "should receive SetHealth with 0 HP on void death"
+        );
+        assert!(
+            got_combat_death,
+            "should receive CombatDeath event on void death"
         );
 
         handle.shutdown();
@@ -2223,6 +2588,9 @@ mod tests {
         let start = Instant::now();
         let mut got_respawn = false;
         let mut got_health_restore = false;
+        let mut got_container_content = false;
+        let mut got_held_item = false;
+        let mut got_center_chunk = false;
         while start.elapsed() < Duration::from_millis(500) {
             match event_rx.try_recv() {
                 Ok(SessionEvent::RespawnPlayer { x, y, z, .. }) => {
@@ -2236,6 +2604,16 @@ mod tests {
                         got_health_restore = true;
                     }
                 }
+                Ok(SessionEvent::SetContainerContent { .. }) => {
+                    got_container_content = true;
+                }
+                Ok(SessionEvent::SetHeldItemClientbound { .. }) => {
+                    got_held_item = true;
+                }
+                Ok(SessionEvent::SetCenterChunkEvent { .. }) => {
+                    got_center_chunk = true;
+                }
+                Ok(SessionEvent::LoadChunk { .. }) => {}
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -2245,6 +2623,20 @@ mod tests {
             got_health_restore,
             "should receive SetHealth with restored HP after respawn"
         );
+        assert!(
+            got_container_content,
+            "should receive SetContainerContent (inventory re-sync) after respawn"
+        );
+        assert!(
+            got_held_item,
+            "should receive SetHeldItemClientbound after respawn"
+        );
+        assert!(
+            got_center_chunk,
+            "should receive SetCenterChunkEvent (chunk center re-sync) after respawn"
+        );
+        // LoadChunk may or may not fire if spawn == death position (all chunks
+        // already loaded). The important thing is the center is re-sent.
 
         handle.shutdown();
         Ok(())
@@ -2641,6 +3033,243 @@ mod tests {
 
         // Cleanup
         std::fs::remove_dir_all(&level_name).ok();
+        Ok(())
+    }
+
+    // --- Food drain and starvation tests ---
+
+    #[test]
+    fn drain_food_depletes_saturation_first() {
+        let mut inv = PlayerInventory::new();
+        assert_eq!(inv.food_saturation, DEFAULT_FOOD_SATURATION); // 5.0
+        assert_eq!(inv.food, DEFAULT_FOOD); // 20
+
+        // Drain 5 times: saturation goes 5->4->3->2->1->0
+        for _ in 0..5 {
+            assert!(inv.drain_food());
+        }
+        assert_eq!(inv.food_saturation, 0.0);
+        assert_eq!(inv.food, 20, "food should not deplete while saturation > 0");
+    }
+
+    #[test]
+    fn drain_food_then_depletes_food() {
+        let mut inv = PlayerInventory::new();
+        inv.food_saturation = 0.0;
+        inv.food = 10;
+
+        // Drain 3 times: food goes 10->9->8->7
+        for _ in 0..3 {
+            assert!(inv.drain_food());
+        }
+        assert_eq!(inv.food, 7);
+        assert_eq!(inv.food_saturation, 0.0);
+    }
+
+    #[test]
+    fn drain_food_at_zero_returns_false() {
+        let mut inv = PlayerInventory::new();
+        inv.food_saturation = 0.0;
+        inv.food = 0;
+        assert!(!inv.drain_food(), "drain at 0/0 should return false");
+    }
+
+    #[test]
+    fn starve_applies_damage_at_zero_food() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.food_saturation = 0.0;
+        inv.health = 20.0;
+
+        assert!(inv.starve());
+        assert_eq!(inv.health, 19.0);
+        assert!(!inv.is_dead, "should not be dead at 19 HP");
+    }
+
+    #[test]
+    fn starve_can_kill() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.food_saturation = 0.0;
+        inv.health = 1.0;
+
+        assert!(inv.starve());
+        assert_eq!(inv.health, 0.0);
+        assert!(inv.is_dead, "should be dead at 0 HP from starvation");
+    }
+
+    #[test]
+    fn starve_no_damage_when_food_nonzero() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 1;
+        inv.health = 20.0;
+        assert!(!inv.starve(), "should not starve when food > 0");
+        assert_eq!(inv.health, 20.0);
+    }
+
+    #[test]
+    fn starve_no_damage_when_already_dead() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.is_dead = true;
+        inv.health = 0.0;
+        assert!(!inv.starve(), "should not starve when already dead");
+    }
+
+    #[test]
+    fn food_drain_interval_is_4_seconds() {
+        // 80 ticks at 20 TPS = 4 seconds
+        assert_eq!(FOOD_DRAIN_INTERVAL_TICKS, 80);
+        assert_eq!(FOOD_DRAIN_INTERVAL_TICKS / TPS, 4);
+    }
+
+    // --- Block break progress tests ---
+
+    #[test]
+    fn tick_loop_survival_dig_completes_break() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0, // Survival
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place a block at (0, 100, 0)
+        handle.send(super::TickMessage::SetBlock {
+            position: (0, 100, 0),
+            block_state: 1,
+        })?;
+
+        // Wait for block set
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Start digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 0, // StartDestroy
+            position: (0, 100, 0),
+        })?;
+
+        // Wait for break to complete (DEFAULT_BLOCK_HARDNESS_TICKS = 30 ticks = 1.5s)
+        // plus some margin for tick loop scheduling
+        let start = Instant::now();
+        let mut got_block_update = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    if position == (0, 100, 0) && block_state == 0 {
+                        got_block_update = true;
+                        break;
+                    }
+                }
+                Ok(SessionEvent::SetBlockDestroyStage { .. }) => {
+                    // Expected: progress updates
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        assert!(
+            got_block_update,
+            "should receive BlockUpdate with air after break completes"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_survival_dig_abort_cancels_break() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0, // Survival
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (0, 100, 0),
+            block_state: 1,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Start digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 0,
+            position: (0, 100, 0),
+        })?;
+
+        // Wait a bit for some progress
+        std::thread::sleep(Duration::from_millis(200));
+        while event_rx.try_recv().is_ok() {}
+
+        // Abort digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 1, // AbortDestroy
+            position: (0, 100, 0),
+        })?;
+
+        // Wait and check that no BlockUpdate (air) is sent — block should remain
+        let start = Instant::now();
+        let mut got_unexpected_air = false;
+        while start.elapsed() < Duration::from_secs(2) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate { block_state: 0, .. }) => {
+                    got_unexpected_air = true;
+                }
+                Ok(SessionEvent::SetBlockDestroyStage { destroy_stage, .. }) => {
+                    // Should receive -1 to remove animation
+                    assert_eq!(
+                        destroy_stage, -1,
+                        "abort should send destroy_stage -1 to remove animation"
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        assert!(
+            !got_unexpected_air,
+            "should not receive BlockUpdate(air) after abort"
+        );
+
+        handle.shutdown();
         Ok(())
     }
 }
