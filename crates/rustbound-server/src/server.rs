@@ -61,7 +61,8 @@ impl Server {
     /// Starts the server with the given configuration.
     pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
         let player_count = Arc::new(AtomicUsize::new(0));
-        let (tick_handle, _event_rx) = start_tick_loop(player_count.clone())?;
+        let (tick_handle, _event_rx) =
+            start_tick_loop(player_count.clone(), config.level_name.clone())?;
 
         let tick_sender = tick_handle.sender();
         let max_players = config.max_players;

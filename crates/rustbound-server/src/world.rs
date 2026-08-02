@@ -229,6 +229,16 @@ impl World {
         self.block_overrides.len()
     }
 
+    /// Returns a reference to all block overrides.
+    pub fn block_overrides(&self) -> &HashMap<(i32, i32, i32), i32> {
+        &self.block_overrides
+    }
+
+    /// Loads block overrides from a map (e.g. from disk).
+    pub fn load_block_overrides(&mut self, overrides: HashMap<(i32, i32, i32), i32>) {
+        self.block_overrides = overrides;
+    }
+
     /// Returns all block overrides within the given chunk's coordinate range.
     ///
     /// A chunk at `(chunk_x, chunk_z)` covers blocks `x in [chunk_x*16, chunk_x*16+15]`
