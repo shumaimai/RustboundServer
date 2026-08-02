@@ -8,8 +8,9 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::mpsc::Sender;
+use std::time::Duration;
 
-use rustbound_protocol::framing::PROTOCOL_MAX_FRAME_LENGTH;
 use rustbound_protocol::handshake::{HandshakeError, HandshakePacket, decode_handshake};
 use rustbound_protocol::login::{
     LoginDecodeOutcome, LoginError, LoginPacket, LoginStart, decode_login_start,
@@ -20,6 +21,9 @@ use rustbound_protocol::status::{
     StatusError, StatusResponse, decode_ping_request, decode_status_request, encode_pong_response,
     encode_status_response,
 };
+
+use crate::session::{EntityIdAllocator, SessionConfig, SessionError, run_play_loop};
+use crate::tick::TickMessage;
 
 /// An error encountered while handling a connection.
 #[derive(Debug)]
@@ -36,6 +40,8 @@ pub enum ConnectionError {
     Status(StatusError),
     /// A login protocol error occurred.
     Login(LoginError),
+    /// A play session error occurred.
+    Session(SessionError),
     /// An unexpected packet was received in the current state.
     UnexpectedPacket {
         /// The current protocol state.
@@ -54,6 +60,7 @@ impl fmt::Display for ConnectionError {
             Self::Handshake(error) => write!(formatter, "handshake error: {error}"),
             Self::Status(error) => write!(formatter, "status error: {error}"),
             Self::Login(error) => write!(formatter, "login error: {error}"),
+            Self::Session(error) => write!(formatter, "session error: {error}"),
             Self::UnexpectedPacket { state, packet_id } => {
                 write!(
                     formatter,
@@ -72,6 +79,7 @@ impl std::error::Error for ConnectionError {
             Self::Handshake(error) => Some(error),
             Self::Status(error) => Some(error),
             Self::Login(error) => Some(error),
+            Self::Session(error) => Some(error),
             _ => None,
         }
     }
@@ -111,6 +119,12 @@ impl From<LoginError> for ConnectionError {
     }
 }
 
+impl From<SessionError> for ConnectionError {
+    fn from(error: SessionError) -> Self {
+        Self::Session(error)
+    }
+}
+
 /// Configuration for the connection handler.
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
@@ -120,22 +134,23 @@ pub struct ConnectionConfig {
     pub online_mode: bool,
     /// The maximum frame length.
     pub max_frame_length: usize,
-}
-
-impl Default for ConnectionConfig {
-    fn default() -> Self {
-        Self {
-            status_response: default_status_response(),
-            online_mode: false,
-            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
-        }
-    }
+    /// Sender to the tick loop for player state messages.
+    pub tick_sender: Sender<TickMessage>,
+    /// Entity ID allocator for new player sessions.
+    pub entity_id_allocator: EntityIdAllocator,
+    /// Read timeout for Play-state connections.
+    pub play_read_timeout: Duration,
 }
 
 /// The result of handling a login packet.
 enum LoginHandleResult {
-    /// Login succeeded, transition to Play.
-    Success,
+    /// Login succeeded, transition to Play. Carries the player's UUID and username.
+    Success {
+        /// The player's UUID.
+        uuid: rustbound_protocol::primitives::Uuid,
+        /// The player's username.
+        username: String,
+    },
     /// The client was disconnected.
     Disconnect,
 }
@@ -186,9 +201,26 @@ pub fn handle_connection(
                     ProtocolState::Login => {
                         let result = handle_login_packet(packet, config, &mut stream)?;
                         match result {
-                            LoginHandleResult::Success => {
-                                // Transition to Play (actual play handling in Issue #41+)
-                                return Ok(());
+                            LoginHandleResult::Success { uuid, username } => {
+                                // Transition to Play - enter the play loop immediately
+                                let play_uuid = uuid;
+                                let play_username = username;
+                                match run_play_loop(
+                                    &mut stream,
+                                    &SessionConfig {
+                                        uuid: play_uuid,
+                                        username: play_username,
+                                        gamemode: 0,
+                                        max_frame_length: config.max_frame_length,
+                                        read_timeout: config.play_read_timeout,
+                                    },
+                                    config.entity_id_allocator.allocate(),
+                                    config.tick_sender.clone(),
+                                ) {
+                                    Ok(()) => return Ok(()),
+                                    Err(SessionError::Disconnected) => return Ok(()),
+                                    Err(e) => return Err(ConnectionError::from(e)),
+                                }
                             }
                             LoginHandleResult::Disconnect => {
                                 return Ok(());
@@ -196,7 +228,8 @@ pub fn handle_connection(
                         }
                     }
                     ProtocolState::Play => {
-                        // Play handling will be implemented in Issue #41+
+                        // Play state is handled by run_play_loop above, not here.
+                        // If we reach this point, something went wrong.
                         return Ok(());
                     }
                     ProtocolState::Closed => {
@@ -362,13 +395,16 @@ fn handle_login_packet(
             // Offline mode: send Login Success
             let success = rustbound_protocol::login::LoginSuccess {
                 uuid: start.uuid,
-                username: start.username,
+                username: start.username.clone(),
                 properties: Vec::new(),
             };
             let mut wire = Vec::new();
             encode_login_success(&success, config.max_frame_length, &mut wire)?;
             stream.write_all(&wire)?;
-            Ok(LoginHandleResult::Success)
+            Ok(LoginHandleResult::Success {
+                uuid: start.uuid,
+                username: start.username,
+            })
         }
         _ => Err(ConnectionError::UnexpectedPacket {
             state: ProtocolState::Login,
@@ -399,17 +435,31 @@ pub fn default_status_response() -> StatusResponse {
 #[cfg(test)]
 mod tests {
     use super::{ConnectionConfig, default_status_response};
+    use crate::session::EntityIdAllocator;
     use rustbound_protocol::framing::{decode_frame, encode_frame};
     use rustbound_protocol::handshake::HandshakePacket;
     use rustbound_protocol::primitives::{Uuid, encode_i64};
     use rustbound_protocol::state::NextState;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::mpsc::channel;
     use std::time::Duration;
 
     fn find_free_port() -> Result<u16, Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?.port())
+    }
+
+    fn test_connection_config() -> ConnectionConfig {
+        let (tx, _rx) = channel::<crate::tick::TickMessage>();
+        ConnectionConfig {
+            status_response: default_status_response(),
+            online_mode: false,
+            max_frame_length: 65536,
+            tick_sender: tx,
+            entity_id_allocator: EntityIdAllocator::new(1),
+            play_read_timeout: Duration::from_secs(5),
+        }
     }
 
     fn encode_handshake_packet(next_state: NextState) -> Vec<u8> {
@@ -444,11 +494,7 @@ mod tests {
         let port = find_free_port()?;
         let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
 
-        let config = ConnectionConfig {
-            status_response: default_status_response(),
-            online_mode: false,
-            max_frame_length: 65536,
-        };
+        let config = test_connection_config();
 
         let handler_thread = std::thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {
@@ -500,11 +546,7 @@ mod tests {
         let port = find_free_port()?;
         let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
 
-        let config = ConnectionConfig {
-            status_response: default_status_response(),
-            online_mode: false,
-            max_frame_length: 65536,
-        };
+        let config = test_connection_config();
 
         let handler_thread = std::thread::spawn(move || {
             if let Ok((stream, _)) = listener.accept() {

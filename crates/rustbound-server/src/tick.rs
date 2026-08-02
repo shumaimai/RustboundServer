@@ -4,13 +4,16 @@
 //! The tick loop owns the world and processes periodic tasks like keep-alive
 //! scheduling.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::session::SessionEvent;
 use crate::world::World;
+use rustbound_protocol::primitives::Uuid;
 
 /// The target tick rate (20 ticks per second).
 pub const TPS: u64 = 20;
@@ -30,8 +33,12 @@ pub enum TickMessage {
     PlayerJoined {
         /// The entity ID.
         entity_id: i32,
+        /// The player's UUID.
+        uuid: Uuid,
         /// The player's username.
         username: String,
+        /// Channel for sending events back to this player's session.
+        event_sender: Sender<SessionEvent>,
     },
     /// A player left.
     PlayerLeft {
@@ -56,11 +63,6 @@ pub enum TickMessage {
 pub enum TickEvent {
     /// The tick loop has shut down.
     Shutdown,
-    /// A keep-alive should be sent to all players.
-    KeepAlive {
-        /// The keep-alive payload (current tick count).
-        payload: i64,
-    },
     /// A player was added to the world.
     PlayerAdded {
         /// The entity ID.
@@ -87,6 +89,11 @@ impl TickHandle {
         message: TickMessage,
     ) -> Result<(), std::sync::mpsc::SendError<TickMessage>> {
         self.sender.send(message)
+    }
+
+    /// Returns a clone of the sender for sending messages to the tick loop.
+    pub fn sender(&self) -> Sender<TickMessage> {
+        self.sender.clone()
     }
 
     /// Signals the tick loop to shut down and waits for it to exit.
@@ -162,6 +169,7 @@ fn run_tick_loop(
     let mut world = World::new();
     let mut tick_count: u64 = 0;
     let mut last_keep_alive_tick: u64 = 0;
+    let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let tick_start = Instant::now();
@@ -175,19 +183,18 @@ fn run_tick_loop(
                 }
                 TickMessage::PlayerJoined {
                     entity_id,
+                    uuid,
                     username,
+                    event_sender,
                 } => {
-                    let player = crate::world::PlayerHandle::new(
-                        entity_id,
-                        rustbound_protocol::primitives::Uuid::new(0, 0),
-                        username,
-                        0,
-                    );
+                    let player = crate::world::PlayerHandle::new(entity_id, uuid, username, 0);
                     world.add_player(player);
+                    session_senders.insert(entity_id, event_sender);
                     let _ = event_tx.send(TickEvent::PlayerAdded { entity_id });
                 }
                 TickMessage::PlayerLeft { entity_id } => {
                     world.remove_player(entity_id);
+                    session_senders.remove(&entity_id);
                     let _ = event_tx.send(TickEvent::PlayerRemoved { entity_id });
                 }
                 TickMessage::PlayerPositionUpdate { entity_id, x, y, z } => {
@@ -198,11 +205,13 @@ fn run_tick_loop(
             }
         }
 
-        // Periodic tasks
+        // Periodic tasks: send KeepAlive to all active sessions
         if tick_count - last_keep_alive_tick >= KEEP_ALIVE_INTERVAL_TICKS {
-            let _ = event_tx.send(TickEvent::KeepAlive {
-                payload: tick_count as i64,
-            });
+            for sender in session_senders.values() {
+                let _ = sender.send(SessionEvent::KeepAlive {
+                    payload: tick_count as i64,
+                });
+            }
             last_keep_alive_tick = tick_count;
         }
 
@@ -221,6 +230,9 @@ fn run_tick_loop(
 #[cfg(test)]
 mod tests {
     use super::{KEEP_ALIVE_INTERVAL_TICKS, TICK_DURATION, TPS, TickEvent, start_tick_loop};
+    use crate::session::SessionEvent;
+    use rustbound_protocol::primitives::Uuid;
+    use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -246,10 +258,14 @@ mod tests {
     fn tick_loop_processes_player_join_and_leave() -> Result<(), Box<dyn std::error::Error>> {
         let (mut handle, event_rx) = start_tick_loop()?;
 
+        let (event_tx, event_rx_session) = channel::<SessionEvent>();
+
         // Send player joined
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
+            uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            event_sender: event_tx,
         })?;
 
         // Wait for the event
@@ -279,6 +295,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(got_removed, "did not receive PlayerRemoved event");
+
+        // The session event receiver should be disconnected after removal
+        // (the tick loop drops its sender)
+        drop(event_rx_session);
 
         handle.shutdown();
         Ok(())

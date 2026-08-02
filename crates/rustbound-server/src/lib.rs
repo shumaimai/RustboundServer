@@ -7,5 +7,6 @@ pub mod config;
 pub mod connection;
 pub mod listener;
 pub mod server;
+pub mod session;
 pub mod tick;
 pub mod world;

@@ -41,6 +41,9 @@ pub const DISCONNECT_PLAY_PACKET_ID: i32 = 0x1a;
 /// Packet ID for the clientbound Chunk Data and Update Light packet.
 pub const CHUNK_DATA_PACKET_ID: i32 = 0x24;
 
+/// Packet ID for the serverbound Confirm Teleportation packet.
+pub const CONFIRM_TELEPORTATION_PACKET_ID: i32 = 0x00;
+
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
 
@@ -151,6 +154,8 @@ pub enum PlayPacket {
     DisconnectPlay(DisconnectPlay),
     /// Clientbound Chunk Data and Update Light (Play `0x24`).
     ChunkData(ChunkData),
+    /// Serverbound Confirm Teleportation (Play `0x00`).
+    ConfirmTeleportation(ConfirmTeleportation),
 }
 
 /// The player's gamemode.
@@ -320,6 +325,16 @@ pub struct ChunkData {
     pub data: Vec<u8>,
     /// Block entity NBT blobs (opaque bytes, concatenated).
     pub block_entities: Vec<Vec<u8>>,
+}
+
+/// Serverbound Confirm Teleportation packet (Play `0x00`).
+///
+/// Sent by the client to confirm a Synchronize Player Position packet.
+/// The teleport ID must match the one sent by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfirmTeleportation {
+    /// The teleport ID to confirm.
+    pub teleport_id: i32,
 }
 
 /// Encodes a Join Game packet (clientbound Play `0x01`).
@@ -1080,6 +1095,70 @@ pub fn decode_disconnect_play(
 }
 
 // ---------------------------------------------------------------------------
+// Confirm Teleportation (serverbound Play 0x00)
+// ---------------------------------------------------------------------------
+
+/// Encodes a Confirm Teleportation packet (serverbound Play `0x00`).
+pub fn encode_confirm_teleportation(
+    packet: &ConfirmTeleportation,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.teleport_id, &mut body);
+    encode_frame(
+        CONFIRM_TELEPORTATION_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Confirm Teleportation packet (serverbound Play `0x00`).
+pub fn decode_confirm_teleportation(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+
+    if frame.packet_id != CONFIRM_TELEPORTATION_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CONFIRM_TELEPORTATION_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let teleport_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::ConfirmTeleportation(ConfirmTeleportation { teleport_id }),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Chunk Data and Update Light (clientbound Play 0x24)
 // ---------------------------------------------------------------------------
 
@@ -1211,16 +1290,18 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkData, DisconnectPlay, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
+        ChunkData, ConfirmTeleportation, DisconnectPlay, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
         KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
         SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
-        SynchronizePlayerPosition, decode_chunk_data, decode_disconnect_play, decode_join_game,
-        decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_set_player_position,
+        SynchronizePlayerPosition, decode_chunk_data, decode_confirm_teleportation,
+        decode_disconnect_play, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
-        decode_synchronize_player_position, encode_chunk_data, encode_disconnect_play,
-        encode_join_game, encode_keep_alive_clientbound, encode_keep_alive_serverbound,
-        encode_set_player_position, encode_set_player_position_and_rotation,
-        encode_set_player_rotation, encode_synchronize_player_position, ensure_play_state,
+        decode_synchronize_player_position, encode_chunk_data, encode_confirm_teleportation,
+        encode_disconnect_play, encode_join_game, encode_keep_alive_clientbound,
+        encode_keep_alive_serverbound, encode_set_player_position,
+        encode_set_player_position_and_rotation, encode_set_player_rotation,
+        encode_synchronize_player_position, ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -1840,6 +1921,110 @@ mod tests {
                 PlayDecodeOutcome::Incomplete
             );
         }
+        Ok(())
+    }
+
+    // --- Confirm Teleportation ---
+
+    #[test]
+    fn confirm_teleportation_roundtrip() -> Result<(), PlayError> {
+        let packet = ConfirmTeleportation { teleport_id: 42 };
+        let mut wire = Vec::new();
+        encode_confirm_teleportation(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        let decoded = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME)?;
+        match decoded {
+            PlayDecodeOutcome::Complete(PlayPacket::ConfirmTeleportation(ct)) => {
+                assert_eq!(ct.teleport_id, 42);
+            }
+            other => panic!("expected ConfirmTeleportation, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_teleportation_zero_teleport_id() -> Result<(), PlayError> {
+        let packet = ConfirmTeleportation { teleport_id: 0 };
+        let mut wire = Vec::new();
+        encode_confirm_teleportation(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        let decoded = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME)?;
+        match decoded {
+            PlayDecodeOutcome::Complete(PlayPacket::ConfirmTeleportation(ct)) => {
+                assert_eq!(ct.teleport_id, 0);
+            }
+            other => panic!("expected ConfirmTeleportation, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_teleportation_large_teleport_id() -> Result<(), PlayError> {
+        let packet = ConfirmTeleportation {
+            teleport_id: 2_147_483_647,
+        };
+        let mut wire = Vec::new();
+        encode_confirm_teleportation(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        let decoded = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME)?;
+        match decoded {
+            PlayDecodeOutcome::Complete(PlayPacket::ConfirmTeleportation(ct)) => {
+                assert_eq!(ct.teleport_id, 2_147_483_647);
+            }
+            other => panic!("expected ConfirmTeleportation, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_teleportation_truncated_is_incomplete() -> Result<(), PlayError> {
+        let packet = ConfirmTeleportation { teleport_id: 100 };
+        let mut wire = Vec::new();
+        encode_confirm_teleportation(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_confirm_teleportation(&mut input, TEST_MAX_FRAME)?,
+                PlayDecodeOutcome::Incomplete
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_teleportation_wrong_packet_id() -> Result<(), PlayError> {
+        // Build a frame with the wrong packet ID (0x01 instead of 0x00)
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(5, &mut body);
+        crate::framing::encode_frame(0x01, &body, TEST_MAX_FRAME, &mut Vec::new())
+            .map_err(PlayError::from)?;
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x01, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+        let mut input = wire.as_slice();
+        let result = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn confirm_teleportation_trailing_bytes() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(7, &mut body);
+        body.push(0xff); // trailing byte
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            super::CONFIRM_TELEPORTATION_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+        let mut input = wire.as_slice();
+        let result = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::TrailingBytes { .. })));
         Ok(())
     }
 }
