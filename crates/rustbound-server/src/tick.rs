@@ -56,6 +56,15 @@ pub const DEFAULT_FOOD: i32 = 20;
 pub const DEFAULT_FOOD_SATURATION: f32 = 5.0;
 /// The Y coordinate below which the void kills players.
 pub const VOID_DEATH_Y: f64 = -64.0;
+/// Food drain interval in ticks (every 4 ticks = 5 times per second).
+/// This is a stub approximation of vanilla exhaustion; real Minecraft
+/// ties this to exhaustion level (0.1/tick passive), but for the minimal
+/// implementation we use a simple tick-count-based drain.
+pub const FOOD_DRAIN_INTERVAL_TICKS: u64 = 80; // 4 seconds per drain tick
+/// Starvation damage applied when food reaches 0.
+pub const STARVATION_DAMAGE: f32 = 1.0;
+/// Gamemode Creative (exempt from food drain).
+pub const GAMEMODE_CREATIVE: u8 = 1;
 
 /// Per-player inventory state, owned by the tick loop.
 ///
@@ -133,6 +142,34 @@ impl PlayerInventory {
         self.food = DEFAULT_FOOD;
         self.food_saturation = DEFAULT_FOOD_SATURATION;
         self.is_dead = false;
+    }
+
+    /// Applies one food drain tick: deplete saturation first, then food.
+    /// Returns true if food or saturation changed.
+    fn drain_food(&mut self) -> bool {
+        if self.food_saturation > 0.0 {
+            self.food_saturation = (self.food_saturation - 1.0).max(0.0);
+            true
+        } else if self.food > 0 {
+            self.food -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Applies starvation damage if food is 0 and player is not dead.
+    /// Returns true if damage was applied.
+    fn starve(&mut self) -> bool {
+        if self.food == 0 && !self.is_dead {
+            self.health = (self.health - STARVATION_DAMAGE).max(0.0);
+            if self.health <= 0.0 {
+                self.is_dead = true;
+            }
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -993,6 +1030,34 @@ fn run_tick_loop(
             }
         }
 
+        // Periodic task: Survival food drain and starvation damage
+        // Creative players are exempt. Food drains every FOOD_DRAIN_INTERVAL_TICKS.
+        if tick_count % FOOD_DRAIN_INTERVAL_TICKS == 0 && tick_count > 0 {
+            for (&entity_id, inv) in inventories.iter_mut() {
+                if inv.is_dead {
+                    continue;
+                }
+                // Check gamemode — Creative is exempt
+                let gamemode = world.get_player(entity_id).map(|p| p.gamemode).unwrap_or(0);
+                if gamemode == GAMEMODE_CREATIVE {
+                    continue;
+                }
+                // Drain food (saturation first, then food)
+                let food_changed = inv.drain_food();
+                // Apply starvation damage if food is 0
+                let damaged = inv.starve();
+                if food_changed || damaged {
+                    if let Some(sender) = session_senders.get(&entity_id) {
+                        let _ = sender.send(SessionEvent::SetHealth {
+                            health: inv.health,
+                            food: inv.food,
+                            food_saturation: inv.food_saturation,
+                        });
+                    }
+                }
+            }
+        }
+
         // Periodic task: autosave block overrides and player data
         if autosave_interval_ticks > 0 && tick_count - last_autosave_tick >= autosave_interval_ticks
         {
@@ -1085,9 +1150,9 @@ fn collect_player_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, KEEP_ALIVE_INTERVAL_TICKS,
-        PlayerChunkState, TICK_DURATION, TPS, TickEvent, VOID_DEATH_Y, chunk_x_from_world,
-        chunk_z_from_world, start_tick_loop,
+        DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, FOOD_DRAIN_INTERVAL_TICKS,
+        KEEP_ALIVE_INTERVAL_TICKS, PlayerChunkState, PlayerInventory, TICK_DURATION, TPS,
+        TickEvent, VOID_DEATH_Y, chunk_x_from_world, chunk_z_from_world, start_tick_loop,
     };
     use crate::session::SessionEvent;
     use rustbound_protocol::primitives::Uuid;
@@ -1798,7 +1863,7 @@ mod tests {
 
     #[test]
     fn player_inventory_default_is_empty() {
-        let inv = super::PlayerInventory::new();
+        let inv = PlayerInventory::new();
         assert_eq!(inv.slots.len(), super::PLAYER_INVENTORY_SIZE);
         for slot in &inv.slots {
             assert!(!slot.present, "all slots should be empty by default");
@@ -1809,7 +1874,7 @@ mod tests {
 
     #[test]
     fn player_inventory_set_slot_changes_state() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         let item = rustbound_protocol::play::Slot::item(10, 64);
         assert!(inv.set_slot(0, item.clone()));
         assert!(inv.slots[0].present);
@@ -1827,7 +1892,7 @@ mod tests {
 
     #[test]
     fn player_inventory_set_held_slot_clamps() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         assert!(inv.set_held_slot(3));
         assert_eq!(inv.held_slot, 3);
 
@@ -2135,7 +2200,7 @@ mod tests {
 
     #[test]
     fn player_inventory_default_vitals() {
-        let inv = super::PlayerInventory::new();
+        let inv = PlayerInventory::new();
         assert_eq!(inv.health, DEFAULT_HEALTH);
         assert_eq!(inv.food, DEFAULT_FOOD);
         assert_eq!(inv.food_saturation, DEFAULT_FOOD_SATURATION);
@@ -2144,7 +2209,7 @@ mod tests {
 
     #[test]
     fn player_inventory_kill_and_respawn() {
-        let mut inv = super::PlayerInventory::new();
+        let mut inv = PlayerInventory::new();
         assert!(!inv.is_dead);
         inv.kill();
         assert_eq!(inv.health, 0.0);
@@ -2776,5 +2841,92 @@ mod tests {
         // Cleanup
         std::fs::remove_dir_all(&level_name).ok();
         Ok(())
+    }
+
+    // --- Food drain and starvation tests ---
+
+    #[test]
+    fn drain_food_depletes_saturation_first() {
+        let mut inv = PlayerInventory::new();
+        assert_eq!(inv.food_saturation, DEFAULT_FOOD_SATURATION); // 5.0
+        assert_eq!(inv.food, DEFAULT_FOOD); // 20
+
+        // Drain 5 times: saturation goes 5->4->3->2->1->0
+        for _ in 0..5 {
+            assert!(inv.drain_food());
+        }
+        assert_eq!(inv.food_saturation, 0.0);
+        assert_eq!(inv.food, 20, "food should not deplete while saturation > 0");
+    }
+
+    #[test]
+    fn drain_food_then_depletes_food() {
+        let mut inv = PlayerInventory::new();
+        inv.food_saturation = 0.0;
+        inv.food = 10;
+
+        // Drain 3 times: food goes 10->9->8->7
+        for _ in 0..3 {
+            assert!(inv.drain_food());
+        }
+        assert_eq!(inv.food, 7);
+        assert_eq!(inv.food_saturation, 0.0);
+    }
+
+    #[test]
+    fn drain_food_at_zero_returns_false() {
+        let mut inv = PlayerInventory::new();
+        inv.food_saturation = 0.0;
+        inv.food = 0;
+        assert!(!inv.drain_food(), "drain at 0/0 should return false");
+    }
+
+    #[test]
+    fn starve_applies_damage_at_zero_food() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.food_saturation = 0.0;
+        inv.health = 20.0;
+
+        assert!(inv.starve());
+        assert_eq!(inv.health, 19.0);
+        assert!(!inv.is_dead, "should not be dead at 19 HP");
+    }
+
+    #[test]
+    fn starve_can_kill() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.food_saturation = 0.0;
+        inv.health = 1.0;
+
+        assert!(inv.starve());
+        assert_eq!(inv.health, 0.0);
+        assert!(inv.is_dead, "should be dead at 0 HP from starvation");
+    }
+
+    #[test]
+    fn starve_no_damage_when_food_nonzero() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 1;
+        inv.health = 20.0;
+        assert!(!inv.starve(), "should not starve when food > 0");
+        assert_eq!(inv.health, 20.0);
+    }
+
+    #[test]
+    fn starve_no_damage_when_already_dead() {
+        let mut inv = PlayerInventory::new();
+        inv.food = 0;
+        inv.is_dead = true;
+        inv.health = 0.0;
+        assert!(!inv.starve(), "should not starve when already dead");
+    }
+
+    #[test]
+    fn food_drain_interval_is_4_seconds() {
+        // 80 ticks at 20 TPS = 4 seconds
+        assert_eq!(FOOD_DRAIN_INTERVAL_TICKS, 80);
+        assert_eq!(FOOD_DRAIN_INTERVAL_TICKS / TPS, 4);
     }
 }
