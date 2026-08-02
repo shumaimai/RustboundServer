@@ -260,7 +260,7 @@ mod tests {
             username: "PlayTestPlayer".to_string(),
             uuid: Uuid::new(0, 0),
             connect_timeout: Duration::from_secs(5),
-            read_timeout: Duration::from_secs(10),
+            read_timeout: Duration::from_secs(2),
         };
         let snapshot = rustbound_conformance::run_play_probe(&probe_config)?;
 
@@ -270,8 +270,79 @@ mod tests {
         assert_eq!(snapshot.dimension_name, "minecraft:overworld");
         assert!(!snapshot.is_hardcore);
         assert!(snapshot.is_flat);
+        // The probe should at least reach Join Game; teleport confirmation
+        // depends on timing and may or may not complete within the read timeout.
+        assert!(matches!(
+            snapshot.phase_reached,
+            rustbound_conformance::PlayPhase::JoinGame
+                | rustbound_conformance::PlayPhase::TeleportConfirmed
+                | rustbound_conformance::PlayPhase::PostTeleport
+        ));
 
         server.shutdown();
+        Ok(())
+    }
+
+    /// Oracle differential test: compares Rustbound's play snapshot against
+    /// a local Forge 47.4.10 server.
+    ///
+    /// This test is `#[ignore]` by default. To run it:
+    /// 1. Start a local Forge 47.4.10 server on `RUSTBOUND_ORACLE_HOST:RUSTBOUND_ORACLE_PORT`
+    /// 2. Run: `cargo test -p rustbound-server -- --ignored oracle_play_differential`
+    ///
+    /// The oracle server must be in offline mode with the same world settings
+    /// (flat world, survival, overworld) for a meaningful comparison.
+    #[test]
+    #[ignore]
+    fn oracle_play_differential() -> Result<(), Box<dyn std::error::Error>> {
+        let oracle_host =
+            std::env::var("RUSTBOUND_ORACLE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let oracle_port: u16 = std::env::var("RUSTBOUND_ORACLE_PORT")
+            .unwrap_or_else(|_| "25565".to_string())
+            .parse()
+            .unwrap_or(25565);
+
+        // Probe the oracle
+        let oracle_config = rustbound_conformance::PlayProbeConfig {
+            host: oracle_host,
+            port: oracle_port,
+            username: "DiffTestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(10),
+        };
+        let oracle_snapshot = rustbound_conformance::run_play_probe(&oracle_config)?;
+
+        // Probe Rustbound
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            network_compression_threshold: -1,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let rustbound_config = rustbound_conformance::PlayProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "DiffTestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(10),
+        };
+        let rustbound_snapshot = rustbound_conformance::run_play_probe(&rustbound_config)?;
+
+        server.shutdown();
+
+        // Compare snapshots (nondeterministic fields are excluded by diff_play)
+        let diff = rustbound_conformance::diff_play(&oracle_snapshot, &rustbound_snapshot);
+        assert!(
+            diff.result.is_match(),
+            "play differential mismatch:\n{diff}"
+        );
+
         Ok(())
     }
 }

@@ -900,6 +900,14 @@ pub fn run_play_loop(
     entity_id: i32,
     tick_sender: Sender<TickMessage>,
 ) -> Result<(), SessionError> {
+    // Update the stream's read timeout to the play read timeout
+    stream
+        .set_read_timeout(Some(session_config.read_timeout))
+        .map_err(SessionError::Io)?;
+    stream
+        .set_write_timeout(Some(session_config.read_timeout))
+        .map_err(SessionError::Io)?;
+
     let mut session = PlayerSession::new(session_config, entity_id, tick_sender)?;
 
     // Send Join Game
@@ -945,7 +953,16 @@ pub fn run_play_loop(
                 match stream.read(&mut chunk) {
                     Ok(0) => break Err(SessionError::Disconnected),
                     Ok(n) => read_buffer.extend_from_slice(&chunk[..n]),
-                    Err(e) => break Err(SessionError::Io(e)),
+                    Err(e) => {
+                        // Treat timeout as non-fatal: continue the loop to
+                        // poll for tick events (KeepAlive, etc.)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut
+                        {
+                            continue;
+                        }
+                        break Err(SessionError::Io(e));
+                    }
                 }
             }
             Err(e) => {
