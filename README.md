@@ -6,22 +6,22 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-**Pre-alpha, offline multiplayer mini-server.** Phases **A–H** are on `main`: join Play, chunks/streaming, Creative dig/place + inventory, chat, Keep Alive timeout, offline UUID, health / void death / respawn. **Next: persistence and post-H polish.**
+**Pre-alpha, offline multiplayer mini-server.** Phases A–H done; this PR lands early Phase I: gamemode wiring, item registry, held-item Creative place, block/player persistence, autosave. Remaining: unload, respawn re-sync, food/combat, Mod API prereqs ([#134](https://github.com/shumaimai/RustboundServer/issues/134)).
 
 | Layer | Status |
 |-------|--------|
 | Protocol + Login/Play + sessions/tick | Implemented |
-| Chunks, light, streaming, overrides | Working (unload packet still incomplete) |
-| Dig / place (Creative) + inventory/hotbar | Working (place still often hardcoded stone) |
-| Multiplayer motion + chat | Working |
+| Chunks, light, streaming, overrides | Working (unload packet still incomplete — #127) |
+| Dig / place (Creative) + held-item place | Working |
+| Multiplayer motion + chat + gamemode broadcast | Working |
 | Keep Alive timeout / offline UUID | Working |
-| Health / void death / respawn | Working (minimal; no combat/food drain yet) |
-| Persistence | **Next** ([#124](https://github.com/shumaimai/RustboundServer/issues/124)–[#126](https://github.com/shumaimai/RustboundServer/issues/126)) |
+| Health / void death / respawn | Working (minimal) |
+| Persistence (overrides + players + autosave) | **In this PR** (#124–#126) |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Long-term ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
 
-See [PROGRESS.md](PROGRESS.md). **Next tracking:** [#134](https://github.com/shumaimai/RustboundServer/issues/134).
+See [PROGRESS.md](PROGRESS.md). **Tracking:** [#134](https://github.com/shumaimai/RustboundServer/issues/134).
 
 ## Workspace
 

@@ -455,7 +455,7 @@ fn run_tick_loop(
 ) {
     // Load block overrides and player data from disk on startup
     let loaded = crate::persist::load_overrides(&level_name);
-    let saved_players = crate::persist::load_players(&level_name);
+    let mut saved_players = crate::persist::load_players(&level_name);
     let mut world = World::new();
     world.load_block_overrides(loaded);
     // Autosave interval in ticks (20 TPS). 0 means disabled.
@@ -480,9 +480,10 @@ fn run_tick_loop(
                     {
                         eprintln!("error: failed to save block overrides: {}", e);
                     }
-                    // Save all player data to disk
-                    let player_data = collect_player_data(&world, &inventories);
-                    if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+                    // Merge online players into the cache, then write everyone
+                    // (including players who already left this session).
+                    merge_online_into_saved(&world, &inventories, &mut saved_players);
+                    if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
                         eprintln!("error: failed to save player data: {}", e);
                     }
                     let _ = event_tx.send(TickEvent::Shutdown);
@@ -603,6 +604,18 @@ fn run_tick_loop(
                     player_count.fetch_add(1, Ordering::AcqRel);
                 }
                 TickMessage::PlayerLeft { entity_id } => {
+                    // Persist this player before dropping them so reconnect
+                    // (even in the same process) and autosave cannot wipe them.
+                    if let Some(data) = collect_one_player_data(&world, &inventories, entity_id) {
+                        if let Some(player) = world.get_player(entity_id) {
+                            saved_players.insert(player.uuid, data);
+                            if let Err(e) =
+                                crate::persist::save_players(&level_name, &saved_players)
+                            {
+                                eprintln!("error: failed to save player on leave: {}", e);
+                            }
+                        }
+                    }
                     // Get the player's UUID before removing
                     let uuid = world.get_player(entity_id).map(|p| p.uuid);
                     world.remove_player(entity_id);
@@ -891,8 +904,8 @@ fn run_tick_loop(
             if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
                 eprintln!("error: autosave failed for block overrides: {}", e);
             }
-            let player_data = collect_player_data(&world, &inventories);
-            if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+            merge_online_into_saved(&world, &inventories, &mut saved_players);
+            if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
                 eprintln!("error: autosave failed for player data: {}", e);
             }
             last_autosave_tick = tick_count;
@@ -913,12 +926,51 @@ fn run_tick_loop(
     if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
         eprintln!("error: failed to save block overrides on shutdown: {}", e);
     }
-    let player_data = collect_player_data(&world, &inventories);
-    if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+    merge_online_into_saved(&world, &inventories, &mut saved_players);
+    if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
         eprintln!("error: failed to save player data on shutdown: {}", e);
     }
 
     let _ = event_tx.send(TickEvent::Shutdown);
+}
+
+/// Merges currently online players into the in-memory saved-player cache.
+fn merge_online_into_saved(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+    saved_players: &mut HashMap<Uuid, crate::persist::PlayerData>,
+) {
+    for (uuid, data) in collect_player_data(world, inventories) {
+        saved_players.insert(uuid, data);
+    }
+}
+
+/// Collects persistence data for a single online player, if present.
+fn collect_one_player_data(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+    entity_id: i32,
+) -> Option<crate::persist::PlayerData> {
+    let player = world.get_player(entity_id)?;
+    let inv = inventories.get(&entity_id)?;
+    let slots: Vec<(bool, i32, i8, Vec<u8>)> = inv
+        .slots
+        .iter()
+        .map(|s| (s.present, s.item_id, s.count, s.nbt.clone()))
+        .collect();
+    Some(crate::persist::PlayerData {
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        yaw: player.yaw,
+        pitch: player.pitch,
+        gamemode: player.gamemode,
+        held_slot: inv.held_slot,
+        health: inv.health,
+        food: inv.food,
+        food_saturation: inv.food_saturation,
+        slots,
+    })
 }
 
 /// Collects all player data for persistence.
@@ -928,28 +980,8 @@ fn collect_player_data(
 ) -> HashMap<Uuid, crate::persist::PlayerData> {
     let mut result = HashMap::new();
     for player in world.players() {
-        if let Some(inv) = inventories.get(&player.entity_id) {
-            let slots: Vec<(bool, i32, i8, Vec<u8>)> = inv
-                .slots
-                .iter()
-                .map(|s| (s.present, s.item_id, s.count, s.nbt.clone()))
-                .collect();
-            result.insert(
-                player.uuid,
-                crate::persist::PlayerData {
-                    x: player.x,
-                    y: player.y,
-                    z: player.z,
-                    yaw: player.yaw,
-                    pitch: player.pitch,
-                    gamemode: player.gamemode,
-                    held_slot: inv.held_slot,
-                    health: inv.health,
-                    food: inv.food,
-                    food_saturation: inv.food_saturation,
-                    slots,
-                },
-            );
+        if let Some(data) = collect_one_player_data(world, inventories, player.entity_id) {
+            result.insert(player.uuid, data);
         }
     }
     result
