@@ -68,6 +68,12 @@ pub enum SessionEvent {
         /// The new block state ID (0 = air).
         block_state: i32,
     },
+    /// Block overrides for a chunk that was just sent; send Block Update
+    /// for each override so the player sees dug/placed blocks.
+    ChunkBlockOverrides {
+        /// List of (position, block_state) pairs to apply.
+        overrides: Vec<((i32, i32, i32), i32)>,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -609,6 +615,12 @@ impl PlayerSession {
                     block_state,
                 } => {
                     self.send_block_update(stream, position, block_state)?;
+                    processed = true;
+                }
+                SessionEvent::ChunkBlockOverrides { overrides } => {
+                    for (position, block_state) in overrides {
+                        self.send_block_update(stream, position, block_state)?;
+                    }
                     processed = true;
                 }
             }

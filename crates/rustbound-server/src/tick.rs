@@ -240,6 +240,23 @@ fn run_tick_loop(
                         }
                     }
 
+                    // Send block overrides for the initial chunk area so the
+                    // new player sees dug/placed blocks in their initial chunks.
+                    // The initial chunk radius is 2 (see session::send_initial_chunks).
+                    let initial_radius = 2;
+                    let mut new_player_overrides: Vec<((i32, i32, i32), i32)> = Vec::new();
+                    for cx in -initial_radius..=initial_radius {
+                        for cz in -initial_radius..=initial_radius {
+                            new_player_overrides
+                                .extend(world.get_block_overrides_for_chunk(cx, cz));
+                        }
+                    }
+                    if !new_player_overrides.is_empty() {
+                        let _ = event_sender.send(SessionEvent::ChunkBlockOverrides {
+                            overrides: new_player_overrides,
+                        });
+                    }
+
                     let _ = event_tx.send(TickEvent::PlayerAdded { entity_id });
                     player_count.fetch_add(1, Ordering::AcqRel);
                 }
@@ -411,6 +428,138 @@ mod tests {
         if let Some(thread) = handle.thread.take() {
             let _ = thread.join();
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_sends_block_overrides_to_new_player() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins and digs some blocks (creates overrides)
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            event_sender: event_tx1,
+        })?;
+
+        // Wait for player 1 to be added
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(200) {
+            if event_rx1.try_recv().is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // Player 1 digs blocks within the initial chunk radius (radius 2)
+        // Block at (5, 64, 5) is in chunk (0, 0), within radius 2 of center (0, 0)
+        handle.send(super::TickMessage::SetBlock {
+            position: (5, 64, 5),
+            block_state: 0, // air (dug)
+        })?;
+        // Block at (20, 64, 20) is in chunk (1, 1), within radius 2
+        handle.send(super::TickMessage::SetBlock {
+            position: (20, 64, 20),
+            block_state: 1, // stone (placed)
+        })?;
+        // Block at (100, 64, 100) is in chunk (6, 6), OUTSIDE radius 2
+        handle.send(super::TickMessage::SetBlock {
+            position: (100, 64, 100),
+            block_state: 2,
+        })?;
+
+        // Wait for the SetBlock messages to be processed
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Player 2 joins - should receive block overrides for the initial area
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            event_sender: event_tx2,
+        })?;
+
+        // Collect events for player 2
+        let start = Instant::now();
+        let mut got_overrides = false;
+        let mut override_count = 0;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::ChunkBlockOverrides { overrides }) => {
+                    got_overrides = true;
+                    override_count = overrides.len();
+                    // Should contain (5, 64, 5) -> 0 and (20, 64, 20) -> 1
+                    // but NOT (100, 64, 100) -> 2 (outside radius 2)
+                    let has_5_5 = overrides
+                        .iter()
+                        .any(|((x, y, z), s)| *x == 5 && *y == 64 && *z == 5 && *s == 0);
+                    let has_20_20 = overrides
+                        .iter()
+                        .any(|((x, y, z), s)| *x == 20 && *y == 64 && *z == 20 && *s == 1);
+                    let has_100_100 = overrides
+                        .iter()
+                        .any(|((x, y, z), _)| *x == 100 && *y == 64 && *z == 100);
+                    assert!(has_5_5, "should include override at (5, 64, 5)");
+                    assert!(has_20_20, "should include override at (20, 64, 20)");
+                    assert!(
+                        !has_100_100,
+                        "should NOT include override at (100, 64, 100) - outside radius"
+                    );
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_overrides,
+            "player 2 should have received ChunkBlockOverrides event"
+        );
+        assert_eq!(
+            override_count, 2,
+            "should have exactly 2 overrides in range"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_no_overrides_event_when_world_clean() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player joins a clean world (no overrides)
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            event_sender: event_tx,
+        })?;
+
+        // Collect events - should NOT receive ChunkBlockOverrides
+        let start = Instant::now();
+        let mut got_chunk_overrides = false;
+        while start.elapsed() < Duration::from_millis(200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::ChunkBlockOverrides { .. }) => {
+                    got_chunk_overrides = true;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            !got_chunk_overrides,
+            "should not receive ChunkBlockOverrides when world has no overrides"
+        );
+
+        handle.shutdown();
         Ok(())
     }
 }
