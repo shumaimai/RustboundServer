@@ -25,12 +25,12 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | Phase C: World Visibility | 3 | 1 | — | 完了 |
 | Phase D: Multiplayer | 3 | 1 | — | 完了 |
 | Phase E: Polish | 5 | 3 | — | 完了 |
-| Phase F–I + Mod API design | — | — | — | F–H **完了** / I 着手 (#134) |
+| Phase F–I + Mod API design | — | — | — | F–H **完了** / I **一部完了** (#122/#131/#123/#124–#126) |
 | **合計 (A–E まで)** | **46** | **24** | **~298** | **A–E 完了** |
 
-テスト: conformance 28 + protocol 219 + server 52（うち play conformance に既知失敗あり）+ 1 ignored。
+テスト: conformance 28 + protocol 219 + server（persist/registry 追加）+ 1 ignored。
 `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` はクリーン想定。
-詳細な次工程は GitHub Issue **#134**（Phase I + post-H polish）。全体マップは #102 / #134。
+残り Phase I は GitHub Issue **#134**（#127–#130, #132–#133）。全体マップは #102 / #134。
 
 ---
 
@@ -257,22 +257,25 @@ c587232 Establish clean-room Rust workspace.
 
 ---
 
-## 既知のギャップ（H 完了後）
+## 既知のギャップ（I 一部完了後）
 
-- Creative 設置が石固定になりがち（ホットバー未使用）— #123
-- `PlayerHandle` / peer 通知の gamemode が 0 固定になりがち — #122
+- ~~Creative 設置が石固定~~ — **#123 Done**（ホットバー所持アイテム）
+- ~~`PlayerHandle` / peer gamemode 0 固定~~ — **#122 Done**
+- ~~ブロック／プレイヤー永続化・autosave~~ — **#124–#126 Done**（leave 時も保存）
+- ~~最小 block/item ID registry~~ — **#131 Done**
 - チャンク Unload 未送信 — #127
 - リスポーン後のチャンク／インベントリ再同期不足 — #128
 - 食料消費・戦闘死なし — #129 / #130
-- ワールド／プレイヤー永続化なし — #124–#126
+- Survival dig progress — #133
+- Tick-owned mutation façade — #132
 - online mode 未実装 — #60
 
 ## 今後の展望
 
-Phases A–H 完了。次は **Issue #134**。
+Phases A–H 完了。Phase I の正しさ＋永続化コアは本ブランチで完了。残りは **Issue #134**。
 
-1. **正しさ** — #122 gamemode、#131 registry → #123 held place
-2. **Phase I 永続化** — #124 overrides → #125 players → #126 autosave（#100 は傘）
+1. ~~正しさ — #122 / #131 / #123~~
+2. ~~永続化 — #124 / #125 / #126~~
 3. **ストリーム／リスポーン** — #127 unload → #128 respawn re-sync
 4. **Survival 感** — #129 food、#130 death、#133 dig progress
 5. **Online mode** — #60
@@ -280,5 +283,5 @@ Phases A–H 完了。次は **Issue #134**。
 
 ---
 
-*最終更新: Phase H 完了後 / Phase I 計画*
-*テスト数: ~387（workspace 緑）*
+*最終更新: Phase I コア（gamemode / registry / held place / persist / autosave）*
+*テスト数: workspace 緑想定*
