@@ -55,6 +55,12 @@ pub enum TickMessage {
         y: f64,
         /// The new Z coordinate.
         z: f64,
+        /// The new yaw (degrees).
+        yaw: f32,
+        /// The new pitch (degrees).
+        pitch: f32,
+        /// Whether the player is on the ground.
+        on_ground: bool,
     },
 }
 
@@ -187,19 +193,71 @@ fn run_tick_loop(
                     username,
                     event_sender,
                 } => {
-                    let player = crate::world::PlayerHandle::new(entity_id, uuid, username, 0);
+                    let player =
+                        crate::world::PlayerHandle::new(entity_id, uuid, username.clone(), 0);
+                    let (px, py, pz) = player.position();
                     world.add_player(player);
-                    session_senders.insert(entity_id, event_sender);
+                    session_senders.insert(entity_id, event_sender.clone());
+
+                    // Broadcast join to all OTHER existing sessions
+                    for (&eid, sender) in &session_senders {
+                        if eid != entity_id {
+                            let _ = sender.send(SessionEvent::PlayerJoined {
+                                entity_id,
+                                uuid,
+                                username: username.clone(),
+                                gamemode: 0,
+                                x: px,
+                                y: py,
+                                z: pz,
+                            });
+                        }
+                    }
+
+                    // Send info about all existing players to the new session
+                    for p in world.players() {
+                        if p.entity_id != entity_id {
+                            let _ = event_sender.send(SessionEvent::PlayerJoined {
+                                entity_id: p.entity_id,
+                                uuid: p.uuid,
+                                username: p.username.clone(),
+                                gamemode: p.gamemode,
+                                x: p.x,
+                                y: p.y,
+                                z: p.z,
+                            });
+                        }
+                    }
+
                     let _ = event_tx.send(TickEvent::PlayerAdded { entity_id });
                 }
                 TickMessage::PlayerLeft { entity_id } => {
+                    // Get the player's UUID before removing
+                    let uuid = world.get_player(entity_id).map(|p| p.uuid);
                     world.remove_player(entity_id);
                     session_senders.remove(&entity_id);
+
+                    // Broadcast leave to all remaining sessions
+                    if let Some(uuid) = uuid {
+                        for sender in session_senders.values() {
+                            let _ = sender.send(SessionEvent::PlayerLeft { entity_id, uuid });
+                        }
+                    }
+
                     let _ = event_tx.send(TickEvent::PlayerRemoved { entity_id });
                 }
-                TickMessage::PlayerPositionUpdate { entity_id, x, y, z } => {
+                TickMessage::PlayerPositionUpdate {
+                    entity_id,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                    on_ground: _,
+                } => {
                     if let Some(player) = world.get_player_mut(entity_id) {
                         player.set_position(x, y, z);
+                        player.set_rotation(yaw, pitch);
                     }
                 }
             }
