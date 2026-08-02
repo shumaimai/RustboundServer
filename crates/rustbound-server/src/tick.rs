@@ -48,12 +48,22 @@ struct PlayerChunkState {
 /// The number of slots in a player inventory (36 main + 4 armor + 1 offhand + 5 crafting).
 pub const PLAYER_INVENTORY_SIZE: usize = 46;
 
+/// Default health for a new or respawned player.
+pub const DEFAULT_HEALTH: f32 = 20.0;
+/// Default food for a new or respawned player.
+pub const DEFAULT_FOOD: i32 = 20;
+/// Default food saturation for a new or respawned player.
+pub const DEFAULT_FOOD_SATURATION: f32 = 5.0;
+/// The Y coordinate below which the void kills players.
+pub const VOID_DEATH_Y: f64 = -64.0;
+
 /// Per-player inventory state, owned by the tick loop.
 ///
-/// Tracks the player's 46-slot inventory and the currently held hotbar slot.
-/// The tick loop is the single owner of inventory mutations; sessions forward
-/// client requests (Set Creative Mode Slot, Set Held Item) to the tick loop,
-/// which applies them and sends confirmation events back to the session.
+/// Tracks the player's 46-slot inventory, held hotbar slot, and vitals
+/// (health, food, saturation). The tick loop is the single owner of
+/// inventory and vital mutations; sessions forward client requests
+/// (Set Creative Mode Slot, Set Held Item, Client Status respawn) to the
+/// tick loop, which applies them and sends confirmation events back.
 #[derive(Debug, Clone)]
 struct PlayerInventory {
     /// The 46 inventory slots (0-8 hotbar, 9-35 main, 36-39 armor, 40 offhand, 41-45 crafting).
@@ -62,6 +72,14 @@ struct PlayerInventory {
     held_slot: u8,
     /// Server-managed state ID for synchronization.
     state_id: i32,
+    /// The player's health (0 or less = dead, 20 = full HP).
+    health: f32,
+    /// The player's food level (0-20).
+    food: i32,
+    /// The player's food saturation (0.0 to 5.0).
+    food_saturation: f32,
+    /// Whether the player is currently dead (awaiting respawn).
+    is_dead: bool,
 }
 
 impl PlayerInventory {
@@ -70,6 +88,10 @@ impl PlayerInventory {
             slots: vec![rustbound_protocol::play::Slot::empty(); PLAYER_INVENTORY_SIZE],
             held_slot: 0,
             state_id: 0,
+            health: DEFAULT_HEALTH,
+            food: DEFAULT_FOOD,
+            food_saturation: DEFAULT_FOOD_SATURATION,
+            is_dead: false,
         }
     }
 
@@ -97,6 +119,20 @@ impl PlayerInventory {
             return true;
         }
         false
+    }
+
+    /// Kills the player (sets health to 0, marks as dead).
+    fn kill(&mut self) {
+        self.health = 0.0;
+        self.is_dead = true;
+    }
+
+    /// Respawns the player (resets vitals to default, clears death state).
+    fn respawn(&mut self) {
+        self.health = DEFAULT_HEALTH;
+        self.food = DEFAULT_FOOD;
+        self.food_saturation = DEFAULT_FOOD_SATURATION;
+        self.is_dead = false;
     }
 }
 
@@ -270,6 +306,13 @@ pub enum TickMessage {
         /// The chat message text.
         message: String,
     },
+    /// A player sent Client Status (Perform Respawn).
+    ClientStatus {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The action ID (0 = Perform respawn, 1 = Request stats).
+        action: i32,
+    },
 }
 
 /// A message sent from the tick loop to the server.
@@ -423,6 +466,12 @@ fn run_tick_loop(
                             state_id: inv.state_id,
                             slots: inv.slots.clone(),
                             carried_item: rustbound_protocol::play::Slot::empty(),
+                        });
+                        // Send initial health
+                        let _ = event_sender.send(SessionEvent::SetHealth {
+                            health: inv.health,
+                            food: inv.food,
+                            food_saturation: inv.food_saturation,
                         });
                     }
 
@@ -642,6 +691,52 @@ fn run_tick_loop(
                         }
                     }
                 }
+                TickMessage::ClientStatus { entity_id, action } => {
+                    // Action 0 = Perform respawn
+                    if action == 0 {
+                        if let Some(inv) = inventories.get_mut(&entity_id) {
+                            if inv.is_dead {
+                                inv.respawn();
+                                let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
+                                let gamemode = world
+                                    .get_player(entity_id)
+                                    .map(|player| player.gamemode)
+                                    .unwrap_or(0);
+                                if let Some(sender) = session_senders.get(&entity_id) {
+                                    // Use the player's real gamemode and world spawn
+                                    // (not hardcoded Creative / fixed coordinates).
+                                    let _ = sender.send(SessionEvent::RespawnPlayer {
+                                        dimension_type: "minecraft:overworld".to_string(),
+                                        dimension_name: "minecraft:overworld".to_string(),
+                                        hashed_seed: 0,
+                                        gamemode,
+                                        previous_gamemode: -1,
+                                        is_debug: false,
+                                        is_flat: true,
+                                        has_death_location: false,
+                                        death_dimension_name: String::new(),
+                                        death_location: (0, 0, 0),
+                                        portal_cooldown: 0,
+                                        data_kept: 0,
+                                        x: spawn_x,
+                                        y: spawn_y,
+                                        z: spawn_z,
+                                    });
+                                    // Send updated health after respawn
+                                    let _ = sender.send(SessionEvent::SetHealth {
+                                        health: inv.health,
+                                        food: inv.food,
+                                        food_saturation: inv.food_saturation,
+                                    });
+                                }
+                                // Reset player position in world to spawn
+                                if let Some(player) = world.get_player_mut(entity_id) {
+                                    player.set_position(spawn_x, spawn_y, spawn_z);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -653,6 +748,25 @@ fn run_tick_loop(
                 });
             }
             last_keep_alive_tick = tick_count;
+        }
+
+        // Periodic task: check for void death (player Y < VOID_DEATH_Y)
+        for (&entity_id, inv) in inventories.iter_mut() {
+            if inv.is_dead {
+                continue;
+            }
+            if let Some(player) = world.get_player(entity_id) {
+                if player.y < VOID_DEATH_Y {
+                    inv.kill();
+                    if let Some(sender) = session_senders.get(&entity_id) {
+                        let _ = sender.send(SessionEvent::SetHealth {
+                            health: inv.health,
+                            food: inv.food,
+                            food_saturation: inv.food_saturation,
+                        });
+                    }
+                }
+            }
         }
 
         tick_count += 1;
@@ -670,8 +784,9 @@ fn run_tick_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        KEEP_ALIVE_INTERVAL_TICKS, PlayerChunkState, TICK_DURATION, TPS, TickEvent,
-        chunk_x_from_world, chunk_z_from_world, start_tick_loop,
+        DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, KEEP_ALIVE_INTERVAL_TICKS,
+        PlayerChunkState, TICK_DURATION, TPS, TickEvent, VOID_DEATH_Y, chunk_x_from_world,
+        chunk_z_from_world, start_tick_loop,
     };
     use crate::session::SessionEvent;
     use rustbound_protocol::primitives::Uuid;
@@ -1601,6 +1716,67 @@ mod tests {
     }
 
     #[test]
+    fn player_inventory_default_vitals() {
+        let inv = super::PlayerInventory::new();
+        assert_eq!(inv.health, DEFAULT_HEALTH);
+        assert_eq!(inv.food, DEFAULT_FOOD);
+        assert_eq!(inv.food_saturation, DEFAULT_FOOD_SATURATION);
+        assert!(!inv.is_dead);
+    }
+
+    #[test]
+    fn player_inventory_kill_and_respawn() {
+        let mut inv = super::PlayerInventory::new();
+        assert!(!inv.is_dead);
+        inv.kill();
+        assert_eq!(inv.health, 0.0);
+        assert!(inv.is_dead);
+        inv.respawn();
+        assert_eq!(inv.health, DEFAULT_HEALTH);
+        assert_eq!(inv.food, DEFAULT_FOOD);
+        assert!(!inv.is_dead);
+    }
+
+    #[test]
+    fn tick_loop_sends_initial_health_on_join() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        let start = Instant::now();
+        let mut got_health = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHealth {
+                    health,
+                    food,
+                    food_saturation,
+                }) => {
+                    got_health = true;
+                    assert_eq!(health, DEFAULT_HEALTH);
+                    assert_eq!(food, DEFAULT_FOOD);
+                    assert_eq!(food_saturation, DEFAULT_FOOD_SATURATION);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_health, "should receive SetHealth on join");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn format_chat_message_basic() {
         let msg = super::format_chat_message("Alex", "Hi!");
         assert_eq!(msg, r#"{"text":"<Alex> Hi!"}"#);
@@ -1617,5 +1793,179 @@ mod tests {
     fn format_chat_message_escapes_backslash() {
         let msg = super::format_chat_message("Steve", r"back\slash");
         assert!(msg.contains(r"\\"), "backslash should be escaped: {msg}");
+    }
+
+    #[test]
+    fn tick_loop_void_death_kills_player() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Move player below void threshold
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.0,
+            y: VOID_DEATH_Y - 10.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        })?;
+
+        // Wait for the tick loop to detect void death and send SetHealth(0)
+        let start = Instant::now();
+        let mut got_death = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHealth { health, .. }) => {
+                    if health <= 0.0 {
+                        got_death = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_death,
+            "should receive SetHealth with 0 HP on void death"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_respawn_after_death() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Move player into void to trigger death
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.0,
+            y: VOID_DEATH_Y - 10.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        })?;
+
+        // Wait for death
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHealth { health, .. }) if health <= 0.0 => break,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+
+        // Send Client Status (Perform Respawn)
+        handle.send(super::TickMessage::ClientStatus {
+            entity_id: 1,
+            action: 0,
+        })?;
+
+        // Wait for RespawnPlayer event and restored health
+        let start = Instant::now();
+        let mut got_respawn = false;
+        let mut got_health_restore = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::RespawnPlayer { x, y, z, .. }) => {
+                    got_respawn = true;
+                    assert_eq!(x, 0.0);
+                    assert_eq!(y, 64.0);
+                    assert_eq!(z, 0.0);
+                }
+                Ok(SessionEvent::SetHealth { health, .. }) => {
+                    if health > 0.0 {
+                        got_health_restore = true;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_respawn, "should receive RespawnPlayer event");
+        assert!(
+            got_health_restore,
+            "should receive SetHealth with restored HP after respawn"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_respawn_ignored_when_not_dead() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Send respawn while alive - should be ignored
+        handle.send(super::TickMessage::ClientStatus {
+            entity_id: 1,
+            action: 0,
+        })?;
+
+        // Should NOT receive RespawnPlayer event
+        let start = Instant::now();
+        let mut got_respawn = false;
+        while start.elapsed() < Duration::from_millis(200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::RespawnPlayer { .. }) => {
+                    got_respawn = true;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            !got_respawn,
+            "should not receive RespawnPlayer when player is alive"
+        );
+
+        handle.shutdown();
+        Ok(())
     }
 }
