@@ -36,6 +36,8 @@ pub struct ServerConfig {
     pub allow_nether: bool,
     /// The connection timeout (in seconds).
     pub connection_timeout_secs: u64,
+    /// The network compression threshold (-1 disables, >= 0 enables).
+    pub network_compression_threshold: i32,
 }
 
 impl Default for ServerConfig {
@@ -54,6 +56,7 @@ impl Default for ServerConfig {
             pvp: true,
             allow_nether: true,
             connection_timeout_secs: 30,
+            network_compression_threshold: 256,
         }
     }
 }
@@ -178,6 +181,9 @@ fn apply_config_values(
     }
     if let Some(v) = map.get("connection-timeout") {
         config.connection_timeout_secs = parse_u64(v, "connection-timeout")?;
+    }
+    if let Some(v) = map.get("network-compression-threshold") {
+        config.network_compression_threshold = parse_i32(v, "network-compression-threshold")?;
     }
     Ok(())
 }
