@@ -61,6 +61,8 @@ pub struct ServerConfig {
     /// The Keep Alive timeout (in seconds). If a client does not respond
     /// to a Keep Alive within this period, it is disconnected.
     pub keep_alive_timeout_secs: u64,
+    /// The autosave interval (in seconds). 0 disables autosave (save only on shutdown).
+    pub autosave_interval_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -81,6 +83,7 @@ impl Default for ServerConfig {
             connection_timeout_secs: 30,
             network_compression_threshold: 256,
             keep_alive_timeout_secs: 30,
+            autosave_interval_secs: 600, // 10 minutes default
         }
     }
 }
@@ -211,6 +214,9 @@ fn apply_config_values(
     }
     if let Some(v) = map.get("keep-alive-timeout") {
         config.keep_alive_timeout_secs = parse_u64(v, "keep-alive-timeout")?;
+    }
+    if let Some(v) = map.get("autosave-interval") {
+        config.autosave_interval_secs = parse_u64(v, "autosave-interval")?;
     }
     Ok(())
 }
