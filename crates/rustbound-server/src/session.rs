@@ -47,6 +47,17 @@ fn degrees_to_angle_byte(degrees: f32) -> u8 {
     steps.round() as u8
 }
 
+/// Player Abilities flags bitmask for the given gamemode.
+///
+/// bit0 invulnerable, bit1 flying, bit2 allow-flying, bit3 creative.
+fn player_abilities_flags(gamemode: GameMode) -> u8 {
+    match gamemode {
+        GameMode::Creative => 0x0D,  // invulnerable + allow-fly + creative
+        GameMode::Spectator => 0x07, // invulnerable + flying + allow-fly
+        GameMode::Survival | GameMode::Adventure => 0x00,
+    }
+}
+
 /// Movement data for a remote entity, used to choose the correct packet type.
 #[derive(Debug, Clone, Copy)]
 pub struct EntityMovementData {
@@ -537,18 +548,21 @@ impl PlayerSession {
     ///
     /// 1. Plugin Message (brand)
     /// 2. Change Difficulty
-    /// 3. Player Abilities
+    /// 3. Player Abilities (gamemode-aware)
     /// 4. Set Held Item
     /// 5. Entity Event (player status)
-    /// 6. Set Default Spawn Position
-    /// 7. Set Center Chunk
-    /// 8. Set Render Distance
-    /// 9. Set Simulation Distance
-    /// 10. Game Event (start waiting for level chunks)
+    /// 6. Update Recipes (empty stub)
+    /// 7. Update Tags (empty registries stub)
+    /// 8. Player Info Update (self)
+    /// 9. Set Default Spawn Position
+    /// 10. Set Center Chunk
+    /// 11. Set Render Distance
+    /// 12. Set Simulation Distance
+    /// 13. Game Event (start waiting for level chunks)
     pub fn send_join_sequence(&self, stream: &mut TcpStream) -> Result<(), SessionError> {
         let mfl = self.max_frame_length;
 
-        // 1. Plugin Message (brand) 窶・0x17
+        // 1. Plugin Message (brand) — 0x17
         let brand = PluginMessageClientbound {
             channel: "minecraft:brand".to_string(),
             data: b"rustbound".to_vec(),
@@ -557,7 +571,7 @@ impl PlayerSession {
         encode_plugin_message_clientbound(&brand, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 2. Change Difficulty 窶・0x0C
+        // 2. Change Difficulty — 0x0C
         let diff = ChangeDifficulty {
             difficulty: 1, // Easy
             locked: false,
@@ -566,9 +580,9 @@ impl PlayerSession {
         encode_change_difficulty(&diff, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 3. Player Abilities 窶・0x34
+        // 3. Player Abilities — 0x34 (flags depend on gamemode)
         let abilities = PlayerAbilities {
-            flags: 0x04, // allow flying bit
+            flags: player_abilities_flags(self.gamemode),
             flying_speed: 0.05,
             fov_modifier: 0.1,
         };
@@ -576,13 +590,13 @@ impl PlayerSession {
         encode_player_abilities(&abilities, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 4. Set Held Item 窶・0x4D
+        // 4. Set Held Item — 0x4D
         let held = SetHeldItem { slot: 0 };
         wire.clear();
         encode_set_held_item(&held, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 5. Entity Event (player status: 28 = op permission level 4) 窶・0x1C
+        // 5. Entity Event (player status: 28 = op permission level 4) — 0x1C
         let entity_event = EntityEvent {
             entity_id: self.entity_id,
             entity_status: 28,
@@ -591,7 +605,26 @@ impl PlayerSession {
         encode_entity_event(&entity_event, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 6. Set Default Spawn Position 窶・0x50
+        // 6. Update Recipes (empty) — 0x6D
+        wire.clear();
+        rustbound_protocol::play::encode_update_recipes_empty(mfl, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+
+        // 7. Update Tags (empty registries) — 0x68
+        wire.clear();
+        rustbound_protocol::play::encode_update_tags_empty(mfl, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+
+        // 8. Player Info Update for self — 0x3A
+        self.send_player_info_add(
+            stream,
+            self.entity_id,
+            self.uuid,
+            &self.username,
+            self.gamemode.to_wire(),
+        )?;
+
+        // 9. Set Default Spawn Position — 0x50
         let spawn = SetDefaultSpawnPosition {
             location: (0, 64, 0),
             angle: 0.0,
@@ -600,7 +633,7 @@ impl PlayerSession {
         encode_set_default_spawn_position(&spawn, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 7. Set Center Chunk 窶・0x4E
+        // 10. Set Center Chunk — 0x4E
         let center = SetCenterChunk {
             chunk_x: 0,
             chunk_z: 0,
@@ -609,7 +642,7 @@ impl PlayerSession {
         encode_set_center_chunk(&center, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 8. Set Render Distance 窶・0x4F
+        // 11. Set Render Distance — 0x4F
         let render = SetRenderDistance {
             view_distance: self.view_distance,
         };
@@ -617,7 +650,7 @@ impl PlayerSession {
         encode_set_render_distance(&render, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 9. Set Simulation Distance 窶・0x5C
+        // 12. Set Simulation Distance — 0x5C
         let sim = SetSimulationDistance {
             simulation_distance: self.simulation_distance,
         };
@@ -625,7 +658,7 @@ impl PlayerSession {
         encode_set_simulation_distance(&sim, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 10. Game Event (13 = Start waiting for level chunks) 窶・0x1F
+        // 13. Game Event (13 = Start waiting for level chunks) — 0x1F
         let game_event = GameEvent {
             event_type: 13,
             value: 0.0,

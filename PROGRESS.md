@@ -25,7 +25,7 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | Phase C: World Visibility | 3 | 1 | — | 完了 |
 | Phase D: Multiplayer | 3 | 1 | — | 完了 |
 | Phase E: Polish | 5 | 3 | — | 完了 |
-| Phase F–I + Mod API design | — | — | — | F–I **完了** / Mod API 設計+façade 着地 (#101/#132) |
+| Phase F–I + Mod API design | — | — | — | F–I **完了** / ModHost 配線済 / **J オフライン参加検証** |
 | **合計 (A–E まで)** | **46** | **24** | **~298** | **A–E 完了** |
 
 テスト: conformance 28 + protocol 219 + server（persist/registry 追加）+ 1 ignored。
@@ -282,10 +282,11 @@ Phases A–I 完了。ModHost は tick に配線済み。次は **#60 Online mod
 3. ~~ストリーム／リスポーン — #127 / #128~~
 4. ~~Survival 感 — #129 / #130 / #133~~
 5. ~~Mod API 準備 — #132 / #101 / tick 配線~~
-6. **Online mode** — #60
-7. **実 mod 登録** — `Server` へ mods を渡す経路
+6. **Offline playability (Phase J)** — バニラ 1.20.1 オフライン参加・掘る/置く/チャット
+7. **Online mode** — #60
+8. **実 mod 登録** — `Server` へ mods を渡す経路
 
 ---
 
-*最終更新: ModHost tick 配線*
+*最終更新: Phase J オフライン playability 検証開始*
 *テスト数: workspace 緑想定*

@@ -102,6 +102,9 @@ pub const SET_RENDER_DISTANCE_PACKET_ID: i32 = 0x4F;
 /// Packet ID for the clientbound Set Simulation Distance packet.
 pub const SET_SIMULATION_DISTANCE_PACKET_ID: i32 = 0x5C;
 
+/// Packet ID for the clientbound Update Tags packet (protocol 763).
+pub const UPDATE_TAGS_PACKET_ID: i32 = 0x68;
+
 /// Packet ID for the clientbound Update Recipes packet.
 pub const UPDATE_RECIPES_PACKET_ID: i32 = 0x6D;
 
@@ -1817,6 +1820,46 @@ pub fn encode_player_abilities(
     encode_f32(packet.flying_speed, &mut body);
     encode_f32(packet.fov_modifier, &mut body);
     encode_frame(PLAYER_ABILITIES_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes an empty Update Tags packet (clientbound Play `0x68`).
+///
+/// Vanilla clients expect tags for `minecraft:block`, `minecraft:item`,
+/// `minecraft:fluid`, `minecraft:entity_type`, and `minecraft:game_event`.
+/// Empty tag lists are accepted and unblock join; gameplay that depends
+/// on tags remains stubbed.
+pub fn encode_update_tags_empty(
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    const REGISTRIES: &[&str] = &[
+        "minecraft:block",
+        "minecraft:item",
+        "minecraft:fluid",
+        "minecraft:entity_type",
+        "minecraft:game_event",
+    ];
+    let mut body = Vec::new();
+    encode_var_int(REGISTRIES.len() as i32, &mut body);
+    for registry in REGISTRIES {
+        encode_string(registry, MAX_IDENTIFIER_LENGTH, &mut body).map_err(PlayError::from)?;
+        encode_var_int(0, &mut body); // zero tags in this registry
+    }
+    encode_frame(UPDATE_TAGS_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes an empty Update Recipes packet (clientbound Play `0x6D`).
+pub fn encode_update_recipes_empty(
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(0, &mut body); // zero recipes
+    encode_frame(UPDATE_RECIPES_PACKET_ID, &body, max_frame_length, output)
         .map_err(PlayError::from)?;
     Ok(())
 }
@@ -4796,17 +4839,18 @@ mod tests {
         SetCenterChunk, SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth,
         SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
         SetRenderDistance, SetSimulationDistance, Slot, SpawnPlayer, SynchronizePlayerPosition,
-        SystemChatMessage, UnloadChunk, UseItemOn, decode_acknowledge_block_change,
-        decode_block_update, decode_change_difficulty, decode_chat_message_serverbound,
-        decode_chunk_data, decode_client_information, decode_client_status, decode_combat_death,
-        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
-        decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
-        decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
-        decode_move_entity_rot, decode_player_abilities, decode_player_digging,
-        decode_plugin_message_clientbound, decode_respawn, decode_set_block_destroy_stage,
-        decode_set_center_chunk, decode_set_container_content, decode_set_container_slot,
-        decode_set_creative_mode_slot, decode_set_default_spawn_position, decode_set_health,
-        decode_set_held_item, decode_set_held_item_serverbound, decode_set_player_position,
+        SystemChatMessage, UPDATE_RECIPES_PACKET_ID, UPDATE_TAGS_PACKET_ID, UnloadChunk, UseItemOn,
+        decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
+        decode_chat_message_serverbound, decode_chunk_data, decode_client_information,
+        decode_client_status, decode_combat_death, decode_confirm_teleportation,
+        decode_disconnect_play, decode_entity_event, decode_entity_teleport, decode_game_event,
+        decode_join_game, decode_keep_alive_clientbound, decode_keep_alive_serverbound,
+        decode_move_entity_pos, decode_move_entity_pos_rot, decode_move_entity_rot,
+        decode_player_abilities, decode_player_digging, decode_plugin_message_clientbound,
+        decode_respawn, decode_set_block_destroy_stage, decode_set_center_chunk,
+        decode_set_container_content, decode_set_container_slot, decode_set_creative_mode_slot,
+        decode_set_default_spawn_position, decode_set_health, decode_set_held_item,
+        decode_set_held_item_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
         decode_set_render_distance, decode_set_simulation_distance, decode_slot,
         decode_synchronize_player_position, decode_unload_chunk, decode_use_item_on,
@@ -4823,7 +4867,8 @@ mod tests {
         encode_set_player_position, encode_set_player_position_and_rotation,
         encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
         encode_slot, encode_spawn_player, encode_synchronize_player_position,
-        encode_system_chat_message, encode_unload_chunk, encode_use_item_on, ensure_play_state,
+        encode_system_chat_message, encode_unload_chunk, encode_update_recipes_empty,
+        encode_update_tags_empty, encode_use_item_on, ensure_play_state,
     };
     use crate::primitives::{decode_bool, decode_string};
     use crate::state::ProtocolState;
@@ -6116,6 +6161,36 @@ mod tests {
             other => panic!("expected AcknowledgeBlockChange, got {other:?}"),
         }
         assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn encode_update_tags_empty_has_expected_packet_id() -> Result<(), Box<dyn std::error::Error>> {
+        let mut wire = Vec::new();
+        encode_update_tags_empty(TEST_MAX_FRAME, &mut wire)?;
+        let mut input: &[u8] = &wire;
+        match crate::framing::decode_frame(&mut input, TEST_MAX_FRAME)? {
+            crate::framing::DecodeOutcome::Complete(frame) => {
+                assert_eq!(frame.packet_id, UPDATE_TAGS_PACKET_ID);
+            }
+            crate::framing::DecodeOutcome::Incomplete => panic!("expected complete frame"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn encode_update_recipes_empty_has_expected_packet_id() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut wire = Vec::new();
+        encode_update_recipes_empty(TEST_MAX_FRAME, &mut wire)?;
+        let mut input: &[u8] = &wire;
+        match crate::framing::decode_frame(&mut input, TEST_MAX_FRAME)? {
+            crate::framing::DecodeOutcome::Complete(frame) => {
+                assert_eq!(frame.packet_id, UPDATE_RECIPES_PACKET_ID);
+            }
+            crate::framing::DecodeOutcome::Incomplete => panic!("expected complete frame"),
+        }
         Ok(())
     }
 

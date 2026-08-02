@@ -6,22 +6,45 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-**Pre-alpha, offline multiplayer mini-server.** Phases A–H done; this PR lands early Phase I: gamemode wiring, item registry, held-item Creative place, block/player persistence, autosave. Remaining: unload, respawn re-sync, food/combat, Mod API prereqs ([#134](https://github.com/shumaimai/RustboundServer/issues/134)).
+**Pre-alpha offline playability.** Phases A–I are on `main`. Current focus is verifying that a **vanilla 1.20.1 offline client** can join, see the flat world, dig/place (Creative), and chat.
 
 | Layer | Status |
 |-------|--------|
-| Protocol + Login/Play + sessions/tick | Implemented |
-| Chunks, light, streaming, overrides | Working (unload packet still incomplete — #127) |
-| Dig / place (Creative) + held-item place | Working |
-| Multiplayer motion + chat + gamemode broadcast | Working |
+| Protocol + Login/Play + sessions/tick | Working |
+| Chunks, light, streaming, unload, overrides | Working |
+| Dig / place (Creative + Survival stub) | Working |
+| Multiplayer motion + chat + gamemode | Working |
 | Keep Alive timeout / offline UUID | Working |
-| Health / void death / respawn | Working (minimal) |
-| Persistence (overrides + players + autosave) | **In this PR** (#124–#126) |
+| Health / void death / respawn / food stub | Working (minimal) |
+| Persistence + autosave | Working |
+| Join sequence stubs (abilities, tags, recipes, tab self) | Working |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) |
 | Forge jars / JVM | **Out of scope** |
-| Thin Rust Mod API | Long-term ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
+| Thin Rust Mod API | Façade + ModHost wired ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
 
-See [PROGRESS.md](PROGRESS.md). **Tracking:** [#134](https://github.com/shumaimai/RustboundServer/issues/134).
+See [PROGRESS.md](PROGRESS.md). Tracking leftovers: [#134](https://github.com/shumaimai/RustboundServer/issues/134).
+
+## Try it (offline)
+
+Requirements: Rust toolchain; optional **Minecraft Java Edition 1.20.1** client set to offline / cracked-offline launcher (no Microsoft auth against this server).
+
+```console
+cp server.properties.example server.properties
+cargo run -p rustbound-server --release -- --config server.properties
+```
+
+Then connect the 1.20.1 client to `localhost:25565` (or the host/port in your properties). Default example uses **Creative** (`gamemode=1`) with a small starter hotbar.
+
+Automated smoke (no Minecraft client required):
+
+```console
+./scripts/smoke_offline_join.sh
+cargo test -p rustbound-server --lib server_offline_playability_smoke
+```
+
+What works today: join flat Overworld, move, chat, Creative dig/place, Survival dig progress stub, multiplayer visibility, persist across restart for the same offline UUID.
+
+What is still rough: full vanilla parity (recipes/tags content, physics, mobs), online mode, and richer Mod API wiring.
 
 ## Workspace
 
@@ -62,9 +85,10 @@ Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ct
 | **F** | Play hardening (#86–#90) | **Done** |
 | **G** | Motion, streaming, overrides, config (#91–#94) | **Done** |
 | **H** | Inventory, chat, KA timeout, UUID, vitals (#95–#99) | **Done** |
-| **I** | Persistence + polish (#122–#133) | **Done** — see [#134](https://github.com/shumaimai/RustboundServer/issues/134) leftovers (#60) |
+| **I** | Persistence + polish (#122–#133) | **Done** |
+| **J** | Offline join / playability verification | **In progress** |
 | Later | Online mode (#60) | Queued |
-| Long-term | Thin Rust Mod API (#101, #132) | Façade + host wired; load/register mods next |
+| Long-term | Thin Rust Mod API (#101, #132) | Façade + host wired |
 
 **Not a goal:** drop-in Java Forge mod compatibility or an automatic Forge→Rust compiler.
 

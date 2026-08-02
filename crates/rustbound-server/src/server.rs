@@ -140,13 +140,26 @@ mod tests {
     use rustbound_protocol::status::decode_status_response;
     use std::io::{Read, Write};
     use std::net::TcpStream;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    fn unique_level_name(prefix: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!(
+            "/tmp/rustbound-server-test-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            n
+        )
+    }
 
     #[test]
     fn server_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("srv"),
             ..Default::default()
         };
         let mut server = Server::start(config)?;
@@ -161,6 +174,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("tcp"),
             ..Default::default()
         };
         let mut server = Server::start(config)?;
@@ -178,6 +192,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("status"),
             ..Default::default()
         };
         let mut server = Server::start(config)?;
@@ -223,6 +238,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("srv"),
             online_mode: false,
             network_compression_threshold: -1,
             ..Default::default()
@@ -257,6 +273,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("srv"),
             online_mode: false,
             network_compression_threshold: -1,
             ..Default::default()
@@ -299,6 +316,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("srv"),
             online_mode: false,
             network_compression_threshold: 256, // default
             ..Default::default()
@@ -318,6 +336,55 @@ mod tests {
 
         assert_eq!(snapshot.username, "PlayTestPlayer");
         assert_eq!(snapshot.dimension_name, "minecraft:overworld");
+
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_offline_playability_smoke() -> Result<(), Box<dyn std::error::Error>> {
+        // Stronger than Join Game alone: Creative offline join must deliver
+        // chunks + teleport confirmation (vanilla loading-screen exit path).
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            default_gamemode: 1, // Creative
+            network_compression_threshold: 256,
+            level_name: unique_level_name("smoke"),
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let probe_config = rustbound_conformance::PlayProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "SmokePlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(3),
+        };
+        let snapshot = rustbound_conformance::run_play_probe(&probe_config)?;
+
+        assert_eq!(snapshot.username, "SmokePlayer");
+        assert_eq!(snapshot.gamemode, 1, "Creative join for smoke");
+        assert_eq!(snapshot.dimension_name, "minecraft:overworld");
+        assert!(snapshot.is_flat);
+        assert!(
+            snapshot.chunk_data_seen,
+            "vanilla clients need Chunk Data before leaving loading screen"
+        );
+        assert!(
+            snapshot.teleport_confirmed
+                || matches!(
+                    snapshot.phase_reached,
+                    rustbound_conformance::PlayPhase::TeleportConfirmed
+                        | rustbound_conformance::PlayPhase::PostTeleport
+                ),
+            "expected teleport confirm or post-teleport phase, got {:?}",
+            snapshot.phase_reached
+        );
 
         server.shutdown();
         Ok(())
@@ -357,6 +424,7 @@ mod tests {
         let config = ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 0,
+            level_name: unique_level_name("srv"),
             online_mode: false,
             network_compression_threshold: -1,
             ..Default::default()

@@ -23,9 +23,12 @@ use std::path::{Path, PathBuf};
 /// - `network_compression_threshold`: Login Set Compression + Play framing
 /// - `keep_alive_timeout_secs`: Keep Alive response timeout (idle kick)
 ///
+/// **Wired into persistence:**
+/// - `level_name`: World data directory for overrides/players
+/// - `autosave_interval_secs`: Periodic flush interval
+///
 /// **Intentionally unused (parsed but not enforced):**
 /// - `white_list`: Whitelist enforcement is not implemented
-/// - `level_name`: Single-dimension world only
 /// - `pvp`: PvP damage rules not implemented
 /// - `allow_nether`: Multi-dimension support not implemented
 #[derive(Debug, Clone)]
