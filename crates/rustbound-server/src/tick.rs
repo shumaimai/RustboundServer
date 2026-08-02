@@ -895,10 +895,67 @@ fn run_tick_loop(
                                         food: inv.food,
                                         food_saturation: inv.food_saturation,
                                     });
+                                    // Re-sync inventory container content
+                                    let _ = sender.send(SessionEvent::SetContainerContent {
+                                        window_id: 0,
+                                        state_id: inv.state_id,
+                                        slots: inv.slots.clone(),
+                                        carried_item: rustbound_protocol::play::Slot::empty(),
+                                    });
+                                    // Re-sync held item
+                                    let _ = sender.send(SessionEvent::SetHeldItemClientbound {
+                                        slot: inv.held_slot,
+                                    });
                                 }
                                 // Reset player position in world to spawn
                                 if let Some(player) = world.get_player_mut(entity_id) {
                                     player.set_position(spawn_x, spawn_y, spawn_z);
+                                }
+                                // Re-sync chunks: reset center to spawn, unload old, load new
+                                let spawn_cx = chunk_x_from_world(spawn_x);
+                                let spawn_cz = chunk_z_from_world(spawn_z);
+                                if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
+                                    // Unload all currently loaded chunks
+                                    let old_loaded: Vec<_> =
+                                        chunk_state.loaded_chunks.iter().copied().collect();
+                                    // Reset center and loaded set to spawn
+                                    chunk_state.center_x = spawn_cx;
+                                    chunk_state.center_z = spawn_cz;
+                                    let new_desired = chunk_state.desired_chunk_set();
+                                    // Chunks to load: in new desired but not in old loaded
+                                    let new_chunks: Vec<_> = new_desired
+                                        .iter()
+                                        .filter(|pos| !chunk_state.loaded_chunks.contains(pos))
+                                        .copied()
+                                        .collect();
+                                    // Chunks to unload: in old loaded but not in new desired
+                                    let unloaded: Vec<_> = old_loaded
+                                        .iter()
+                                        .filter(|pos| !new_desired.contains(pos))
+                                        .copied()
+                                        .collect();
+                                    chunk_state.loaded_chunks = new_desired;
+                                    if let Some(sender) = session_senders.get(&entity_id) {
+                                        // Send Set Center Chunk
+                                        let _ = sender.send(SessionEvent::SetCenterChunkEvent {
+                                            chunk_x: spawn_cx,
+                                            chunk_z: spawn_cz,
+                                        });
+                                        // Unload old chunks
+                                        for chunk in unloaded {
+                                            let _ = sender.send(SessionEvent::UnloadChunk {
+                                                chunk_x: chunk.x,
+                                                chunk_z: chunk.z,
+                                            });
+                                        }
+                                        // Load new chunks
+                                        for chunk in new_chunks {
+                                            let _ = sender.send(SessionEvent::LoadChunk {
+                                                chunk_x: chunk.x,
+                                                chunk_z: chunk.z,
+                                            });
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -2273,6 +2330,9 @@ mod tests {
         let start = Instant::now();
         let mut got_respawn = false;
         let mut got_health_restore = false;
+        let mut got_container_content = false;
+        let mut got_held_item = false;
+        let mut got_center_chunk = false;
         while start.elapsed() < Duration::from_millis(500) {
             match event_rx.try_recv() {
                 Ok(SessionEvent::RespawnPlayer { x, y, z, .. }) => {
@@ -2286,6 +2346,16 @@ mod tests {
                         got_health_restore = true;
                     }
                 }
+                Ok(SessionEvent::SetContainerContent { .. }) => {
+                    got_container_content = true;
+                }
+                Ok(SessionEvent::SetHeldItemClientbound { .. }) => {
+                    got_held_item = true;
+                }
+                Ok(SessionEvent::SetCenterChunkEvent { .. }) => {
+                    got_center_chunk = true;
+                }
+                Ok(SessionEvent::LoadChunk { .. }) => {}
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
@@ -2295,6 +2365,20 @@ mod tests {
             got_health_restore,
             "should receive SetHealth with restored HP after respawn"
         );
+        assert!(
+            got_container_content,
+            "should receive SetContainerContent (inventory re-sync) after respawn"
+        );
+        assert!(
+            got_held_item,
+            "should receive SetHeldItemClientbound after respawn"
+        );
+        assert!(
+            got_center_chunk,
+            "should receive SetCenterChunkEvent (chunk center re-sync) after respawn"
+        );
+        // LoadChunk may or may not fire if spawn == death position (all chunks
+        // already loaded). The important thing is the center is re-sent.
 
         handle.shutdown();
         Ok(())
