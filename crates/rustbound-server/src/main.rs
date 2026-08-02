@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rustbound_server::config::{load_config, parse_args};
 use rustbound_server::server::Server;
 
@@ -30,9 +33,21 @@ fn main() {
         }
     };
 
-    // Wait for Ctrl+C (simplified - in production this would use a signal handler)
-    // For now, just park the main thread
-    std::thread::park();
+    // Set up Ctrl+C / SIGTERM handler for clean shutdown
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    if ctrlc::set_handler(move || {
+        running_clone.store(false, Ordering::Release);
+    })
+    .is_err()
+    {
+        eprintln!("warning: failed to set Ctrl+C handler");
+    }
+
+    // Wait for the shutdown signal
+    while running.load(Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 
     server.shutdown();
     eprintln!("server shut down");

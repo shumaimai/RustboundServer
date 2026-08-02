@@ -8,6 +8,7 @@
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -155,7 +156,7 @@ impl From<SessionError> for ConnectionError {
 /// Configuration for the connection handler.
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
-    /// The server's status response (for Status state).
+    /// The server's status response template (for Status state).
     pub status_response: StatusResponse,
     /// Whether the server is in online mode.
     pub online_mode: bool,
@@ -169,6 +170,10 @@ pub struct ConnectionConfig {
     pub entity_id_allocator: EntityIdAllocator,
     /// Read timeout for Play-state connections.
     pub play_read_timeout: Duration,
+    /// Live player count (incremented on join, decremented on leave).
+    pub player_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Maximum players (from config).
+    pub max_players: i32,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -204,9 +209,16 @@ pub fn handle_connection(
                         }
                     }
                     ProtocolState::Status => {
+                        // Build a status response with the live player count
+                        let mut response = config.status_response.clone();
+                        let online = config
+                            .player_count
+                            .load(std::sync::atomic::Ordering::Acquire);
+                        response.players.online = i32::try_from(online).unwrap_or(i32::MAX);
+                        response.players.max = config.max_players;
                         state = handle_status_packet(
                             packet,
-                            &config.status_response,
+                            &response,
                             config.max_frame_length,
                             &mut stream,
                         )?;
@@ -498,6 +510,7 @@ mod tests {
     use rustbound_protocol::state::NextState;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
     use std::sync::mpsc::channel;
     use std::time::Duration;
 
@@ -516,6 +529,8 @@ mod tests {
             tick_sender: tx,
             entity_id_allocator: EntityIdAllocator::new(1),
             play_read_timeout: Duration::from_secs(5),
+            player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_players: 20,
         }
     }
 

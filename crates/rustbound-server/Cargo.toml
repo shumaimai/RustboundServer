@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+ctrlc = "3.5.2"
 rustbound-protocol = { path = "../rustbound-protocol" }
 
 [dev-dependencies]

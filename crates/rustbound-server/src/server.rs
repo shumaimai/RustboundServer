@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use crate::config::ServerConfig;
@@ -59,9 +60,11 @@ pub struct Server {
 impl Server {
     /// Starts the server with the given configuration.
     pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
-        let (tick_handle, _event_rx) = start_tick_loop()?;
+        let player_count = Arc::new(AtomicUsize::new(0));
+        let (tick_handle, _event_rx) = start_tick_loop(player_count.clone())?;
 
         let tick_sender = tick_handle.sender();
+        let max_players = config.max_players;
         let connection_config = Arc::new(ConnectionConfig {
             status_response: default_status_response(),
             online_mode: config.online_mode,
@@ -70,6 +73,8 @@ impl Server {
             tick_sender,
             entity_id_allocator: EntityIdAllocator::new(1),
             play_read_timeout: Duration::from_secs(30),
+            player_count: player_count.clone(),
+            max_players,
         });
 
         let listener_config = ListenerConfig {
