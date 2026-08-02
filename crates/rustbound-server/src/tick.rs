@@ -967,6 +967,34 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
+    /// Ephemeral level directory for tick-loop tests.
+    ///
+    /// Using a unique name per test avoids cross-test leakage now that
+    /// shutdown/autosave persist player and block data under `level_name/`.
+    struct TestLevel(String);
+
+    impl TestLevel {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            Self(format!(
+                "test-world-{}-{}",
+                std::process::id(),
+                COUNTER.fetch_add(1, Ordering::Relaxed)
+            ))
+        }
+
+        fn name(&self) -> String {
+            self.0.clone()
+        }
+    }
+
+    impl Drop for TestLevel {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn tick_duration_is_50ms() {
         assert_eq!(TICK_DURATION, Duration::from_millis(50));
@@ -980,9 +1008,10 @@ mod tests {
 
     #[test]
     fn tick_loop_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
         std::thread::sleep(Duration::from_millis(100));
@@ -992,9 +1021,10 @@ mod tests {
 
     #[test]
     fn tick_loop_processes_player_join_and_leave() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1048,9 +1078,10 @@ mod tests {
 
     #[test]
     fn tick_loop_shuts_down_on_message() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
         handle.send(super::TickMessage::Shutdown)?;
@@ -1075,9 +1106,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_block_overrides_to_new_player() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1179,9 +1211,10 @@ mod tests {
 
     #[test]
     fn tick_loop_no_overrides_event_when_world_clean() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1219,9 +1252,10 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_position_update_to_peers() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1311,9 +1345,10 @@ mod tests {
     #[test]
     fn tick_loop_no_movement_event_when_position_unchanged()
     -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1457,9 +1492,10 @@ mod tests {
     #[test]
     fn tick_loop_streams_chunks_on_chunk_border_crossing() -> Result<(), Box<dyn std::error::Error>>
     {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1518,9 +1554,10 @@ mod tests {
 
     #[test]
     fn tick_loop_no_chunk_stream_when_same_chunk() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1573,9 +1610,10 @@ mod tests {
     #[test]
     fn tick_loop_client_view_distance_loads_more_chunks() -> Result<(), Box<dyn std::error::Error>>
     {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1669,9 +1707,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_inventory_on_join() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1716,9 +1755,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_updates_inventory() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1775,9 +1815,10 @@ mod tests {
 
     #[test]
     fn tick_loop_held_item_updates_send_event() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1822,9 +1863,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_slot_drop_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1874,9 +1916,10 @@ mod tests {
 
     #[test]
     fn tick_loop_broadcasts_chat_to_other_players() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -1975,9 +2018,10 @@ mod tests {
 
     #[test]
     fn tick_loop_sends_initial_health_on_join() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2037,9 +2081,10 @@ mod tests {
 
     #[test]
     fn tick_loop_void_death_kills_player() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2094,9 +2139,10 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_after_death() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2174,9 +2220,10 @@ mod tests {
 
     #[test]
     fn tick_loop_respawn_ignored_when_not_dead() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2224,9 +2271,10 @@ mod tests {
     #[test]
     fn tick_loop_creative_gamemode_passed_to_handle_and_peers()
     -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2286,9 +2334,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_place_uses_held_item() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2355,9 +2404,10 @@ mod tests {
 
     #[test]
     fn tick_loop_creative_place_empty_hand_no_block() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
@@ -2407,9 +2457,10 @@ mod tests {
     #[test]
     fn tick_loop_creative_place_stone_uses_stone_block_state()
     -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            "test-world".to_string(),
+            level.name(),
             0, // disable autosave in tests
         )?;
 
