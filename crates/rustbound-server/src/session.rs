@@ -15,22 +15,22 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use rustbound_protocol::play::{
-    ChangeDifficulty, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
-    GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-    PlayerAbilities, PluginMessageClientbound, Respawn, SetCenterChunk, SetContainerContent,
-    SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetRenderDistance,
-    SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage, UnloadChunk,
-    decode_chat_message_serverbound, decode_client_information, decode_client_status,
+    ChangeDifficulty, ClientInformation, CombatDeath, ConfirmTeleportation, DisconnectPlay,
+    EntityEvent, GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError,
+    PlayPacket, PlayerAbilities, PluginMessageClientbound, Respawn, SetCenterChunk,
+    SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem,
+    SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage,
+    UnloadChunk, decode_chat_message_serverbound, decode_client_information, decode_client_status,
     decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
     decode_set_creative_mode_slot, decode_set_held_item_serverbound, decode_set_player_position,
     decode_set_player_position_and_rotation, decode_set_player_rotation, decode_use_item_on,
-    encode_change_difficulty, encode_chunk_data, encode_disconnect_play, encode_entity_event,
-    encode_game_event, encode_join_game, encode_keep_alive_clientbound, encode_player_abilities,
-    encode_plugin_message_clientbound, encode_respawn, encode_set_center_chunk,
-    encode_set_container_content, encode_set_container_slot, encode_set_default_spawn_position,
-    encode_set_health, encode_set_held_item, encode_set_render_distance,
-    encode_set_simulation_distance, encode_synchronize_player_position, encode_system_chat_message,
-    encode_unload_chunk,
+    encode_change_difficulty, encode_chunk_data, encode_combat_death, encode_disconnect_play,
+    encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
+    encode_player_abilities, encode_plugin_message_clientbound, encode_respawn,
+    encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
+    encode_set_default_spawn_position, encode_set_health, encode_set_held_item,
+    encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
+    encode_system_chat_message, encode_unload_chunk,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -158,6 +158,13 @@ pub enum SessionEvent {
         chunk_x: i32,
         /// The chunk Z coordinate.
         chunk_z: i32,
+    },
+    /// Send a Combat Death packet to display the death screen.
+    CombatDeath {
+        /// The entity ID of the player that died.
+        player_id: i32,
+        /// The death message as a JSON chat component string.
+        message: String,
     },
     /// Send a Set Container Content packet to initialize or sync the inventory.
     SetContainerContent {
@@ -917,6 +924,13 @@ impl PlayerSession {
                     let packet = UnloadChunk { chunk_x, chunk_z };
                     let mut wire = Vec::new();
                     encode_unload_chunk(&packet, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::CombatDeath { player_id, message } => {
+                    let packet = CombatDeath { player_id, message };
+                    let mut wire = Vec::new();
+                    encode_combat_death(&packet, self.max_frame_length, &mut wire)?;
                     self.send_wire(stream, &wire)?;
                     processed = true;
                 }
