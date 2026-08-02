@@ -17,14 +17,16 @@ use std::time::Duration;
 use rustbound_protocol::play::{
     ChangeDifficulty, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
     GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition,
-    SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
-    decode_client_information, decode_confirm_teleportation, decode_keep_alive_serverbound,
-    decode_player_digging, decode_set_player_position, decode_set_player_position_and_rotation,
-    decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
-    encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
-    encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
-    encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
+    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetContainerContent,
+    SetContainerSlot, SetDefaultSpawnPosition, SetHeldItem, SetRenderDistance,
+    SetSimulationDistance, SynchronizePlayerPosition, decode_client_information,
+    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
+    decode_set_creative_mode_slot, decode_set_held_item_serverbound, decode_set_player_position,
+    decode_set_player_position_and_rotation, decode_set_player_rotation, decode_use_item_on,
+    encode_change_difficulty, encode_chunk_data, encode_disconnect_play, encode_entity_event,
+    encode_game_event, encode_join_game, encode_keep_alive_clientbound, encode_player_abilities,
+    encode_plugin_message_clientbound, encode_set_center_chunk, encode_set_container_content,
+    encode_set_container_slot, encode_set_default_spawn_position, encode_set_held_item,
     encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
 };
 use rustbound_protocol::primitives::Uuid;
@@ -146,6 +148,33 @@ pub enum SessionEvent {
         chunk_x: i32,
         /// The chunk Z coordinate.
         chunk_z: i32,
+    },
+    /// Send a Set Container Content packet to initialize or sync the inventory.
+    SetContainerContent {
+        /// The window ID (0 for player inventory).
+        window_id: u8,
+        /// Server-managed state ID.
+        state_id: i32,
+        /// The slot data for all slots.
+        slots: Vec<rustbound_protocol::play::Slot>,
+        /// The carried (cursor) item.
+        carried_item: rustbound_protocol::play::Slot,
+    },
+    /// Send a Set Container Slot packet to update a single slot.
+    SetContainerSlot {
+        /// The window ID.
+        window_id: i8,
+        /// Server-managed state ID.
+        state_id: i32,
+        /// The slot index.
+        slot: i16,
+        /// The new slot data.
+        item: rustbound_protocol::play::Slot,
+    },
+    /// Send a Set Held Item (clientbound) packet to sync the hotbar selection.
+    SetHeldItemClientbound {
+        /// The hotbar slot (0-8).
+        slot: u8,
     },
 }
 
@@ -807,6 +836,37 @@ impl PlayerSession {
                     self.send_single_chunk(stream, chunk_x, chunk_z)?;
                     processed = true;
                 }
+                SessionEvent::SetContainerContent {
+                    window_id,
+                    state_id,
+                    slots,
+                    carried_item,
+                } => {
+                    self.send_set_container_content(
+                        stream,
+                        window_id,
+                        state_id,
+                        &slots,
+                        &carried_item,
+                    )?;
+                    processed = true;
+                }
+                SessionEvent::SetContainerSlot {
+                    window_id,
+                    state_id,
+                    slot,
+                    item,
+                } => {
+                    self.send_set_container_slot(stream, window_id, state_id, slot, &item)?;
+                    processed = true;
+                }
+                SessionEvent::SetHeldItemClientbound { slot } => {
+                    let held = SetHeldItem { slot };
+                    let mut wire = Vec::new();
+                    encode_set_held_item(&held, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -935,6 +995,23 @@ impl PlayerSession {
                 // Always ACK the place packet (protocol requires it)
                 Ok(Some(place.sequence))
             }
+            PlayPacket::SetCreativeModeSlot(creative) => {
+                // Forward to tick loop for inventory tracking
+                let _ = self.tick_sender.send(TickMessage::SetCreativeSlot {
+                    entity_id: self.entity_id,
+                    slot: creative.slot,
+                    item: creative.item,
+                });
+                Ok(None)
+            }
+            PlayPacket::SetHeldItemServerbound(held) => {
+                // Forward to tick loop for held slot tracking
+                let _ = self.tick_sender.send(TickMessage::SetHeldItem {
+                    entity_id: self.entity_id,
+                    slot: held.slot,
+                });
+                Ok(None)
+            }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
     }
@@ -952,6 +1029,52 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         rustbound_protocol::play::encode_block_update(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Container Content packet to the client.
+    ///
+    /// Used to initialize or fully sync the player's inventory.
+    pub fn send_set_container_content(
+        &self,
+        stream: &mut TcpStream,
+        window_id: u8,
+        state_id: i32,
+        slots: &[rustbound_protocol::play::Slot],
+        carried_item: &rustbound_protocol::play::Slot,
+    ) -> Result<(), SessionError> {
+        let packet = SetContainerContent {
+            window_id,
+            state_id,
+            slots: slots.to_vec(),
+            carried_item: carried_item.clone(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_content(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Container Slot packet to the client.
+    ///
+    /// Used to update a single inventory slot.
+    pub fn send_set_container_slot(
+        &self,
+        stream: &mut TcpStream,
+        window_id: i8,
+        state_id: i32,
+        slot: i16,
+        item: &rustbound_protocol::play::Slot,
+    ) -> Result<(), SessionError> {
+        let packet = SetContainerSlot {
+            window_id,
+            state_id,
+            slot,
+            item: item.clone(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_slot(&packet, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
         Ok(())
     }
@@ -1314,6 +1437,34 @@ fn try_decode_play_packet_inner(
 
     // Use Item On (0x31)
     match decode_use_item_on(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Set Held Item serverbound (0x28)
+    match decode_set_held_item_serverbound(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Set Creative Mode Slot (0x2B)
+    match decode_set_creative_mode_slot(&mut input, max_frame_length) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);
