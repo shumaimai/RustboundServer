@@ -15,11 +15,11 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use rustbound_protocol::play::{
-    ConfirmTeleportation, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-    SynchronizePlayerPosition, decode_confirm_teleportation, decode_keep_alive_serverbound,
-    decode_set_player_position, decode_set_player_position_and_rotation,
-    decode_set_player_rotation, encode_join_game, encode_keep_alive_clientbound,
-    encode_synchronize_player_position,
+    ClientInformation, ConfirmTeleportation, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome,
+    PlayError, PlayPacket, SynchronizePlayerPosition, decode_client_information,
+    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_set_player_position,
+    decode_set_player_position_and_rotation, decode_set_player_rotation, encode_join_game,
+    encode_keep_alive_clientbound, encode_synchronize_player_position,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -280,6 +280,12 @@ impl PlayerSession {
                 // KeepAlive response received - no action needed for now
                 Ok(())
             }
+            PlayPacket::ClientInformation(ClientInformation { view_distance, .. }) => {
+                // Store client view distance - for now just accept it
+                // Phase C will use min(server, client) view distance for chunk loading
+                let _ = view_distance;
+                Ok(())
+            }
             PlayPacket::SetPlayerPosition(pos) => {
                 let _ = self.tick_sender.send(TickMessage::PlayerPositionUpdate {
                     entity_id: self.entity_id,
@@ -402,6 +408,20 @@ pub fn try_decode_play_packet(
 
     // Keep Alive serverbound (0x12)
     match decode_keep_alive_serverbound(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Client Information (0x08)
+    match decode_client_information(&mut input, max_frame_length) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);

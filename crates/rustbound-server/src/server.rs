@@ -66,6 +66,7 @@ impl Server {
             status_response: default_status_response(),
             online_mode: config.online_mode,
             max_frame_length: 65536,
+            compression_threshold: config.network_compression_threshold,
             tick_sender,
             entity_id_allocator: EntityIdAllocator::new(1),
             play_read_timeout: Duration::from_secs(30),
@@ -208,6 +209,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 0,
             online_mode: false,
+            network_compression_threshold: -1,
             ..Default::default()
         };
         let mut server = Server::start(config)?;
@@ -241,6 +243,7 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 0,
             online_mode: false,
+            network_compression_threshold: -1,
             ..Default::default()
         };
         let mut server = Server::start(config)?;

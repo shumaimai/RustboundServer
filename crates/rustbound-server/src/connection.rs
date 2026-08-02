@@ -11,11 +11,16 @@ use std::net::TcpStream;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
+use rustbound_protocol::compression::{encode_compressed_frame, encode_set_compression};
+use rustbound_protocol::framing::{DecodeOutcome, decode_frame};
 use rustbound_protocol::handshake::{HandshakeError, HandshakePacket, decode_handshake};
 use rustbound_protocol::login::{
     LoginDecodeOutcome, LoginError, LoginPacket, LoginStart, decode_login_start,
-    encode_login_success,
 };
+use rustbound_protocol::login_state_machine::{
+    LoginConfig, LoginStateMachine, LoginStateMachineError, LoginStepResult,
+};
+use rustbound_protocol::primitives::Uuid;
 use rustbound_protocol::state::ProtocolState;
 use rustbound_protocol::status::{
     StatusError, StatusResponse, decode_ping_request, decode_status_request, encode_pong_response,
@@ -40,6 +45,10 @@ pub enum ConnectionError {
     Status(StatusError),
     /// A login protocol error occurred.
     Login(LoginError),
+    /// A login state machine error occurred.
+    LoginStateMachine(LoginStateMachineError),
+    /// A compression error occurred.
+    Compression(rustbound_protocol::compression::CompressionError),
     /// A play session error occurred.
     Session(SessionError),
     /// An unexpected packet was received in the current state.
@@ -60,6 +69,10 @@ impl fmt::Display for ConnectionError {
             Self::Handshake(error) => write!(formatter, "handshake error: {error}"),
             Self::Status(error) => write!(formatter, "status error: {error}"),
             Self::Login(error) => write!(formatter, "login error: {error}"),
+            Self::LoginStateMachine(error) => {
+                write!(formatter, "login state machine error: {error}")
+            }
+            Self::Compression(error) => write!(formatter, "compression error: {error}"),
             Self::Session(error) => write!(formatter, "session error: {error}"),
             Self::UnexpectedPacket { state, packet_id } => {
                 write!(
@@ -79,6 +92,8 @@ impl std::error::Error for ConnectionError {
             Self::Handshake(error) => Some(error),
             Self::Status(error) => Some(error),
             Self::Login(error) => Some(error),
+            Self::LoginStateMachine(error) => Some(error),
+            Self::Compression(error) => Some(error),
             Self::Session(error) => Some(error),
             _ => None,
         }
@@ -119,6 +134,18 @@ impl From<LoginError> for ConnectionError {
     }
 }
 
+impl From<LoginStateMachineError> for ConnectionError {
+    fn from(error: LoginStateMachineError) -> Self {
+        Self::LoginStateMachine(error)
+    }
+}
+
+impl From<rustbound_protocol::compression::CompressionError> for ConnectionError {
+    fn from(error: rustbound_protocol::compression::CompressionError) -> Self {
+        Self::Compression(error)
+    }
+}
+
 impl From<SessionError> for ConnectionError {
     fn from(error: SessionError) -> Self {
         Self::Session(error)
@@ -134,25 +161,14 @@ pub struct ConnectionConfig {
     pub online_mode: bool,
     /// The maximum frame length.
     pub max_frame_length: usize,
+    /// The network compression threshold (-1 disables, >= 0 enables).
+    pub compression_threshold: i32,
     /// Sender to the tick loop for player state messages.
     pub tick_sender: Sender<TickMessage>,
     /// Entity ID allocator for new player sessions.
     pub entity_id_allocator: EntityIdAllocator,
     /// Read timeout for Play-state connections.
     pub play_read_timeout: Duration,
-}
-
-/// The result of handling a login packet.
-enum LoginHandleResult {
-    /// Login succeeded, transition to Play. Carries the player's UUID and username.
-    Success {
-        /// The player's UUID.
-        uuid: rustbound_protocol::primitives::Uuid,
-        /// The player's username.
-        username: String,
-    },
-    /// The client was disconnected.
-    Disconnect,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -199,32 +215,107 @@ pub fn handle_connection(
                         }
                     }
                     ProtocolState::Login => {
-                        let result = handle_login_packet(packet, config, &mut stream)?;
-                        match result {
-                            LoginHandleResult::Success { uuid, username } => {
-                                // Transition to Play - enter the play loop immediately
-                                let play_uuid = uuid;
-                                let play_username = username;
-                                match run_play_loop(
-                                    &mut stream,
-                                    &SessionConfig {
-                                        uuid: play_uuid,
-                                        username: play_username,
-                                        gamemode: 0,
-                                        max_frame_length: config.max_frame_length,
-                                        read_timeout: config.play_read_timeout,
-                                    },
-                                    config.entity_id_allocator.allocate(),
-                                    config.tick_sender.clone(),
-                                ) {
-                                    Ok(()) => return Ok(()),
-                                    Err(SessionError::Disconnected) => return Ok(()),
-                                    Err(e) => return Err(ConnectionError::from(e)),
+                        // Use the LoginStateMachine for the login flow.
+                        let login_config = LoginConfig {
+                            online_mode: config.online_mode,
+                            compression_threshold: config.compression_threshold,
+                            max_frame_length: config.max_frame_length,
+                            offline_uuid: Uuid::new(0, 0),
+                        };
+                        let mut login_sm = LoginStateMachine::new(login_config);
+
+                        // Feed the decoded Login Start into the SM.
+                        if let DecodedPacket::LoginStart(start) = packet {
+                            // Encode Login Start back to bytes for the SM to decode.
+                            let mut start_wire = Vec::new();
+                            rustbound_protocol::login::encode_login_start(
+                                &start,
+                                config.max_frame_length,
+                                &mut start_wire,
+                            )?;
+                            let mut input = start_wire.as_slice();
+                            let step_result = login_sm.handle_login_start(&mut input)?;
+
+                            match step_result {
+                                LoginStepResult::Success { outgoing, .. } => {
+                                    // If compression is enabled, send Set Compression first
+                                    if config.compression_threshold >= 0 {
+                                        let mut comp_wire = Vec::new();
+                                        encode_set_compression(
+                                            config.compression_threshold,
+                                            config.max_frame_length,
+                                            &mut comp_wire,
+                                        )?;
+                                        stream.write_all(&comp_wire)?;
+
+                                        // Re-encode Login Success as compressed frame
+                                        let mut frame_input = outgoing.as_slice();
+                                        let frame = match decode_frame(
+                                            &mut frame_input,
+                                            config.max_frame_length,
+                                        )? {
+                                            DecodeOutcome::Complete(f) => f,
+                                            DecodeOutcome::Incomplete => {
+                                                return Err(ConnectionError::Framing(
+                                                    rustbound_protocol::framing::FramingError::ZeroFrameLength,
+                                                ));
+                                            }
+                                        };
+                                        let mut compressed_out = Vec::new();
+                                        encode_compressed_frame(
+                                            frame.packet_id,
+                                            frame.payload,
+                                            config.compression_threshold,
+                                            config.max_frame_length,
+                                            &mut compressed_out,
+                                        )?;
+                                        stream.write_all(&compressed_out)?;
+                                    } else {
+                                        // Send Login Success uncompressed
+                                        stream.write_all(&outgoing)?;
+                                    }
+
+                                    let username =
+                                        login_sm.username().unwrap_or("Player").to_string();
+                                    let uuid = Uuid::new(0, 0);
+
+                                    // Transition to Play - enter the play loop
+                                    match run_play_loop(
+                                        &mut stream,
+                                        &SessionConfig {
+                                            uuid,
+                                            username,
+                                            gamemode: 0,
+                                            max_frame_length: config.max_frame_length,
+                                            read_timeout: config.play_read_timeout,
+                                        },
+                                        config.entity_id_allocator.allocate(),
+                                        config.tick_sender.clone(),
+                                    ) {
+                                        Ok(()) => return Ok(()),
+                                        Err(SessionError::Disconnected) => return Ok(()),
+                                        Err(e) => return Err(ConnectionError::from(e)),
+                                    }
+                                }
+                                LoginStepResult::Continue { outgoing, .. } => {
+                                    // Online mode: send Encryption Request
+                                    for wire in outgoing {
+                                        stream.write_all(&wire)?;
+                                    }
+                                    // For now, online mode is not fully supported
+                                    // The SM will wait for Encryption Response
+                                    // Fall through to read more data
+                                }
+                                LoginStepResult::Disconnect { outgoing, .. } => {
+                                    stream.write_all(&outgoing)?;
+                                    return Ok(());
                                 }
                             }
-                            LoginHandleResult::Disconnect => {
-                                return Ok(());
-                            }
+                        } else {
+                            return Err(ConnectionError::UnexpectedPacket {
+                                state: ProtocolState::Login,
+                                packet_id: -1,
+                            });
                         }
                     }
                     ProtocolState::Play => {
@@ -378,41 +469,6 @@ fn handle_status_packet(
     }
 }
 
-/// Handles a login-state packet.
-fn handle_login_packet(
-    packet: DecodedPacket,
-    config: &ConnectionConfig,
-    stream: &mut TcpStream,
-) -> Result<LoginHandleResult, ConnectionError> {
-    match packet {
-        DecodedPacket::LoginStart(start) => {
-            if config.online_mode {
-                // Online mode would send Encryption Request here
-                // For now, just disconnect
-                return Ok(LoginHandleResult::Disconnect);
-            }
-
-            // Offline mode: send Login Success
-            let success = rustbound_protocol::login::LoginSuccess {
-                uuid: start.uuid,
-                username: start.username.clone(),
-                properties: Vec::new(),
-            };
-            let mut wire = Vec::new();
-            encode_login_success(&success, config.max_frame_length, &mut wire)?;
-            stream.write_all(&wire)?;
-            Ok(LoginHandleResult::Success {
-                uuid: start.uuid,
-                username: start.username,
-            })
-        }
-        _ => Err(ConnectionError::UnexpectedPacket {
-            state: ProtocolState::Login,
-            packet_id: -1,
-        }),
-    }
-}
-
 /// Creates a default status response for testing.
 pub fn default_status_response() -> StatusResponse {
     StatusResponse {
@@ -456,6 +512,7 @@ mod tests {
             status_response: default_status_response(),
             online_mode: false,
             max_frame_length: 65536,
+            compression_threshold: -1, // disabled for basic tests
             tick_sender: tx,
             entity_id_allocator: EntityIdAllocator::new(1),
             play_read_timeout: Duration::from_secs(5),

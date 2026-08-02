@@ -44,6 +44,9 @@ pub const CHUNK_DATA_PACKET_ID: i32 = 0x24;
 /// Packet ID for the serverbound Confirm Teleportation packet.
 pub const CONFIRM_TELEPORTATION_PACKET_ID: i32 = 0x00;
 
+/// Packet ID for the serverbound Client Information packet.
+pub const CLIENT_INFORMATION_PACKET_ID: i32 = 0x08;
+
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
 
@@ -156,6 +159,8 @@ pub enum PlayPacket {
     ChunkData(ChunkData),
     /// Serverbound Confirm Teleportation (Play `0x00`).
     ConfirmTeleportation(ConfirmTeleportation),
+    /// Serverbound Client Information (Play `0x08`).
+    ClientInformation(ClientInformation),
 }
 
 /// The player's gamemode.
@@ -335,6 +340,90 @@ pub struct ChunkData {
 pub struct ConfirmTeleportation {
     /// The teleport ID to confirm.
     pub teleport_id: i32,
+}
+
+/// Chat mode setting for Client Information.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatMode {
+    /// Full chat (enabled).
+    Full,
+    /// System chat only (commands, system messages).
+    System,
+    /// Chat hidden.
+    Hidden,
+}
+
+impl ChatMode {
+    /// Converts to wire value.
+    pub fn to_wire(self) -> i32 {
+        match self {
+            Self::Full => 0,
+            Self::System => 1,
+            Self::Hidden => 2,
+        }
+    }
+
+    /// Converts from wire value.
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Full),
+            1 => Some(Self::System),
+            2 => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+}
+
+/// Player's main hand setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainHand {
+    /// Left hand.
+    Left,
+    /// Right hand.
+    Right,
+}
+
+impl MainHand {
+    /// Converts to wire value.
+    pub fn to_wire(self) -> i32 {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+        }
+    }
+
+    /// Converts from wire value.
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Left),
+            1 => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Serverbound Client Information packet (Play `0x08`).
+///
+/// Sent by the client during the Play state to communicate settings
+/// like locale, view distance, chat mode, and skin parts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInformation {
+    /// The client's locale (e.g. "en_US").
+    pub locale: String,
+    /// The client's view distance (in chunks, 2-32).
+    pub view_distance: u8,
+    /// The client's chat mode.
+    pub chat_mode: ChatMode,
+    /// Whether chat colors are enabled.
+    pub chat_colors: bool,
+    /// The displayed skin parts bitmask (7 bits).
+    pub displayed_skin_parts: u8,
+    /// The player's main hand.
+    pub main_hand: MainHand,
+    /// Whether text filtering is enabled.
+    pub enable_text_filtering: bool,
+    /// Whether the player wants to appear in the player sample list.
+    pub allow_server_listings: bool,
 }
 
 /// Encodes a Join Game packet (clientbound Play `0x01`).
@@ -1159,6 +1248,122 @@ pub fn decode_confirm_teleportation(
 }
 
 // ---------------------------------------------------------------------------
+// Client Information (serverbound Play 0x08)
+// ---------------------------------------------------------------------------
+
+/// Encodes a Client Information packet (serverbound Play `0x08`).
+pub fn encode_client_information(
+    packet: &ClientInformation,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_string(&packet.locale, MAX_CHAT_COMPONENT_LENGTH, &mut body).map_err(PlayError::from)?;
+    encode_u8(packet.view_distance, &mut body);
+    encode_var_int(packet.chat_mode.to_wire(), &mut body);
+    encode_bool(packet.chat_colors, &mut body);
+    encode_u8(packet.displayed_skin_parts, &mut body);
+    encode_var_int(packet.main_hand.to_wire(), &mut body);
+    encode_bool(packet.enable_text_filtering, &mut body);
+    encode_bool(packet.allow_server_listings, &mut body);
+    encode_frame(
+        CLIENT_INFORMATION_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Client Information packet (serverbound Play `0x08`).
+pub fn decode_client_information(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+
+    if frame.packet_id != CLIENT_INFORMATION_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CLIENT_INFORMATION_PACKET_ID,
+        });
+    }
+
+    let mut body = frame.payload;
+    let locale = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let view_distance = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let chat_mode_raw = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let chat_mode = ChatMode::from_wire(chat_mode_raw).ok_or_else(|| {
+        *input = source;
+        PlayError::Codec(CodecError::InvalidBoolean)
+    })?;
+    let chat_colors = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let displayed_skin_parts = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let main_hand_raw = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let main_hand = MainHand::from_wire(main_hand_raw).ok_or_else(|| {
+        *input = source;
+        PlayError::Codec(CodecError::InvalidBoolean)
+    })?;
+    let enable_text_filtering = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let allow_server_listings = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::ClientInformation(
+        ClientInformation {
+            locale: locale.to_string(),
+            view_distance,
+            chat_mode,
+            chat_colors,
+            displayed_skin_parts,
+            main_hand,
+            enable_text_filtering,
+            allow_server_listings,
+        },
+    )))
+}
+
+// ---------------------------------------------------------------------------
 // Chunk Data and Update Light (clientbound Play 0x24)
 // ---------------------------------------------------------------------------
 
@@ -1290,16 +1495,16 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChunkData, ConfirmTeleportation, DisconnectPlay, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
-        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-        SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
-        SynchronizePlayerPosition, decode_chunk_data, decode_confirm_teleportation,
-        decode_disconnect_play, decode_join_game, decode_keep_alive_clientbound,
-        decode_keep_alive_serverbound, decode_set_player_position,
+        ChatMode, ChunkData, ClientInformation, ConfirmTeleportation, DisconnectPlay, GameMode,
+        JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand,
+        PlayDecodeOutcome, PlayError, PlayPacket, SetPlayerPosition, SetPlayerPositionAndRotation,
+        SetPlayerRotation, SynchronizePlayerPosition, decode_chunk_data, decode_client_information,
+        decode_confirm_teleportation, decode_disconnect_play, decode_join_game,
+        decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
-        decode_synchronize_player_position, encode_chunk_data, encode_confirm_teleportation,
-        encode_disconnect_play, encode_join_game, encode_keep_alive_clientbound,
-        encode_keep_alive_serverbound, encode_set_player_position,
+        decode_synchronize_player_position, encode_chunk_data, encode_client_information,
+        encode_confirm_teleportation, encode_disconnect_play, encode_join_game,
+        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_set_player_position,
         encode_set_player_position_and_rotation, encode_set_player_rotation,
         encode_synchronize_player_position, ensure_play_state,
     };
@@ -2025,6 +2230,114 @@ mod tests {
         let mut input = wire.as_slice();
         let result = decode_confirm_teleportation(&mut input, TEST_MAX_FRAME);
         assert!(matches!(result, Err(PlayError::TrailingBytes { .. })));
+        Ok(())
+    }
+
+    // --- Client Information ---
+
+    #[test]
+    fn client_information_roundtrip() -> Result<(), PlayError> {
+        let packet = ClientInformation {
+            locale: "en_US".to_string(),
+            view_distance: 12,
+            chat_mode: ChatMode::Full,
+            chat_colors: true,
+            displayed_skin_parts: 0x7f,
+            main_hand: MainHand::Right,
+            enable_text_filtering: false,
+            allow_server_listings: true,
+        };
+        let mut wire = Vec::new();
+        encode_client_information(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        let decoded = decode_client_information(&mut input, TEST_MAX_FRAME)?;
+        match decoded {
+            PlayDecodeOutcome::Complete(PlayPacket::ClientInformation(ci)) => {
+                assert_eq!(ci.locale, "en_US");
+                assert_eq!(ci.view_distance, 12);
+                assert_eq!(ci.chat_mode, ChatMode::Full);
+                assert!(ci.chat_colors);
+                assert_eq!(ci.displayed_skin_parts, 0x7f);
+                assert_eq!(ci.main_hand, MainHand::Right);
+                assert!(!ci.enable_text_filtering);
+                assert!(ci.allow_server_listings);
+            }
+            other => panic!("expected ClientInformation, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn client_information_all_chat_modes() -> Result<(), PlayError> {
+        for mode in [ChatMode::Full, ChatMode::System, ChatMode::Hidden] {
+            let packet = ClientInformation {
+                locale: "ja_JP".to_string(),
+                view_distance: 8,
+                chat_mode: mode,
+                chat_colors: false,
+                displayed_skin_parts: 0,
+                main_hand: MainHand::Left,
+                enable_text_filtering: true,
+                allow_server_listings: false,
+            };
+            let mut wire = Vec::new();
+            encode_client_information(&packet, TEST_MAX_FRAME, &mut wire)?;
+            let mut input = wire.as_slice();
+            let decoded = decode_client_information(&mut input, TEST_MAX_FRAME)?;
+            match decoded {
+                PlayDecodeOutcome::Complete(PlayPacket::ClientInformation(ci)) => {
+                    assert_eq!(ci.chat_mode, mode);
+                    assert_eq!(ci.main_hand, MainHand::Left);
+                }
+                other => panic!("expected ClientInformation, got {other:?}"),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn client_information_truncated_is_incomplete() -> Result<(), PlayError> {
+        let packet = ClientInformation {
+            locale: "en_US".to_string(),
+            view_distance: 10,
+            chat_mode: ChatMode::Full,
+            chat_colors: true,
+            displayed_skin_parts: 0x7f,
+            main_hand: MainHand::Right,
+            enable_text_filtering: false,
+            allow_server_listings: true,
+        };
+        let mut wire = Vec::new();
+        encode_client_information(&packet, TEST_MAX_FRAME, &mut wire)?;
+
+        for split in 0..wire.len() {
+            let mut input = &wire[..split];
+            assert_eq!(
+                decode_client_information(&mut input, TEST_MAX_FRAME)?,
+                PlayDecodeOutcome::Incomplete
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn client_information_wrong_packet_id() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_string("en_US", 32767, &mut body).map_err(PlayError::from)?;
+        crate::primitives::encode_u8(10, &mut body);
+        crate::primitives::encode_var_int(0, &mut body);
+        crate::primitives::encode_bool(true, &mut body);
+        crate::primitives::encode_u8(0x7f, &mut body);
+        crate::primitives::encode_var_int(1, &mut body);
+        crate::primitives::encode_bool(false, &mut body);
+        crate::primitives::encode_bool(true, &mut body);
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x09, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+        let mut input = wire.as_slice();
+        let result = decode_client_information(&mut input, TEST_MAX_FRAME);
+        assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
         Ok(())
     }
 }
