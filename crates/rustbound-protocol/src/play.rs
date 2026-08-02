@@ -8,10 +8,10 @@ use std::fmt;
 
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
-    CodecError, MAX_CHAT_COMPONENT_LENGTH, decode_bool, decode_byte_array, decode_f32, decode_i8,
-    decode_i32, decode_i64, decode_position, decode_string, decode_u8, decode_var_int, encode_bool,
-    encode_byte_array, encode_f32, encode_i8, encode_i32, encode_i64, encode_position,
-    encode_string, encode_u8, encode_var_int,
+    CodecError, MAX_CHAT_COMPONENT_LENGTH, Uuid, decode_bool, decode_byte_array, decode_f32,
+    decode_i8, decode_i32, decode_i64, decode_position, decode_string, decode_u8, decode_var_int,
+    encode_bool, encode_byte_array, encode_f32, encode_f64, encode_i8, encode_i32, encode_i64,
+    encode_position, encode_string, encode_u8, encode_var_int,
 };
 use crate::state::ProtocolState;
 
@@ -68,6 +68,15 @@ pub const DECLARE_COMMANDS_PACKET_ID: i32 = 0x10;
 
 /// Packet ID for the clientbound Player Info Update packet.
 pub const PLAYER_INFO_UPDATE_PACKET_ID: i32 = 0x3A;
+
+/// Packet ID for the clientbound Player Info Remove packet.
+pub const PLAYER_INFO_REMOVE_PACKET_ID: i32 = 0x39;
+
+/// Packet ID for the clientbound Spawn Player packet.
+pub const SPAWN_PLAYER_PACKET_ID: i32 = 0x03;
+
+/// Packet ID for the clientbound Remove Entities packet.
+pub const REMOVE_ENTITIES_PACKET_ID: i32 = 0x3E;
 
 /// Packet ID for the clientbound Set Default Spawn Position packet.
 pub const SET_DEFAULT_SPAWN_POSITION_PACKET_ID: i32 = 0x50;
@@ -221,6 +230,14 @@ pub enum PlayPacket {
     SetRenderDistance(SetRenderDistance),
     /// Clientbound Set Simulation Distance (Play `0x5C`).
     SetSimulationDistance(SetSimulationDistance),
+    /// Clientbound Player Info Update (Play `0x3A`).
+    PlayerInfoUpdate(PlayerInfoUpdate),
+    /// Clientbound Player Info Remove (Play `0x39`).
+    PlayerInfoRemove(PlayerInfoRemove),
+    /// Clientbound Spawn Player (Play `0x03`).
+    SpawnPlayer(SpawnPlayer),
+    /// Clientbound Remove Entities (Play `0x3E`).
+    RemoveEntities(RemoveEntities),
 }
 
 /// The player's gamemode.
@@ -838,9 +855,9 @@ pub fn encode_set_player_position(
     output: &mut Vec<u8>,
 ) -> Result<(), PlayError> {
     let mut body = Vec::new();
-    crate::primitives::encode_f64(packet.x, &mut body);
-    crate::primitives::encode_f64(packet.y, &mut body);
-    crate::primitives::encode_f64(packet.z, &mut body);
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
     encode_bool(packet.on_ground, &mut body);
     encode_frame(
         SET_PLAYER_POSITION_PACKET_ID,
@@ -917,9 +934,9 @@ pub fn encode_set_player_position_and_rotation(
     output: &mut Vec<u8>,
 ) -> Result<(), PlayError> {
     let mut body = Vec::new();
-    crate::primitives::encode_f64(packet.x, &mut body);
-    crate::primitives::encode_f64(packet.y, &mut body);
-    crate::primitives::encode_f64(packet.z, &mut body);
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
     encode_f32(packet.yaw, &mut body);
     encode_f32(packet.pitch, &mut body);
     encode_bool(packet.on_ground, &mut body);
@@ -1091,9 +1108,9 @@ pub fn encode_synchronize_player_position(
     output: &mut Vec<u8>,
 ) -> Result<(), PlayError> {
     let mut body = Vec::new();
-    crate::primitives::encode_f64(packet.x, &mut body);
-    crate::primitives::encode_f64(packet.y, &mut body);
-    crate::primitives::encode_f64(packet.z, &mut body);
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
     encode_f32(packet.yaw, &mut body);
     encode_f32(packet.pitch, &mut body);
     encode_i8(packet.flags, &mut body);
@@ -2100,6 +2117,241 @@ pub fn decode_set_simulation_distance(
 }
 
 // ---------------------------------------------------------------------------
+// Multiplayer packets (clientbound Play, protocol 763)
+// ---------------------------------------------------------------------------
+
+/// Bit flags for Player Info Update actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerInfoActions(pub u8);
+
+impl PlayerInfoActions {
+    /// Add player action (bit 0).
+    pub const ADD_PLAYER: u8 = 0x01;
+    /// Update gamemode action (bit 1).
+    pub const UPDATE_GAMEMODE: u8 = 0x02;
+    /// Update listed action (bit 2).
+    pub const UPDATE_LISTED: u8 = 0x04;
+    /// Update latency action (bit 3).
+    pub const UPDATE_LATENCY: u8 = 0x08;
+    /// Update display name action (bit 4).
+    pub const UPDATE_DISPLAY_NAME: u8 = 0x10;
+
+    /// Creates action flags with the given bits set.
+    pub const fn new(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Returns whether the given action bit is set.
+    pub fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+}
+
+/// A single player info entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerInfoEntry {
+    /// The player's UUID.
+    pub uuid: Uuid,
+    /// The player's username (only present if ADD_PLAYER action).
+    pub name: String,
+    /// Array of property (name, value, signature) tuples (only if ADD_PLAYER).
+    pub properties: Vec<(String, String, Option<String>)>,
+    /// The player's gamemode (only if ADD_PLAYER or UPDATE_GAMEMODE).
+    pub gamemode: i32,
+    /// Whether the player is listed (only if ADD_PLAYER or UPDATE_LISTED).
+    pub listed: bool,
+    /// The player's ping in milliseconds (only if ADD_PLAYER or UPDATE_LATENCY).
+    pub latency: i32,
+    /// The player's display name as JSON (only if UPDATE_DISPLAY_NAME).
+    pub display_name: Option<String>,
+}
+
+/// Clientbound Player Info Update packet (Play `0x3A`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerInfoUpdate {
+    /// Action bit flags.
+    pub actions: PlayerInfoActions,
+    /// The player info entries.
+    pub entries: Vec<PlayerInfoEntry>,
+}
+
+/// Clientbound Player Info Remove packet (Play `0x39`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfoRemove {
+    /// The UUIDs of players to remove.
+    pub uuids: Vec<Uuid>,
+}
+
+/// Clientbound Spawn Player packet (Play `0x03`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnPlayer {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// The player's UUID.
+    pub uuid: Uuid,
+    /// The X coordinate.
+    pub x: f64,
+    /// The Y coordinate.
+    pub y: f64,
+    /// The Z coordinate.
+    pub z: f64,
+    /// The yaw angle (degrees, 0-255).
+    pub yaw: u8,
+    /// The pitch angle (degrees, 0-255).
+    pub pitch: u8,
+}
+
+/// Clientbound Remove Entities packet (Play `0x3E`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveEntities {
+    /// The entity IDs to remove.
+    pub entity_ids: Vec<i32>,
+}
+
+/// Encodes a Player Info Update packet (clientbound Play `0x3A`).
+pub fn encode_player_info_update(
+    packet: &PlayerInfoUpdate,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    // Actions bitmask
+    encode_u8(packet.actions.0, &mut body);
+    // Number of entries
+    encode_var_int(
+        i32::try_from(packet.entries.len())
+            .map_err(|_| PlayError::Codec(CodecError::VarIntTooLong))?,
+        &mut body,
+    );
+    for entry in &packet.entries {
+        // UUID
+        body.extend_from_slice(&entry.uuid.to_be_bytes());
+        // Add Player fields
+        if packet.actions.has(PlayerInfoActions::ADD_PLAYER) {
+            encode_string(&entry.name, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+                .map_err(PlayError::from)?;
+            // Properties array
+            encode_var_int(
+                i32::try_from(entry.properties.len())
+                    .map_err(|_| PlayError::Codec(CodecError::VarIntTooLong))?,
+                &mut body,
+            );
+            for (name, value, signature) in &entry.properties {
+                encode_string(name, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+                    .map_err(PlayError::from)?;
+                encode_string(value, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+                    .map_err(PlayError::from)?;
+                match signature {
+                    Some(sig) => {
+                        encode_bool(true, &mut body);
+                        encode_string(sig, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+                            .map_err(PlayError::from)?;
+                    }
+                    None => encode_bool(false, &mut body),
+                }
+            }
+        }
+        // Update Gamemode
+        if packet.actions.has(PlayerInfoActions::UPDATE_GAMEMODE) {
+            encode_var_int(entry.gamemode, &mut body);
+        }
+        // Update Listed
+        if packet.actions.has(PlayerInfoActions::UPDATE_LISTED) {
+            encode_bool(entry.listed, &mut body);
+        }
+        // Update Latency
+        if packet.actions.has(PlayerInfoActions::UPDATE_LATENCY) {
+            encode_var_int(entry.latency, &mut body);
+        }
+        // Update Display Name
+        if packet.actions.has(PlayerInfoActions::UPDATE_DISPLAY_NAME) {
+            match &entry.display_name {
+                Some(name) => {
+                    encode_bool(true, &mut body);
+                    encode_string(name, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+                        .map_err(PlayError::from)?;
+                }
+                None => encode_bool(false, &mut body),
+            }
+        }
+    }
+    encode_frame(
+        PLAYER_INFO_UPDATE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes a Player Info Remove packet (clientbound Play `0x39`).
+pub fn encode_player_info_remove(
+    packet: &PlayerInfoRemove,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(
+        i32::try_from(packet.uuids.len())
+            .map_err(|_| PlayError::Codec(CodecError::VarIntTooLong))?,
+        &mut body,
+    );
+    for uuid in &packet.uuids {
+        body.extend_from_slice(&uuid.to_be_bytes());
+    }
+    encode_frame(
+        PLAYER_INFO_REMOVE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes a Spawn Player packet (clientbound Play `0x03`).
+pub fn encode_spawn_player(
+    packet: &SpawnPlayer,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    body.extend_from_slice(&packet.uuid.to_be_bytes());
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
+    encode_u8(packet.yaw, &mut body);
+    encode_u8(packet.pitch, &mut body);
+    // Entity metadata is empty (terminated by 0xFF)
+    body.push(0xFF);
+    encode_frame(SPAWN_PLAYER_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes a Remove Entities packet (clientbound Play `0x3E`).
+pub fn encode_remove_entities(
+    packet: &RemoveEntities,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(
+        i32::try_from(packet.entity_ids.len())
+            .map_err(|_| PlayError::Codec(CodecError::VarIntTooLong))?,
+        &mut body,
+    );
+    for id in &packet.entity_ids {
+        encode_var_int(*id, &mut body);
+    }
+    encode_frame(REMOVE_ENTITIES_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Chunk Data and Update Light (clientbound Play 0x24)
 // ---------------------------------------------------------------------------
 
@@ -2234,12 +2486,13 @@ mod tests {
         ChangeDifficulty, ChatMode, ChunkData, ClientInformation, ConfirmTeleportation,
         DisconnectPlay, EntityEvent, GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
         KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand, PlayDecodeOutcome, PlayError,
-        PlayPacket, PlayerAbilities, PluginMessageClientbound, SetCenterChunk,
+        PlayPacket, PlayerAbilities, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
+        PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, SetCenterChunk,
         SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
-        decode_change_difficulty, decode_chunk_data, decode_client_information,
-        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
-        decode_game_event, decode_join_game, decode_keep_alive_clientbound,
+        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, SpawnPlayer,
+        SynchronizePlayerPosition, decode_change_difficulty, decode_chunk_data,
+        decode_client_information, decode_confirm_teleportation, decode_disconnect_play,
+        decode_entity_event, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
         decode_keep_alive_serverbound, decode_player_abilities, decode_plugin_message_clientbound,
         decode_set_center_chunk, decode_set_default_spawn_position, decode_set_held_item,
         decode_set_player_position, decode_set_player_position_and_rotation,
@@ -2247,11 +2500,12 @@ mod tests {
         decode_synchronize_player_position, encode_change_difficulty, encode_chunk_data,
         encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
         encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
-        encode_keep_alive_serverbound, encode_player_abilities, encode_plugin_message_clientbound,
+        encode_keep_alive_serverbound, encode_player_abilities, encode_player_info_remove,
+        encode_player_info_update, encode_plugin_message_clientbound, encode_remove_entities,
         encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
         encode_set_player_position, encode_set_player_position_and_rotation,
         encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
-        encode_synchronize_player_position, ensure_play_state,
+        encode_spawn_player, encode_synchronize_player_position, ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -3278,5 +3532,76 @@ mod tests {
         }
         assert!(input.is_empty());
         Ok(())
+    }
+
+    // --- Multiplayer packets ---
+
+    #[test]
+    fn player_info_update_encode_add_player() -> Result<(), PlayError> {
+        let packet = PlayerInfoUpdate {
+            actions: PlayerInfoActions::new(PlayerInfoActions::ADD_PLAYER),
+            entries: vec![PlayerInfoEntry {
+                uuid: crate::primitives::Uuid::new(0x1234, 0x5678),
+                name: "TestPlayer".to_string(),
+                properties: vec![],
+                gamemode: 0,
+                listed: true,
+                latency: 50,
+                display_name: None,
+            }],
+        };
+        let mut wire = Vec::new();
+        encode_player_info_update(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn player_info_remove_encode() -> Result<(), PlayError> {
+        let packet = PlayerInfoRemove {
+            uuids: vec![crate::primitives::Uuid::new(0x1234, 0x5678)],
+        };
+        let mut wire = Vec::new();
+        encode_player_info_remove(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_player_encode() -> Result<(), PlayError> {
+        let packet = SpawnPlayer {
+            entity_id: 42,
+            uuid: crate::primitives::Uuid::new(0x1234, 0x5678),
+            x: 128.5,
+            y: 64.0,
+            z: -32.0,
+            yaw: 90,
+            pitch: 0,
+        };
+        let mut wire = Vec::new();
+        encode_spawn_player(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn remove_entities_encode() -> Result<(), PlayError> {
+        let packet = RemoveEntities {
+            entity_ids: vec![1, 2, 3],
+        };
+        let mut wire = Vec::new();
+        encode_remove_entities(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn player_info_actions_flags() {
+        let actions = PlayerInfoActions::new(
+            PlayerInfoActions::ADD_PLAYER | PlayerInfoActions::UPDATE_LATENCY,
+        );
+        assert!(actions.has(PlayerInfoActions::ADD_PLAYER));
+        assert!(actions.has(PlayerInfoActions::UPDATE_LATENCY));
+        assert!(!actions.has(PlayerInfoActions::UPDATE_GAMEMODE));
     }
 }

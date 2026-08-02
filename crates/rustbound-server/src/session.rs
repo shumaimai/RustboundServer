@@ -38,6 +38,28 @@ pub enum SessionEvent {
         /// The keep-alive payload to echo.
         payload: i64,
     },
+    /// A new player joined; send Player Info Update and Spawn Player.
+    PlayerJoined {
+        /// The joining player's entity ID.
+        entity_id: i32,
+        /// The joining player's UUID.
+        uuid: Uuid,
+        /// The joining player's username.
+        username: String,
+        /// The joining player's gamemode.
+        gamemode: u8,
+        /// The joining player's position.
+        x: f64,
+        y: f64,
+        z: f64,
+    },
+    /// A player left; send Player Info Remove and Remove Entities.
+    PlayerLeft {
+        /// The leaving player's entity ID.
+        entity_id: i32,
+        /// The leaving player's UUID.
+        uuid: Uuid,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -55,6 +77,8 @@ pub enum SessionError {
     UnexpectedPacket(i32),
     /// The client did not confirm teleportation in time.
     TeleportTimeout,
+    /// The client sent a position with NaN or Inf coordinates.
+    InvalidPosition,
 }
 
 impl fmt::Display for SessionError {
@@ -68,6 +92,7 @@ impl fmt::Display for SessionError {
                 write!(formatter, "unexpected packet 0x{id:02x} in Play state")
             }
             Self::TeleportTimeout => formatter.write_str("teleport confirmation timeout"),
+            Self::InvalidPosition => formatter.write_str("invalid position (NaN or Inf)"),
         }
     }
 }
@@ -141,6 +166,16 @@ pub struct PlayerSession {
     event_receiver: Receiver<SessionEvent>,
     /// The maximum frame length for encoding.
     max_frame_length: usize,
+    /// Last known position X (cached for rotation-only updates).
+    last_x: f64,
+    /// Last known position Y.
+    last_y: f64,
+    /// Last known position Z.
+    last_z: f64,
+    /// Last known yaw (degrees).
+    last_yaw: f32,
+    /// Last known pitch (degrees).
+    last_pitch: f32,
 }
 
 impl PlayerSession {
@@ -178,6 +213,11 @@ impl PlayerSession {
             tick_sender,
             event_receiver: event_rx,
             max_frame_length: config.max_frame_length,
+            last_x: 0.0,
+            last_y: 64.0,
+            last_z: 0.0,
+            last_yaw: 0.0,
+            last_pitch: 0.0,
         })
     }
 
@@ -386,6 +426,104 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends a Player Info Update (add player) for a remote player.
+    pub fn send_player_info_add(
+        &self,
+        stream: &mut TcpStream,
+        entity_id: i32,
+        uuid: Uuid,
+        username: &str,
+        gamemode: u8,
+    ) -> Result<(), SessionError> {
+        let _ = entity_id;
+        let packet = rustbound_protocol::play::PlayerInfoUpdate {
+            actions: rustbound_protocol::play::PlayerInfoActions::new(
+                rustbound_protocol::play::PlayerInfoActions::ADD_PLAYER
+                    | rustbound_protocol::play::PlayerInfoActions::UPDATE_GAMEMODE
+                    | rustbound_protocol::play::PlayerInfoActions::UPDATE_LISTED
+                    | rustbound_protocol::play::PlayerInfoActions::UPDATE_LATENCY,
+            ),
+            entries: vec![rustbound_protocol::play::PlayerInfoEntry {
+                uuid,
+                name: username.to_string(),
+                properties: vec![],
+                gamemode: gamemode as i32,
+                listed: true,
+                latency: 0,
+                display_name: None,
+            }],
+        };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_player_info_update(
+            &packet,
+            self.max_frame_length,
+            &mut wire,
+        )?;
+        stream.write_all(&wire)?;
+        Ok(())
+    }
+
+    /// Sends a Player Info Remove for a player that left.
+    pub fn send_player_info_remove(
+        &self,
+        stream: &mut TcpStream,
+        uuid: Uuid,
+    ) -> Result<(), SessionError> {
+        let packet = rustbound_protocol::play::PlayerInfoRemove { uuids: vec![uuid] };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_player_info_remove(
+            &packet,
+            self.max_frame_length,
+            &mut wire,
+        )?;
+        stream.write_all(&wire)?;
+        Ok(())
+    }
+
+    /// Sends a Spawn Player packet for a remote player.
+    pub fn send_spawn_player(
+        &self,
+        stream: &mut TcpStream,
+        entity_id: i32,
+        uuid: Uuid,
+        x: f64,
+        y: f64,
+        z: f64,
+    ) -> Result<(), SessionError> {
+        let packet = rustbound_protocol::play::SpawnPlayer {
+            entity_id,
+            uuid,
+            x,
+            y,
+            z,
+            yaw: 0,
+            pitch: 0,
+        };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_spawn_player(&packet, self.max_frame_length, &mut wire)?;
+        stream.write_all(&wire)?;
+        Ok(())
+    }
+
+    /// Sends a Remove Entities packet for a player that left.
+    pub fn send_remove_entities(
+        &self,
+        stream: &mut TcpStream,
+        entity_id: i32,
+    ) -> Result<(), SessionError> {
+        let packet = rustbound_protocol::play::RemoveEntities {
+            entity_ids: vec![entity_id],
+        };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_remove_entities(
+            &packet,
+            self.max_frame_length,
+            &mut wire,
+        )?;
+        stream.write_all(&wire)?;
+        Ok(())
+    }
+
     /// Polls for tick loop events and handles them.
     ///
     /// Returns `true` if at least one event was processed.
@@ -397,13 +535,31 @@ impl PlayerSession {
                     self.send_keep_alive(stream, payload)?;
                     processed = true;
                 }
+                SessionEvent::PlayerJoined {
+                    entity_id,
+                    uuid,
+                    username,
+                    gamemode,
+                    x,
+                    y,
+                    z,
+                } => {
+                    self.send_player_info_add(stream, entity_id, uuid, &username, gamemode)?;
+                    self.send_spawn_player(stream, entity_id, uuid, x, y, z)?;
+                    processed = true;
+                }
+                SessionEvent::PlayerLeft { entity_id, uuid } => {
+                    self.send_player_info_remove(stream, uuid)?;
+                    self.send_remove_entities(stream, entity_id)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
     }
 
     /// Handles a decoded play packet from the client.
-    pub fn handle_play_packet(&self, packet: PlayPacket) -> Result<(), SessionError> {
+    pub fn handle_play_packet(&mut self, packet: PlayPacket) -> Result<(), SessionError> {
         match packet {
             PlayPacket::ConfirmTeleportation(ConfirmTeleportation { teleport_id: _ }) => {
                 // Teleport confirmed - no action needed for now
@@ -420,25 +576,61 @@ impl PlayerSession {
                 Ok(())
             }
             PlayPacket::SetPlayerPosition(pos) => {
+                if !is_finite_position(pos.x, pos.y, pos.z) {
+                    return Err(SessionError::InvalidPosition);
+                }
+                self.last_x = pos.x;
+                self.last_y = pos.y;
+                self.last_z = pos.z;
                 let _ = self.tick_sender.send(TickMessage::PlayerPositionUpdate {
                     entity_id: self.entity_id,
                     x: pos.x,
                     y: pos.y,
                     z: pos.z,
+                    yaw: self.last_yaw,
+                    pitch: self.last_pitch,
+                    on_ground: pos.on_ground,
                 });
                 Ok(())
             }
             PlayPacket::SetPlayerPositionAndRotation(pos) => {
+                if !is_finite_position(pos.x, pos.y, pos.z)
+                    || !pos.yaw.is_finite()
+                    || !pos.pitch.is_finite()
+                {
+                    return Err(SessionError::InvalidPosition);
+                }
+                self.last_x = pos.x;
+                self.last_y = pos.y;
+                self.last_z = pos.z;
+                self.last_yaw = pos.yaw;
+                self.last_pitch = pos.pitch;
                 let _ = self.tick_sender.send(TickMessage::PlayerPositionUpdate {
                     entity_id: self.entity_id,
                     x: pos.x,
                     y: pos.y,
                     z: pos.z,
+                    yaw: pos.yaw,
+                    pitch: pos.pitch,
+                    on_ground: pos.on_ground,
                 });
                 Ok(())
             }
-            PlayPacket::SetPlayerRotation(_) => {
-                // Rotation only - no position update needed
+            PlayPacket::SetPlayerRotation(rot) => {
+                if !rot.yaw.is_finite() || !rot.pitch.is_finite() {
+                    return Err(SessionError::InvalidPosition);
+                }
+                self.last_yaw = rot.yaw;
+                self.last_pitch = rot.pitch;
+                let _ = self.tick_sender.send(TickMessage::PlayerPositionUpdate {
+                    entity_id: self.entity_id,
+                    x: self.last_x,
+                    y: self.last_y,
+                    z: self.last_z,
+                    yaw: rot.yaw,
+                    pitch: rot.pitch,
+                    on_ground: rot.on_ground,
+                });
                 Ok(())
             }
             _ => Err(SessionError::UnexpectedPacket(-1)),
@@ -505,6 +697,11 @@ impl Clone for EntityIdAllocator {
 ///
 /// This is a valid NBT compound tag with an empty name and no entries:
 /// `0x0a` (TAG_Compound) + empty name (2 zero bytes) + `0x00` (TAG_End).
+/// Returns true if all three coordinates are finite (not NaN or Inf).
+fn is_finite_position(x: f64, y: f64, z: f64) -> bool {
+    x.is_finite() && y.is_finite() && z.is_finite()
+}
+
 fn minimal_registry_codec() -> Vec<u8> {
     rustbound_protocol::registry_codec::build_registry_codec()
 }
@@ -745,6 +942,7 @@ mod tests {
         let event = session.event_receiver.try_recv()?;
         match event {
             SessionEvent::KeepAlive { payload } => assert_eq!(payload, 42),
+            _ => panic!("expected KeepAlive event"),
         }
 
         Ok(())
