@@ -697,24 +697,30 @@ fn run_tick_loop(
                         if let Some(inv) = inventories.get_mut(&entity_id) {
                             if inv.is_dead {
                                 inv.respawn();
+                                let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
+                                let gamemode = world
+                                    .get_player(entity_id)
+                                    .map(|player| player.gamemode)
+                                    .unwrap_or(0);
                                 if let Some(sender) = session_senders.get(&entity_id) {
-                                    // Send Respawn packet
+                                    // Use the player's real gamemode and world spawn
+                                    // (not hardcoded Creative / fixed coordinates).
                                     let _ = sender.send(SessionEvent::RespawnPlayer {
                                         dimension_type: "minecraft:overworld".to_string(),
                                         dimension_name: "minecraft:overworld".to_string(),
                                         hashed_seed: 0,
-                                        gamemode: 1, // Creative
+                                        gamemode,
                                         previous_gamemode: -1,
                                         is_debug: false,
-                                        is_flat: false,
+                                        is_flat: true,
                                         has_death_location: false,
                                         death_dimension_name: String::new(),
                                         death_location: (0, 0, 0),
                                         portal_cooldown: 0,
                                         data_kept: 0,
-                                        x: 0.0,
-                                        y: 64.0,
-                                        z: 0.0,
+                                        x: spawn_x,
+                                        y: spawn_y,
+                                        z: spawn_z,
                                     });
                                     // Send updated health after respawn
                                     let _ = sender.send(SessionEvent::SetHealth {
@@ -725,7 +731,7 @@ fn run_tick_loop(
                                 }
                                 // Reset player position in world to spawn
                                 if let Some(player) = world.get_player_mut(entity_id) {
-                                    player.set_position(0.0, 64.0, 0.0);
+                                    player.set_position(spawn_x, spawn_y, spawn_z);
                                 }
                             }
                         }

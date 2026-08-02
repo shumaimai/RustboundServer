@@ -6,25 +6,22 @@ This project is not affiliated with, endorsed by, or sponsored by Mojang Studios
 
 ## Status
 
-**Pre-alpha, offline multiplayer mini-server.** Phases A–G are on `main`. This branch / Phase H adds offline UUID, Keep Alive timeout, Creative inventory/hotbar, and chat. Remaining Phase H: health/death/respawn (#96).
+**Pre-alpha, offline multiplayer mini-server.** Phases A–H are on `main` (or this PR): join Play, chunks/streaming, dig/place, inventory, chat, Keep Alive timeout, offline UUID, **health / void death / respawn**. Next: persistence (Phase I) and online mode.
 
 | Layer | Status |
 |-------|--------|
-| Protocol + Login/Play state machines | Implemented and wired |
-| Conformance probes | Status / Login / Play (+ compression path) |
-| Tick (20 TPS) + sessions + World | Wired |
-| Flat chunks, light, streaming, overrides | Working |
-| Dig / place | Creative + ACK; Survival denies with ACK |
-| Multiplayer | Tab list, spawn/despawn, movement broadcast, chat |
-| Inventory / hotbar (Creative) | Wired (#95) |
-| Keep Alive timeout / offline UUID | Wired (#98, #99) |
-| Health / death / respawn | **Next (#96)** |
-| Persistence | Phase I (#100) |
+| Protocol + Login/Play + sessions/tick | Implemented |
+| Chunks, light, streaming, overrides | Working |
+| Dig / place (Creative) + inventory/hotbar | Working |
+| Multiplayer motion + chat | Working |
+| Keep Alive timeout / offline UUID | Working |
+| Health / void death / respawn | Working (minimal; no combat yet) |
+| Persistence | **Next** ([#100](https://github.com/shumaimai/RustboundServer/issues/100)) |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Long-term ([#101](https://github.com/shumaimai/RustboundServer/issues/101)) |
 
-See [PROGRESS.md](PROGRESS.md). **Next remaining H:** [#96](https://github.com/shumaimai/RustboundServer/issues/96) · tracking [#113](https://github.com/shumaimai/RustboundServer/issues/113).
+See [PROGRESS.md](PROGRESS.md). **Next:** [#100](https://github.com/shumaimai/RustboundServer/issues/100) (persistence) · tracking [#102](https://github.com/shumaimai/RustboundServer/issues/102).
 
 ## Workspace
 
