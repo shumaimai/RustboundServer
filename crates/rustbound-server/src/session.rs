@@ -394,6 +394,7 @@ impl PlayerSession {
                 entity_id,
                 uuid: config.uuid,
                 username: config.username.clone(),
+                gamemode: config.gamemode,
                 view_distance: config.view_distance,
                 event_sender: event_tx,
             })
@@ -1106,22 +1107,14 @@ impl PlayerSession {
                 Ok(Some(dig.sequence))
             }
             PlayPacket::UseItemOn(place) => {
-                // Creative mode: place block (stone = state 1) on the face
+                // Creative mode: forward to tick loop which looks up the held
+                // hotbar item and places the corresponding block from the registry.
                 // Survival: deny (no placement yet) but still ACK
                 if self.gamemode == GameMode::Creative {
-                    let (x, y, z) = place.position;
-                    let target = match place.face {
-                        0 => (x, y - 1, z), // bottom
-                        1 => (x, y + 1, z), // top
-                        2 => (x, y, z - 1), // north
-                        3 => (x, y, z + 1), // south
-                        4 => (x - 1, y, z), // west
-                        5 => (x + 1, y, z), // east
-                        _ => (x, y, z),
-                    };
-                    let _ = self.tick_sender.send(TickMessage::SetBlock {
-                        position: target,
-                        block_state: 1, // stone
+                    let _ = self.tick_sender.send(TickMessage::PlaceBlock {
+                        entity_id: self.entity_id,
+                        position: place.position,
+                        face: place.face as i32,
                     });
                 }
                 // Always ACK the place packet (protocol requires it)
@@ -2143,16 +2136,18 @@ mod tests {
         // Should return ACK sequence
         assert_eq!(ack, Some(3));
 
-        // Should receive SetBlock at (0,65,0) with block_state=1 (stone)
+        // Should receive PlaceBlock (tick loop looks up held item)
         match rx.recv()? {
-            TickMessage::SetBlock {
+            TickMessage::PlaceBlock {
+                entity_id,
                 position,
-                block_state,
+                face,
             } => {
-                assert_eq!(position, (0, 65, 0));
-                assert_eq!(block_state, 1);
+                assert_eq!(entity_id, 1);
+                assert_eq!(position, (0, 64, 0));
+                assert_eq!(face, 1);
             }
-            other => panic!("expected SetBlock, got {other:?}"),
+            other => panic!("expected PlaceBlock, got {other:?}"),
         }
         Ok(())
     }

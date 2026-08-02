@@ -238,6 +238,8 @@ pub enum TickMessage {
         uuid: Uuid,
         /// The player's username.
         username: String,
+        /// The player's gamemode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator).
+        gamemode: u8,
         /// The server view distance (in chunks).
         view_distance: i32,
         /// Channel for sending events back to this player's session.
@@ -271,6 +273,17 @@ pub enum TickMessage {
         position: (i32, i32, i32),
         /// The new block state ID (0 = air).
         block_state: i32,
+    },
+    /// A player attempted to place a block (UseItemOn).
+    /// The tick loop looks up the held hotbar item and places the
+    /// corresponding block from the registry.
+    PlaceBlock {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The position of the block being placed against.
+        position: (i32, i32, i32),
+        /// The face being placed on (0=bottom, 1=top, 2=north, 3=south, 4=west, 5=east).
+        face: i32,
     },
     /// A client sent its view distance via Client Information.
     SetClientViewDistance {
@@ -448,11 +461,16 @@ fn run_tick_loop(
                     entity_id,
                     uuid,
                     username,
+                    gamemode,
                     view_distance,
                     event_sender,
                 } => {
-                    let player =
-                        crate::world::PlayerHandle::new(entity_id, uuid, username.clone(), 0);
+                    let player = crate::world::PlayerHandle::new(
+                        entity_id,
+                        uuid,
+                        username.clone(),
+                        gamemode,
+                    );
                     let (px, py, pz) = player.position();
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
@@ -482,7 +500,7 @@ fn run_tick_loop(
                                 entity_id,
                                 uuid,
                                 username: username.clone(),
-                                gamemode: 0,
+                                gamemode,
                                 x: px,
                                 y: py,
                                 z: pz,
@@ -618,6 +636,45 @@ fn run_tick_loop(
                             position,
                             block_state,
                         });
+                    }
+                }
+                TickMessage::PlaceBlock {
+                    entity_id,
+                    position,
+                    face,
+                } => {
+                    // Look up the held hotbar item and place the corresponding block.
+                    if let Some(inv) = inventories.get(&entity_id) {
+                        let held_idx = inv.held_slot as usize;
+                        if let Some(slot) = inv.slots.get(held_idx) {
+                            if slot.present {
+                                // Use the registry to map item ID to block state
+                                if let Some(block_state) =
+                                    crate::registry::item_to_block_state(slot.item_id)
+                                {
+                                    if block_state != 0 {
+                                        // Not air — place the block
+                                        let target = match face {
+                                            0 => (position.0, position.1 - 1, position.2),
+                                            1 => (position.0, position.1 + 1, position.2),
+                                            2 => (position.0, position.1, position.2 - 1),
+                                            3 => (position.0, position.1, position.2 + 1),
+                                            4 => (position.0 - 1, position.1, position.2),
+                                            5 => (position.0 + 1, position.1, position.2),
+                                            _ => position,
+                                        };
+                                        world.set_block(target.0, target.1, target.2, block_state);
+                                        // Broadcast Block Update to all sessions
+                                        for sender in session_senders.values() {
+                                            let _ = sender.send(SessionEvent::BlockUpdate {
+                                                position: target,
+                                                block_state,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 TickMessage::SetClientViewDistance {
@@ -825,6 +882,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -900,6 +958,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -939,6 +998,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -999,6 +1059,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1035,6 +1096,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1045,6 +1107,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1122,6 +1185,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1132,6 +1196,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1263,6 +1328,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1319,6 +1385,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1370,6 +1437,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1462,6 +1530,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1505,6 +1574,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1560,6 +1630,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1603,6 +1674,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1652,6 +1724,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx1,
         })?;
@@ -1662,6 +1735,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx2,
         })?;
@@ -1747,6 +1821,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1805,6 +1880,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1858,6 +1934,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1934,6 +2011,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1964,6 +2042,186 @@ mod tests {
             !got_respawn,
             "should not receive RespawnPlayer when player is alive"
         );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_uses_held_item() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Set hotbar slot 0 to dirt (item_id=10, block_state=10)
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: rustbound_protocol::play::Slot {
+                present: true,
+                item_id: 10, // dirt
+                count: 1,
+                nbt: Vec::new(),
+            },
+        })?;
+
+        // Wait for slot update
+        std::thread::sleep(Duration::from_millis(50));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place on top face (face=1) of block at (0,64,0)
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should receive BlockUpdate at (0,65,0) with block_state=10 (dirt)
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    assert_eq!(position, (0, 65, 0));
+                    assert_eq!(block_state, 10, "should place dirt (block_state=10)");
+                    got_block = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_block, "should receive BlockUpdate for dirt placement");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_empty_hand_no_block() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Held slot is empty (default) — place should do nothing
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should NOT receive BlockUpdate
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate { .. }) => {
+                    got_block = true;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            !got_block,
+            "should not receive BlockUpdate when held slot is empty"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_place_stone_uses_stone_block_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1, // Creative
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Set hotbar slot 0 to stone (item_id=1, block_state=1)
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: rustbound_protocol::play::Slot {
+                present: true,
+                item_id: 1, // stone
+                count: 1,
+                nbt: Vec::new(),
+            },
+        })?;
+
+        // Wait for slot update
+        std::thread::sleep(Duration::from_millis(50));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place on top face (face=1) of block at (0,64,0)
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 0),
+            face: 1,
+        })?;
+
+        // Should receive BlockUpdate at (0,65,0) with block_state=1 (stone)
+        let start = Instant::now();
+        let mut got_block = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    assert_eq!(position, (0, 65, 0));
+                    assert_eq!(block_state, 1, "should place stone (block_state=1)");
+                    got_block = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_block, "should receive BlockUpdate for stone placement");
 
         handle.shutdown();
         Ok(())
