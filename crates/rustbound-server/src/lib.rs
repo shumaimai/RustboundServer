@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod config;
 pub mod connection;
 pub mod listener;
+pub mod mod_api;
 pub mod mutation;
 pub mod offline_uuid;
 pub mod persist;
