@@ -455,6 +455,12 @@ impl TickHandle {
         self.sender.clone()
     }
 
+    /// Returns a [`WorldFacade`](crate::mutation::WorldFacade) for tick-owned
+    /// world mutations via a typed API.
+    pub fn world_facade(&self) -> crate::mutation::WorldFacade {
+        crate::mutation::WorldFacade::new(self.sender.clone())
+    }
+
     /// Signals the tick loop to shut down and waits for it to exit.
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
