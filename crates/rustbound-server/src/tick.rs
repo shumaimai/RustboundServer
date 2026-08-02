@@ -159,11 +159,20 @@ impl PlayerChunkState {
             .collect()
     }
 
-    /// Updates the center chunk. Returns (center_changed, new_chunks) where
-    /// new_chunks is the set of chunks to load (in desired but not in loaded).
-    fn update_center(&mut self, new_cx: i32, new_cz: i32) -> (bool, Vec<crate::world::ChunkPos>) {
+    /// Updates the center chunk. Returns (center_changed, new_chunks, unloaded_chunks) where
+    /// new_chunks is the set of chunks to load (in desired but not in loaded) and
+    /// unloaded_chunks is the set of chunks to unload (in loaded but not in desired).
+    fn update_center(
+        &mut self,
+        new_cx: i32,
+        new_cz: i32,
+    ) -> (
+        bool,
+        Vec<crate::world::ChunkPos>,
+        Vec<crate::world::ChunkPos>,
+    ) {
         if self.center_x == new_cx && self.center_z == new_cz {
-            return (false, Vec::new());
+            return (false, Vec::new(), Vec::new());
         }
         self.center_x = new_cx;
         self.center_z = new_cz;
@@ -173,16 +182,26 @@ impl PlayerChunkState {
             .filter(|pos| !self.loaded_chunks.contains(pos))
             .copied()
             .collect();
+        let unloaded_chunks: Vec<_> = self
+            .loaded_chunks
+            .iter()
+            .filter(|pos| !desired.contains(pos))
+            .copied()
+            .collect();
         self.loaded_chunks = desired;
-        (true, new_chunks)
+        (true, new_chunks, unloaded_chunks)
     }
 
-    /// Updates the view distance. Returns the list of new chunks to load
-    /// (chunks that are now in range but weren't before).
-    fn update_view_distance(&mut self, new_vd: i32) -> Vec<crate::world::ChunkPos> {
+    /// Updates the view distance. Returns (new_chunks, unloaded_chunks) where
+    /// new_chunks are chunks now in range but weren't before, and
+    /// unloaded_chunks are chunks no longer in range.
+    fn update_view_distance(
+        &mut self,
+        new_vd: i32,
+    ) -> (Vec<crate::world::ChunkPos>, Vec<crate::world::ChunkPos>) {
         let new_vd = new_vd.max(0);
         if self.view_distance == new_vd {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         self.view_distance = new_vd;
         let desired = self.desired_chunk_set();
@@ -191,8 +210,14 @@ impl PlayerChunkState {
             .filter(|pos| !self.loaded_chunks.contains(pos))
             .copied()
             .collect();
+        let unloaded_chunks: Vec<_> = self
+            .loaded_chunks
+            .iter()
+            .filter(|pos| !desired.contains(pos))
+            .copied()
+            .collect();
         self.loaded_chunks = desired;
-        new_chunks
+        (new_chunks, unloaded_chunks)
     }
 }
 
@@ -677,7 +702,7 @@ fn run_tick_loop(
                             let new_cx = chunk_x_from_world(x);
                             let new_cz = chunk_z_from_world(z);
                             if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                                let (center_changed, new_chunks) =
+                                let (center_changed, new_chunks, unloaded_chunks) =
                                     chunk_state.update_center(new_cx, new_cz);
                                 if let Some(sender) = session_senders.get(&entity_id) {
                                     if center_changed {
@@ -688,6 +713,12 @@ fn run_tick_loop(
                                     }
                                     for chunk in new_chunks {
                                         let _ = sender.send(SessionEvent::LoadChunk {
+                                            chunk_x: chunk.x,
+                                            chunk_z: chunk.z,
+                                        });
+                                    }
+                                    for chunk in unloaded_chunks {
+                                        let _ = sender.send(SessionEvent::UnloadChunk {
                                             chunk_x: chunk.x,
                                             chunk_z: chunk.z,
                                         });
@@ -754,10 +785,17 @@ fn run_tick_loop(
                     view_distance,
                 } => {
                     if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                        let new_chunks = chunk_state.update_view_distance(view_distance);
+                        let (new_chunks, unloaded_chunks) =
+                            chunk_state.update_view_distance(view_distance);
                         if let Some(sender) = session_senders.get(&entity_id) {
                             for chunk in new_chunks {
                                 let _ = sender.send(SessionEvent::LoadChunk {
+                                    chunk_x: chunk.x,
+                                    chunk_z: chunk.z,
+                                });
+                            }
+                            for chunk in unloaded_chunks {
+                                let _ = sender.send(SessionEvent::UnloadChunk {
                                     chunk_x: chunk.x,
                                     chunk_z: chunk.z,
                                 });
@@ -1453,16 +1491,17 @@ mod tests {
     #[test]
     fn chunk_state_update_center_same_no_change() {
         let mut state = PlayerChunkState::new(10);
-        let (changed, new_chunks) = state.update_center(0, 0);
+        let (changed, new_chunks, unloaded) = state.update_center(0, 0);
         assert!(!changed);
         assert!(new_chunks.is_empty());
+        assert!(unloaded.is_empty());
     }
 
     #[test]
     fn chunk_state_update_center_new_chunks() {
         let mut state = PlayerChunkState::new(2);
         // Move from (0,0) to (1,0) - center shifts by 1 chunk
-        let (changed, new_chunks) = state.update_center(1, 0);
+        let (changed, new_chunks, unloaded) = state.update_center(1, 0);
         assert!(changed);
         assert_eq!(state.center_x, 1);
         assert_eq!(state.center_z, 0);
@@ -1475,6 +1514,12 @@ mod tests {
             assert_eq!(chunk.x, 3);
             assert!(chunk.z >= -2 && chunk.z <= 2);
         }
+        // Unloaded chunks: cx=-2, cz in [-2,2] -> 5 chunks
+        assert_eq!(unloaded.len(), 5);
+        for chunk in &unloaded {
+            assert_eq!(chunk.x, -2);
+            assert!(chunk.z >= -2 && chunk.z <= 2);
+        }
     }
 
     #[test]
@@ -1483,24 +1528,29 @@ mod tests {
         // Initial view distance is min(10, 2) = 2
         assert_eq!(state.view_distance, 2);
         // Client requests view distance 5
-        let new_chunks = state.update_view_distance(5);
+        let (new_chunks, unloaded) = state.update_view_distance(5);
         assert_eq!(state.view_distance, 5);
         // New chunks: those in radius 5 but not in radius 2
         // Radius 5: 11x11 = 121, radius 2: 5x5 = 25, new = 96
         assert_eq!(new_chunks.len(), 96);
+        // Growing should not unload any chunks
+        assert!(unloaded.is_empty());
     }
 
     #[test]
     fn chunk_state_update_view_distance_shrinks() {
         let mut state = PlayerChunkState::new(10);
         // Grow to 5 first
-        state.update_view_distance(5);
+        let _ = state.update_view_distance(5);
         assert_eq!(state.view_distance, 5);
         // Shrink to 3
-        let new_chunks = state.update_view_distance(3);
+        let (new_chunks, unloaded) = state.update_view_distance(3);
         assert_eq!(state.view_distance, 3);
         // No new chunks when shrinking
         assert!(new_chunks.is_empty());
+        // Unloaded chunks: those in radius 5 but not in radius 3
+        // Radius 5: 11x11 = 121, radius 3: 7x7 = 49, unloaded = 72
+        assert_eq!(unloaded.len(), 72);
     }
 
     #[test]
