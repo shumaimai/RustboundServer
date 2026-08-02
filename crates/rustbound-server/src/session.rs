@@ -20,8 +20,8 @@ use rustbound_protocol::play::{
     PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition,
     SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
     decode_client_information, decode_confirm_teleportation, decode_keep_alive_serverbound,
-    decode_set_player_position, decode_set_player_position_and_rotation,
-    decode_set_player_rotation, encode_change_difficulty, encode_chunk_data,
+    decode_player_digging, decode_set_player_position, decode_set_player_position_and_rotation,
+    decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
     encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
     encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
     encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
@@ -964,13 +964,56 @@ fn try_decode_play_packet_inner(
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);
-            Ok(Some(packet))
+            return Ok(Some(packet));
         }
-        Ok(PlayDecodeOutcome::Incomplete) => Ok(None),
-        Err(PlayError::WrongPacketId { received, .. }) => {
-            Err(SessionError::UnexpectedPacket(received))
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
         }
-        Err(error) => Err(SessionError::from(error)),
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Player Digging (0x1D)
+    match decode_player_digging(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Use Item On (0x31)
+    match decode_use_item_on(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Unknown packet: skip it gracefully rather than disconnecting.
+    // This allows vanilla clients to send packets we don't yet handle
+    // (e.g. inventory, chat, swing arm) without being kicked.
+    // We consume one frame from the buffer and discard it.
+    match rustbound_protocol::framing::decode_frame(&mut input, max_frame_length) {
+        Ok(rustbound_protocol::framing::DecodeOutcome::Complete(_frame)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            // Return None to signal "no actionable packet, continue reading"
+            Ok(None)
+        }
+        Ok(rustbound_protocol::framing::DecodeOutcome::Incomplete) => Ok(None),
+        Err(error) => Err(SessionError::from(PlayError::from(error))),
     }
 }
 
@@ -1178,5 +1221,165 @@ mod tests {
         assert!(codec_str.contains("minecraft:dimension_type"));
         assert!(codec_str.contains("minecraft:worldgen/biome"));
         assert!(codec_str.contains("minecraft:chat_type"));
+    }
+
+    #[test]
+    fn try_decode_player_digging_packet() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::{PlayerDigging, PlayerDiggingAction, encode_player_digging};
+
+        let dig = PlayerDigging {
+            action: PlayerDiggingAction::StartDestroy,
+            position: (10, 64, -5),
+            face: 1,
+        };
+        let mut wire = Vec::new();
+        encode_player_digging(&dig, PROTOCOL_MAX_FRAME_LENGTH, &mut wire)?;
+
+        let mut buffer = wire.clone();
+        let packet = try_decode_play_packet(&mut buffer, PROTOCOL_MAX_FRAME_LENGTH, -1)?;
+        assert!(packet.is_some(), "should decode PlayerDigging");
+        assert!(buffer.is_empty(), "should consume all bytes");
+
+        match packet {
+            Some(PlayPacket::PlayerDigging(d)) => {
+                assert_eq!(d.position, (10, 64, -5));
+                assert_eq!(d.face, 1);
+            }
+            other => panic!("expected PlayerDigging, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn try_decode_use_item_on_packet() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::{UseItemOn, encode_use_item_on};
+
+        let place = UseItemOn {
+            position: (0, 64, 0),
+            face: 1, // top
+            hand: 0,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+        };
+        let mut wire = Vec::new();
+        encode_use_item_on(&place, PROTOCOL_MAX_FRAME_LENGTH, &mut wire)?;
+
+        let mut buffer = wire.clone();
+        let packet = try_decode_play_packet(&mut buffer, PROTOCOL_MAX_FRAME_LENGTH, -1)?;
+        assert!(packet.is_some(), "should decode UseItemOn");
+        assert!(buffer.is_empty(), "should consume all bytes");
+
+        match packet {
+            Some(PlayPacket::UseItemOn(p)) => {
+                assert_eq!(p.position, (0, 64, 0));
+                assert_eq!(p.face, 1);
+            }
+            other => panic!("expected UseItemOn, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn try_decode_unknown_packet_is_skipped() -> Result<(), Box<dyn std::error::Error>> {
+        // Encode a frame with an unknown packet ID (0xFF)
+        let mut wire = Vec::new();
+        rustbound_protocol::framing::encode_frame(
+            0xFF,
+            &[0x01, 0x02, 0x03],
+            PROTOCOL_MAX_FRAME_LENGTH,
+            &mut wire,
+        )?;
+
+        let mut buffer = wire.clone();
+        // Should not return an error - just None (skipped)
+        let result = try_decode_play_packet(&mut buffer, PROTOCOL_MAX_FRAME_LENGTH, -1);
+        assert!(result.is_ok(), "unknown packet should not error");
+        // The packet should have been consumed (buffer empty)
+        assert!(buffer.is_empty(), "unknown packet should be consumed");
+        Ok(())
+    }
+
+    #[test]
+    fn player_digging_start_destroy_sends_set_block() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::{PlayerDigging, PlayerDiggingAction};
+
+        let (tx, rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 1, // Creative
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        // Consume PlayerJoined
+        let _ = rx.recv()?;
+
+        // Send a StartDestroy dig packet
+        session.handle_play_packet(PlayPacket::PlayerDigging(PlayerDigging {
+            action: PlayerDiggingAction::StartDestroy,
+            position: (5, 10, 15),
+            face: 1,
+        }))?;
+
+        // Should receive SetBlock with block_state=0 (air)
+        match rx.recv()? {
+            TickMessage::SetBlock {
+                position,
+                block_state,
+            } => {
+                assert_eq!(position, (5, 10, 15));
+                assert_eq!(block_state, 0);
+            }
+            other => panic!("expected SetBlock, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn use_item_on_sends_set_block_on_adjacent_face() -> Result<(), Box<dyn std::error::Error>> {
+        use rustbound_protocol::play::UseItemOn;
+
+        let (tx, rx) = channel::<TickMessage>();
+        let config = SessionConfig {
+            uuid: Uuid::new(0, 0),
+            username: "TestPlayer".to_string(),
+            gamemode: 1, // Creative
+            max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
+            read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
+        };
+        let mut session = PlayerSession::new(&config, 1, tx)?;
+
+        // Consume PlayerJoined
+        let _ = rx.recv()?;
+
+        // Place on top face (face=1) of block at (0,64,0)
+        session.handle_play_packet(PlayPacket::UseItemOn(UseItemOn {
+            position: (0, 64, 0),
+            face: 1,
+            hand: 0,
+            cursor_x: 0.5,
+            cursor_y: 1.0,
+            cursor_z: 0.5,
+            inside_block: false,
+        }))?;
+
+        // Should receive SetBlock at (0,65,0) with block_state=1 (stone)
+        match rx.recv()? {
+            TickMessage::SetBlock {
+                position,
+                block_state,
+            } => {
+                assert_eq!(position, (0, 65, 0));
+                assert_eq!(block_state, 1);
+            }
+            other => panic!("expected SetBlock, got {other:?}"),
+        }
+        Ok(())
     }
 }
