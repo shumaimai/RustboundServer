@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -144,7 +144,10 @@ impl std::error::Error for TickStartError {
 /// Starts the tick loop on a new thread.
 ///
 /// Returns a handle for sending messages and a receiver for events.
-pub fn start_tick_loop() -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
+/// The `player_count` atomic is incremented on join and decremented on leave.
+pub fn start_tick_loop(
+    player_count: Arc<AtomicUsize>,
+) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
     let (event_tx, event_rx) = channel::<TickEvent>();
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -153,7 +156,7 @@ pub fn start_tick_loop() -> Result<(TickHandle, Receiver<TickEvent>), TickStartE
     let thread = thread::Builder::new()
         .name("rustbound-tick".to_string())
         .spawn(move || {
-            run_tick_loop(msg_rx, event_tx, shutdown_clone);
+            run_tick_loop(msg_rx, event_tx, shutdown_clone, player_count);
         })
         .map_err(TickStartError::ThreadSpawn)?;
 
@@ -171,6 +174,7 @@ fn run_tick_loop(
     msg_rx: Receiver<TickMessage>,
     event_tx: Sender<TickEvent>,
     shutdown: Arc<AtomicBool>,
+    player_count: Arc<AtomicUsize>,
 ) {
     let mut world = World::new();
     let mut tick_count: u64 = 0;
@@ -230,12 +234,14 @@ fn run_tick_loop(
                     }
 
                     let _ = event_tx.send(TickEvent::PlayerAdded { entity_id });
+                    player_count.fetch_add(1, Ordering::AcqRel);
                 }
                 TickMessage::PlayerLeft { entity_id } => {
                     // Get the player's UUID before removing
                     let uuid = world.get_player(entity_id).map(|p| p.uuid);
                     world.remove_player(entity_id);
                     session_senders.remove(&entity_id);
+                    player_count.fetch_sub(1, Ordering::AcqRel);
 
                     // Broadcast leave to all remaining sessions
                     if let Some(uuid) = uuid {
@@ -306,7 +312,8 @@ mod tests {
 
     #[test]
     fn tick_loop_starts_and_stops() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, _event_rx) = start_tick_loop()?;
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
         std::thread::sleep(Duration::from_millis(100));
         handle.shutdown();
         Ok(())
@@ -314,7 +321,8 @@ mod tests {
 
     #[test]
     fn tick_loop_processes_player_join_and_leave() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) = start_tick_loop()?;
+        let (mut handle, event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
 
         let (event_tx, event_rx_session) = channel::<SessionEvent>();
 
@@ -364,7 +372,8 @@ mod tests {
 
     #[test]
     fn tick_loop_shuts_down_on_message() -> Result<(), Box<dyn std::error::Error>> {
-        let (mut handle, event_rx) = start_tick_loop()?;
+        let (mut handle, event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
         handle.send(super::TickMessage::Shutdown)?;
 
         let start = Instant::now();

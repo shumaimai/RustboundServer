@@ -15,13 +15,14 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use rustbound_protocol::play::{
-    ChangeDifficulty, ClientInformation, ConfirmTeleportation, EntityEvent, GameEvent, GameMode,
-    JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities,
-    PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition, SetHeldItem,
-    SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition, decode_client_information,
-    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_set_player_position,
-    decode_set_player_position_and_rotation, decode_set_player_rotation, encode_change_difficulty,
-    encode_chunk_data, encode_entity_event, encode_game_event, encode_join_game,
+    ChangeDifficulty, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
+    GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
+    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition,
+    SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
+    decode_client_information, decode_confirm_teleportation, decode_keep_alive_serverbound,
+    decode_set_player_position, decode_set_player_position_and_rotation,
+    decode_set_player_rotation, encode_change_difficulty, encode_chunk_data,
+    encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
     encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
     encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
     encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
@@ -637,6 +638,20 @@ impl PlayerSession {
         }
     }
 
+    /// Sends a Disconnect (Play) packet with a reason string.
+    ///
+    /// Best-effort: ignores I/O errors since the connection may already be
+    /// broken.
+    pub fn send_disconnect(&self, stream: &mut TcpStream, reason: &str) {
+        let packet = DisconnectPlay {
+            reason: format!(r#"{{"text":"{reason}"}}"#),
+        };
+        let mut wire = Vec::new();
+        if encode_disconnect_play(&packet, self.max_frame_length, &mut wire).is_ok() {
+            let _ = stream.write_all(&wire);
+        }
+    }
+
     /// Notifies the tick loop that this player has left.
     pub fn shutdown(&self) {
         let _ = self.tick_sender.send(TickMessage::PlayerLeft {
@@ -837,26 +852,47 @@ pub fn run_play_loop(
 
     // Main play loop
     let mut read_buffer = Vec::with_capacity(4096);
-    loop {
+    let result = loop {
         // Poll for tick events (KeepAlive, etc.)
-        session.poll_events(stream)?;
+        if let Err(e) = session.poll_events(stream) {
+            break Err(e);
+        }
 
         // Try to decode a packet
-        match try_decode_play_packet(&mut read_buffer, session_config.max_frame_length)? {
-            Some(packet) => {
-                session.handle_play_packet(packet)?;
+        match try_decode_play_packet(&mut read_buffer, session_config.max_frame_length) {
+            Ok(Some(packet)) => {
+                if let Err(e) = session.handle_play_packet(packet) {
+                    // Send disconnect before returning the error
+                    match &e {
+                        SessionError::InvalidPosition => {
+                            session.send_disconnect(stream, "Invalid position");
+                        }
+                        SessionError::UnexpectedPacket(_) => {
+                            session.send_disconnect(stream, "Unexpected packet");
+                        }
+                        _ => {}
+                    }
+                    break Err(e);
+                }
             }
-            None => {
+            Ok(None) => {
                 // Need more data - read from stream
                 let mut chunk = [0u8; 4096];
-                let n = stream.read(&mut chunk)?;
-                if n == 0 {
-                    return Err(SessionError::Disconnected);
+                match stream.read(&mut chunk) {
+                    Ok(0) => break Err(SessionError::Disconnected),
+                    Ok(n) => read_buffer.extend_from_slice(&chunk[..n]),
+                    Err(e) => break Err(SessionError::Io(e)),
                 }
-                read_buffer.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) => {
+                session.send_disconnect(stream, "Protocol error");
+                break Err(e);
             }
         }
-    }
+    };
+
+    // session.drop() sends PlayerLeft via the Drop guard
+    result
 }
 
 #[cfg(test)]
