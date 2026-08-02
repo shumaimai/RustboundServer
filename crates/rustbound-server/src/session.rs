@@ -376,6 +376,7 @@ impl PlayerSession {
                 entity_id,
                 uuid: config.uuid,
                 username: config.username.clone(),
+                gamemode: config.gamemode,
                 view_distance: config.view_distance,
                 event_sender: event_tx,
             })
