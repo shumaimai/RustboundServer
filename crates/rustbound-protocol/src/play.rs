@@ -120,6 +120,24 @@ pub const MOVE_ENTITY_ROT_PACKET_ID: i32 = 0x2B;
 /// Packet ID for the clientbound Entity Teleport packet.
 pub const ENTITY_TELEPORT_PACKET_ID: i32 = 0x57;
 
+/// Packet ID for the clientbound Set Container Content packet.
+pub const SET_CONTAINER_CONTENT_PACKET_ID: i32 = 0x12;
+
+/// Packet ID for the clientbound Set Container Slot packet.
+pub const SET_CONTAINER_SLOT_PACKET_ID: i32 = 0x14;
+
+/// Packet ID for the serverbound Set Held Item (Carried Item) packet.
+pub const SET_HELD_ITEM_SERVERBOUND_PACKET_ID: i32 = 0x28;
+
+/// Packet ID for the serverbound Set Creative Mode Slot packet.
+pub const SET_CREATIVE_MODE_SLOT_PACKET_ID: i32 = 0x2B;
+
+/// Maximum number of slots in a single container content packet.
+pub const MAX_CONTAINER_SLOTS: usize = 256;
+
+/// Maximum size of an item NBT blob.
+pub const MAX_ITEM_NBT_SIZE: usize = 65536;
+
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
 
@@ -291,6 +309,14 @@ pub enum PlayPacket {
     MoveEntityRot(MoveEntityRot),
     /// Clientbound Entity Teleport (Play `0x57`).
     EntityTeleport(EntityTeleport),
+    /// Clientbound Set Container Content (Play `0x12`).
+    SetContainerContent(SetContainerContent),
+    /// Clientbound Set Container Slot (Play `0x14`).
+    SetContainerSlot(SetContainerSlot),
+    /// Serverbound Set Held Item (Play `0x28`).
+    SetHeldItemServerbound(SetHeldItemServerbound),
+    /// Serverbound Set Creative Mode Slot (Play `0x2B`).
+    SetCreativeModeSlot(SetCreativeModeSlot),
 }
 
 /// The player's gamemode.
@@ -2339,6 +2365,757 @@ pub struct EntityTeleport {
     pub on_ground: bool,
 }
 
+/// An item stack in an inventory slot.
+///
+/// In protocol 763, a slot is encoded as:
+/// - `present` (bool): whether the slot contains an item
+/// - If present:
+///   - `item_id` (VarInt): the item ID
+///   - `count` (i8): the stack size (1-127)
+///   - `nbt` (optional NBT): item components/tags, or TAG_End (0x00) if none
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    /// Whether the slot contains an item.
+    pub present: bool,
+    /// The item ID (only meaningful if `present` is true).
+    pub item_id: i32,
+    /// The stack size (only meaningful if `present` is true).
+    pub count: i8,
+    /// Raw NBT bytes for item components/tags (only meaningful if `present` is true).
+    /// An empty Vec means no NBT (encoded as TAG_End = 0x00).
+    pub nbt: Vec<u8>,
+}
+
+impl Slot {
+    /// Creates an empty slot (no item).
+    pub fn empty() -> Self {
+        Self {
+            present: false,
+            item_id: 0,
+            count: 0,
+            nbt: Vec::new(),
+        }
+    }
+
+    /// Creates a slot with an item and no NBT data.
+    pub fn item(item_id: i32, count: i8) -> Self {
+        Self {
+            present: true,
+            item_id,
+            count,
+            nbt: Vec::new(),
+        }
+    }
+
+    /// Creates a slot with an item and raw NBT data.
+    pub fn with_nbt(item_id: i32, count: i8, nbt: Vec<u8>) -> Self {
+        Self {
+            present: true,
+            item_id,
+            count,
+            nbt,
+        }
+    }
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// Clientbound Set Container Content packet (Play `0x12`).
+///
+/// Replaces the entire contents of a container window (or the player
+/// inventory when `window_id` is 0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetContainerContent {
+    /// The window ID (0 for player inventory).
+    pub window_id: u8,
+    /// Server-managed state ID for synchronization.
+    pub state_id: i32,
+    /// The slot data for all slots in the window.
+    pub slots: Vec<Slot>,
+    /// The item currently being dragged by the mouse cursor.
+    pub carried_item: Slot,
+}
+
+/// Clientbound Set Container Slot packet (Play `0x14`).
+///
+/// Updates a single slot in a container window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetContainerSlot {
+    /// The window ID (0 for player inventory, -1 for cursor item, -2 for any player slot).
+    pub window_id: i8,
+    /// Server-managed state ID for synchronization.
+    pub state_id: i32,
+    /// The slot index to update.
+    pub slot: i16,
+    /// The new slot data.
+    pub item: Slot,
+}
+
+/// Serverbound Set Held Item packet (Play `0x28`).
+///
+/// Sent when the player changes their hotbar slot selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetHeldItemServerbound {
+    /// The hotbar slot (0-8) the player has selected.
+    pub slot: i16,
+}
+
+/// Serverbound Set Creative Mode Slot packet (Play `0x2B`).
+///
+/// Sent in Creative mode when the player places or picks up an item
+/// in the inventory. Slot -1 means dropping the item (spawn item entity).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetCreativeModeSlot {
+    /// The slot index (-1 for drop/cursor).
+    pub slot: i16,
+    /// The item to place in the slot.
+    pub item: Slot,
+}
+
+/// Encodes a slot to the given buffer.
+///
+/// Format: bool present, then (if present) VarInt item_id, i8 count, optional NBT.
+pub fn encode_slot(slot: &Slot, output: &mut Vec<u8>) {
+    encode_bool(slot.present, output);
+    if slot.present {
+        encode_var_int(slot.item_id, output);
+        encode_i8(slot.count, output);
+        if slot.nbt.is_empty() {
+            // No NBT: write TAG_End
+            output.push(0x00);
+        } else {
+            output.extend_from_slice(&slot.nbt);
+        }
+    }
+}
+
+/// Decodes a slot from the given input.
+pub fn decode_slot(input: &mut &[u8]) -> Result<Slot, CodecError> {
+    let present = decode_bool(input)?;
+    if !present {
+        return Ok(Slot::empty());
+    }
+    let item_id = decode_var_int(input)?;
+    let count = decode_i8(input)?;
+    // Read optional NBT: first byte determines if there's NBT
+    if input.is_empty() {
+        return Err(CodecError::IncompleteInput);
+    }
+    let first_byte = input[0];
+    if first_byte == 0x00 {
+        // TAG_End: no NBT
+        *input = &input[1..];
+        Ok(Slot {
+            present: true,
+            item_id,
+            count,
+            nbt: Vec::new(),
+        })
+    } else {
+        // Read a full NBT compound
+        let nbt = read_nbt_compound(input)?;
+        Ok(Slot {
+            present: true,
+            item_id,
+            count,
+            nbt,
+        })
+    }
+}
+
+/// Reads a full NBT compound from the input, returning the raw bytes.
+///
+/// This is a minimal NBT reader that handles the TAG_Compound structure
+/// by tracking nesting depth. It returns the raw bytes including the
+/// initial TAG_Compound byte.
+fn read_nbt_compound(input: &mut &[u8]) -> Result<Vec<u8>, CodecError> {
+    let start = *input;
+    if input.is_empty() {
+        return Err(CodecError::IncompleteInput);
+    }
+    let tag_type = input[0];
+    if tag_type != 0x0A {
+        // Not a TAG_Compound - this is unexpected for slot NBT
+        return Err(CodecError::InvalidBoolean);
+    }
+
+    // We need to parse the NBT to find its end.
+    // A minimal approach: track depth and skip through the structure.
+    let mut pos = 0;
+    let nbt_bytes = parse_nbt_payload(start, &mut pos)?;
+    *input = &start[pos..];
+    Ok(nbt_bytes)
+}
+
+/// Parses an NBT payload starting at `pos`, returning the raw bytes consumed.
+fn parse_nbt_payload(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, CodecError> {
+    let start = *pos;
+    // Read the tag type
+    if *pos >= data.len() {
+        return Err(CodecError::IncompleteInput);
+    }
+    let tag_type = data[*pos];
+    *pos += 1;
+
+    match tag_type {
+        0x00 => {
+            // TAG_End
+            Ok(data[start..*pos].to_vec())
+        }
+        0x01..=0x08 => {
+            // Primitive types with fixed size: skip name + value
+            skip_nbt_name(data, pos)?;
+            skip_nbt_primitive(tag_type, data, pos)?;
+            Ok(data[start..*pos].to_vec())
+        }
+        0x09 => {
+            // TAG_List: skip name, then type byte, length, and elements
+            skip_nbt_name(data, pos)?;
+            if *pos + 5 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let element_type = data[*pos];
+            *pos += 1;
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            for _ in 0..length {
+                parse_nbt_list_element(element_type, data, pos)?;
+            }
+            Ok(data[start..*pos].to_vec())
+        }
+        0x0A => {
+            // TAG_Compound: skip name, then read entries until TAG_End
+            skip_nbt_name(data, pos)?;
+            loop {
+                if *pos >= data.len() {
+                    return Err(CodecError::IncompleteInput);
+                }
+                let child_type = data[*pos];
+                if child_type == 0x00 {
+                    *pos += 1;
+                    break;
+                }
+                // Read child entry: type + name + payload
+                *pos += 1;
+                skip_nbt_name(data, pos)?;
+                parse_nbt_payload_inner(child_type, data, pos)?;
+            }
+            Ok(data[start..*pos].to_vec())
+        }
+        0x0B => {
+            // TAG_Int_Array: skip name, length, and ints
+            skip_nbt_name(data, pos)?;
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 4;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(data[start..*pos].to_vec())
+        }
+        0x0C => {
+            // TAG_Long_Array: skip name, length, and longs
+            skip_nbt_name(data, pos)?;
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 8;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(data[start..*pos].to_vec())
+        }
+        0x0D => {
+            // TAG_Byte_Array: skip name, length, and bytes
+            skip_nbt_name(data, pos)?;
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += length as usize;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(data[start..*pos].to_vec())
+        }
+        _ => Err(CodecError::InvalidBoolean),
+    }
+}
+
+/// Parses an NBT payload without a leading name (used inside lists and compound entries).
+fn parse_nbt_payload_inner(tag_type: u8, data: &[u8], pos: &mut usize) -> Result<(), CodecError> {
+    match tag_type {
+        0x00 => Ok(()),
+        0x01..=0x08 => {
+            skip_nbt_primitive(tag_type, data, pos)?;
+            Ok(())
+        }
+        0x09 => {
+            if *pos + 5 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let element_type = data[*pos];
+            *pos += 1;
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            for _ in 0..length {
+                parse_nbt_list_element(element_type, data, pos)?;
+            }
+            Ok(())
+        }
+        0x0A => {
+            loop {
+                if *pos >= data.len() {
+                    return Err(CodecError::IncompleteInput);
+                }
+                let child_type = data[*pos];
+                if child_type == 0x00 {
+                    *pos += 1;
+                    break;
+                }
+                *pos += 1;
+                skip_nbt_name(data, pos)?;
+                parse_nbt_payload_inner(child_type, data, pos)?;
+            }
+            Ok(())
+        }
+        0x0B => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 4;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        0x0C => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 8;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        0x0D => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += length as usize;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        _ => Err(CodecError::InvalidBoolean),
+    }
+}
+
+/// Parses a single list element (no name prefix).
+fn parse_nbt_list_element(
+    element_type: u8,
+    data: &[u8],
+    pos: &mut usize,
+) -> Result<(), CodecError> {
+    match element_type {
+        0x00 => Ok(()),
+        0x01..=0x08 => {
+            skip_nbt_primitive(element_type, data, pos)?;
+            Ok(())
+        }
+        0x09 => {
+            if *pos + 5 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let inner_type = data[*pos];
+            *pos += 1;
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            for _ in 0..length {
+                parse_nbt_list_element(inner_type, data, pos)?;
+            }
+            Ok(())
+        }
+        0x0A => {
+            loop {
+                if *pos >= data.len() {
+                    return Err(CodecError::IncompleteInput);
+                }
+                let child_type = data[*pos];
+                if child_type == 0x00 {
+                    *pos += 1;
+                    break;
+                }
+                *pos += 1;
+                skip_nbt_name(data, pos)?;
+                parse_nbt_payload_inner(child_type, data, pos)?;
+            }
+            Ok(())
+        }
+        0x0B => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 4;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        0x0C => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += (length as usize) * 8;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        0x0D => {
+            if *pos + 4 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let length =
+                i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            *pos += length as usize;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            Ok(())
+        }
+        _ => Err(CodecError::InvalidBoolean),
+    }
+}
+
+/// Skips an NBT name (2-byte length prefix + UTF-8 bytes).
+fn skip_nbt_name(data: &[u8], pos: &mut usize) -> Result<(), CodecError> {
+    if *pos + 2 > data.len() {
+        return Err(CodecError::IncompleteInput);
+    }
+    let name_len = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
+    *pos += 2;
+    *pos += name_len;
+    if *pos > data.len() {
+        return Err(CodecError::IncompleteInput);
+    }
+    Ok(())
+}
+
+/// Skips a primitive NBT value of the given type.
+fn skip_nbt_primitive(tag_type: u8, data: &[u8], pos: &mut usize) -> Result<(), CodecError> {
+    let size = match tag_type {
+        0x01 => 1, // TAG_Byte
+        0x02 => 2, // TAG_Short
+        0x03 => 4, // TAG_Int
+        0x04 => 8, // TAG_Long
+        0x05 => 4, // TAG_Float
+        0x06 => 8, // TAG_Double
+        0x07 => 4, // TAG_Byte_Array (length prefix only; actual bytes handled by caller)
+        0x08 => {
+            // TAG_String: 2-byte length + bytes
+            if *pos + 2 > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            let len = u16::from_be_bytes([data[*pos], data[*pos + 1]]) as usize;
+            *pos += 2 + len;
+            if *pos > data.len() {
+                return Err(CodecError::IncompleteInput);
+            }
+            return Ok(());
+        }
+        _ => return Err(CodecError::InvalidBoolean),
+    };
+    *pos += size;
+    if *pos > data.len() {
+        return Err(CodecError::IncompleteInput);
+    }
+    Ok(())
+}
+
+/// Encodes a Set Container Content packet (clientbound Play `0x12`).
+pub fn encode_set_container_content(
+    packet: &SetContainerContent,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.window_id, &mut body);
+    encode_var_int(packet.state_id, &mut body);
+    if packet.slots.len() > MAX_CONTAINER_SLOTS {
+        return Err(PlayError::Codec(CodecError::VarIntTooLong));
+    }
+    encode_var_int(packet.slots.len() as i32, &mut body);
+    for slot in &packet.slots {
+        encode_slot(slot, &mut body);
+    }
+    encode_slot(&packet.carried_item, &mut body);
+    encode_frame(
+        SET_CONTAINER_CONTENT_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Container Content packet (clientbound Play `0x12`).
+pub fn decode_set_container_content(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_CONTAINER_CONTENT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_CONTAINER_CONTENT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let window_id = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let state_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let slot_count = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if slot_count < 0 || slot_count as usize > MAX_CONTAINER_SLOTS {
+        *input = source;
+        return Err(PlayError::Codec(CodecError::VarIntTooLong));
+    }
+    let mut slots = Vec::with_capacity(slot_count as usize);
+    for _ in 0..slot_count {
+        slots.push(decode_slot(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?);
+    }
+    let carried_item = decode_slot(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetContainerContent(SetContainerContent {
+            window_id,
+            state_id,
+            slots,
+            carried_item,
+        }),
+    ))
+}
+
+/// Encodes a Set Container Slot packet (clientbound Play `0x14`).
+pub fn encode_set_container_slot(
+    packet: &SetContainerSlot,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_i8(packet.window_id, &mut body);
+    encode_var_int(packet.state_id, &mut body);
+    encode_i16(packet.slot, &mut body);
+    encode_slot(&packet.item, &mut body);
+    encode_frame(
+        SET_CONTAINER_SLOT_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Container Slot packet (clientbound Play `0x14`).
+pub fn decode_set_container_slot(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_CONTAINER_SLOT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_CONTAINER_SLOT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let window_id = decode_i8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let state_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let slot = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let item = decode_slot(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::SetContainerSlot(
+        SetContainerSlot {
+            window_id,
+            state_id,
+            slot,
+            item,
+        },
+    )))
+}
+
+/// Decodes a Set Held Item serverbound packet (Play `0x28`).
+pub fn decode_set_held_item_serverbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_HELD_ITEM_SERVERBOUND_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_HELD_ITEM_SERVERBOUND_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let slot = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetHeldItemServerbound(SetHeldItemServerbound { slot }),
+    ))
+}
+
+/// Decodes a Set Creative Mode Slot packet (serverbound Play `0x2B`).
+pub fn decode_set_creative_mode_slot(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_CREATIVE_MODE_SLOT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_CREATIVE_MODE_SLOT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let slot = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let item = decode_slot(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetCreativeModeSlot(SetCreativeModeSlot { slot, item }),
+    ))
+}
+
 /// Encodes a Player Info Update packet (clientbound Play `0x3A`).
 pub fn encode_player_info_update(
     packet: &PlayerInfoUpdate,
@@ -3346,30 +4123,35 @@ mod tests {
         KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome,
         PlayError, PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction,
         PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
-        PluginMessageClientbound, RemoveEntities, SetCenterChunk, SetDefaultSpawnPosition,
-        SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation,
-        SetRenderDistance, SetSimulationDistance, SpawnPlayer, SynchronizePlayerPosition,
-        UseItemOn, decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
-        decode_chunk_data, decode_client_information, decode_confirm_teleportation,
-        decode_disconnect_play, decode_entity_event, decode_entity_teleport, decode_game_event,
-        decode_join_game, decode_keep_alive_clientbound, decode_keep_alive_serverbound,
-        decode_move_entity_pos, decode_move_entity_pos_rot, decode_move_entity_rot,
-        decode_player_abilities, decode_player_digging, decode_plugin_message_clientbound,
-        decode_set_center_chunk, decode_set_default_spawn_position, decode_set_held_item,
+        PluginMessageClientbound, RemoveEntities, SET_CREATIVE_MODE_SLOT_PACKET_ID,
+        SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SetCenterChunk, SetContainerContent, SetContainerSlot,
+        SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
+        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, Slot, SpawnPlayer,
+        SynchronizePlayerPosition, UseItemOn, decode_acknowledge_block_change, decode_block_update,
+        decode_change_difficulty, decode_chunk_data, decode_client_information,
+        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
+        decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
+        decode_move_entity_rot, decode_player_abilities, decode_player_digging,
+        decode_plugin_message_clientbound, decode_set_center_chunk, decode_set_container_content,
+        decode_set_container_slot, decode_set_creative_mode_slot,
+        decode_set_default_spawn_position, decode_set_held_item, decode_set_held_item_serverbound,
         decode_set_player_position, decode_set_player_position_and_rotation,
         decode_set_player_rotation, decode_set_render_distance, decode_set_simulation_distance,
-        decode_synchronize_player_position, decode_use_item_on, encode_acknowledge_block_change,
-        encode_block_update, encode_change_difficulty, encode_chunk_data,
-        encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
-        encode_entity_event, encode_entity_teleport, encode_game_event, encode_join_game,
-        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_move_entity_pos,
-        encode_move_entity_pos_rot, encode_move_entity_rot, encode_player_abilities,
-        encode_player_digging, encode_player_info_remove, encode_player_info_update,
-        encode_plugin_message_clientbound, encode_remove_entities, encode_set_center_chunk,
+        decode_slot, decode_synchronize_player_position, decode_use_item_on,
+        encode_acknowledge_block_change, encode_block_update, encode_change_difficulty,
+        encode_chunk_data, encode_client_information, encode_confirm_teleportation,
+        encode_disconnect_play, encode_entity_event, encode_entity_teleport, encode_game_event,
+        encode_join_game, encode_keep_alive_clientbound, encode_keep_alive_serverbound,
+        encode_move_entity_pos, encode_move_entity_pos_rot, encode_move_entity_rot,
+        encode_player_abilities, encode_player_digging, encode_player_info_remove,
+        encode_player_info_update, encode_plugin_message_clientbound, encode_remove_entities,
+        encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
         encode_set_default_spawn_position, encode_set_held_item, encode_set_player_position,
         encode_set_player_position_and_rotation, encode_set_player_rotation,
-        encode_set_render_distance, encode_set_simulation_distance, encode_spawn_player,
-        encode_synchronize_player_position, encode_use_item_on, ensure_play_state,
+        encode_set_render_distance, encode_set_simulation_distance, encode_slot,
+        encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
+        ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -4705,6 +5487,257 @@ mod tests {
                 assert_eq!(decoded.delta_y, -32768);
             }
             other => panic!("expected MoveEntityPos, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn slot_empty_roundtrip() {
+        let slot = Slot::empty();
+        let mut wire = Vec::new();
+        encode_slot(&slot, &mut wire);
+        assert_eq!(wire, vec![0x00]); // just bool false
+        let mut input = wire.as_slice();
+        let decoded = decode_slot(&mut input).unwrap_or_else(|_| panic!("decode failed"));
+        assert!(!decoded.present);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn slot_item_no_nbt_roundtrip() {
+        let slot = Slot::item(10, 64); // item ID 10, count 64
+        let mut wire = Vec::new();
+        encode_slot(&slot, &mut wire);
+        let mut input = wire.as_slice();
+        let decoded = decode_slot(&mut input).unwrap_or_else(|_| panic!("decode failed"));
+        assert!(decoded.present);
+        assert_eq!(decoded.item_id, 10);
+        assert_eq!(decoded.count, 64);
+        assert!(decoded.nbt.is_empty());
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn slot_item_with_nbt_roundtrip() {
+        // Build a minimal NBT compound: TAG_Compound + empty name + TAG_End
+        let nbt = vec![0x0A, 0x00, 0x00, 0x00]; // compound, name len=0, TAG_End
+        let slot = Slot::with_nbt(5, 1, nbt.clone());
+        let mut wire = Vec::new();
+        encode_slot(&slot, &mut wire);
+        let mut input = wire.as_slice();
+        let decoded = decode_slot(&mut input).unwrap_or_else(|_| panic!("decode failed"));
+        assert!(decoded.present);
+        assert_eq!(decoded.item_id, 5);
+        assert_eq!(decoded.count, 1);
+        assert_eq!(decoded.nbt, nbt);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn set_container_content_roundtrip() -> Result<(), PlayError> {
+        let packet = SetContainerContent {
+            window_id: 0,
+            state_id: 42,
+            slots: vec![Slot::item(1, 64), Slot::empty(), Slot::item(2, 32)],
+            carried_item: Slot::empty(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_content(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_container_content(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetContainerContent(decoded)) => {
+                assert_eq!(decoded.window_id, 0);
+                assert_eq!(decoded.state_id, 42);
+                assert_eq!(decoded.slots.len(), 3);
+                assert!(decoded.slots[0].present);
+                assert_eq!(decoded.slots[0].item_id, 1);
+                assert_eq!(decoded.slots[0].count, 64);
+                assert!(!decoded.slots[1].present);
+                assert!(decoded.slots[2].present);
+                assert_eq!(decoded.slots[2].item_id, 2);
+                assert!(!decoded.carried_item.present);
+            }
+            other => panic!("expected SetContainerContent, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_container_content_empty_roundtrip() -> Result<(), PlayError> {
+        let packet = SetContainerContent {
+            window_id: 0,
+            state_id: 0,
+            slots: vec![],
+            carried_item: Slot::empty(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_content(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_container_content(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetContainerContent(decoded)) => {
+                assert_eq!(decoded.slots.len(), 0);
+            }
+            other => panic!("expected SetContainerContent, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_container_slot_roundtrip() -> Result<(), PlayError> {
+        let packet = SetContainerSlot {
+            window_id: 0,
+            state_id: 1,
+            slot: 36,
+            item: Slot::item(10, 1),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_slot(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_container_slot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetContainerSlot(decoded)) => {
+                assert_eq!(decoded.window_id, 0);
+                assert_eq!(decoded.state_id, 1);
+                assert_eq!(decoded.slot, 36);
+                assert!(decoded.item.present);
+                assert_eq!(decoded.item.item_id, 10);
+            }
+            other => panic!("expected SetContainerSlot, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_container_slot_clear_roundtrip() -> Result<(), PlayError> {
+        let packet = SetContainerSlot {
+            window_id: 0,
+            state_id: 1,
+            slot: 0,
+            item: Slot::empty(),
+        };
+        let mut wire = Vec::new();
+        encode_set_container_slot(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_container_slot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetContainerSlot(decoded)) => {
+                assert!(!decoded.item.present);
+            }
+            other => panic!("expected SetContainerSlot, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_held_item_serverbound_roundtrip() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_i16(5, &mut body);
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            SET_HELD_ITEM_SERVERBOUND_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_set_held_item_serverbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetHeldItemServerbound(decoded)) => {
+                assert_eq!(decoded.slot, 5);
+            }
+            other => panic!("expected SetHeldItemServerbound, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_creative_mode_slot_roundtrip() -> Result<(), PlayError> {
+        // Build a Set Creative Mode Slot packet manually
+        let mut body = Vec::new();
+        crate::primitives::encode_i16(36, &mut body); // slot
+        crate::primitives::encode_bool(true, &mut body); // present
+        crate::primitives::encode_var_int(10, &mut body); // item_id
+        crate::primitives::encode_i8(64, &mut body); // count
+        body.push(0x00); // TAG_End (no NBT)
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            SET_CREATIVE_MODE_SLOT_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_set_creative_mode_slot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetCreativeModeSlot(decoded)) => {
+                assert_eq!(decoded.slot, 36);
+                assert!(decoded.item.present);
+                assert_eq!(decoded.item.item_id, 10);
+                assert_eq!(decoded.item.count, 64);
+            }
+            other => panic!("expected SetCreativeModeSlot, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_creative_mode_slot_drop_item() -> Result<(), PlayError> {
+        // Slot -1 means dropping the item
+        let mut body = Vec::new();
+        crate::primitives::encode_i16(-1, &mut body); // slot = -1 (drop)
+        crate::primitives::encode_bool(true, &mut body);
+        crate::primitives::encode_var_int(1, &mut body);
+        crate::primitives::encode_i8(1, &mut body);
+        body.push(0x00); // no NBT
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            SET_CREATIVE_MODE_SLOT_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_set_creative_mode_slot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetCreativeModeSlot(decoded)) => {
+                assert_eq!(decoded.slot, -1);
+                assert!(decoded.item.present);
+            }
+            other => panic!("expected SetCreativeModeSlot, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_creative_mode_slot_clear_slot() -> Result<(), PlayError> {
+        // Picking up an item from creative inventory sends present=false
+        let mut body = Vec::new();
+        crate::primitives::encode_i16(10, &mut body);
+        crate::primitives::encode_bool(false, &mut body); // empty slot
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            SET_CREATIVE_MODE_SLOT_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_set_creative_mode_slot(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetCreativeModeSlot(decoded)) => {
+                assert_eq!(decoded.slot, 10);
+                assert!(!decoded.item.present);
+            }
+            other => panic!("expected SetCreativeModeSlot, got {other:?}"),
         }
         Ok(())
     }
