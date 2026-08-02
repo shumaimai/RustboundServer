@@ -440,6 +440,8 @@ pub struct ChunkData {
     pub data: Vec<u8>,
     /// Block entity NBT blobs (opaque bytes, concatenated).
     pub block_entities: Vec<Vec<u8>>,
+    /// The light data blob (opaque bytes: masks + light arrays).
+    pub light_data: Vec<u8>,
 }
 
 /// Serverbound Confirm Teleportation packet (Play `0x00`).
@@ -2799,8 +2801,9 @@ pub fn encode_chunk_data(
         encode_byte_array(be, MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
     }
 
-    // Light data (opaque, empty for now)
-    encode_byte_array(&[], MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
+    // Light data (opaque blob containing masks + light arrays)
+    encode_byte_array(&packet.light_data, MAX_CHUNK_DATA_SIZE, &mut body)
+        .map_err(PlayError::from)?;
 
     encode_frame(CHUNK_DATA_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
     Ok(())
@@ -2871,8 +2874,8 @@ pub fn decode_chunk_data(
         block_entities.push(be.to_vec());
     }
 
-    // Light data (opaque, skip for now)
-    let _light = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+    // Light data (opaque blob containing masks + light arrays)
+    let light = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -2889,6 +2892,7 @@ pub fn decode_chunk_data(
             heightmaps: heightmaps.to_vec(),
             data: data.to_vec(),
             block_entities,
+            light_data: light.to_vec(),
         },
     )))
 }
@@ -3466,6 +3470,7 @@ mod tests {
             heightmaps: Vec::new(),
             data: Vec::new(),
             block_entities: Vec::new(),
+            light_data: Vec::new(),
         };
         let mut wire = Vec::new();
         encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
@@ -3489,6 +3494,7 @@ mod tests {
             heightmaps: vec![0x0a, 0x00, 0x00],
             data: vec![0x01, 0x02, 0x03, 0x04],
             block_entities: vec![vec![0x0a, 0x01], vec![0x0a, 0x02]],
+            light_data: Vec::new(),
         };
         let mut wire = Vec::new();
         encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
@@ -3532,6 +3538,7 @@ mod tests {
             heightmaps: vec![0x0a],
             data: vec![0x01],
             block_entities: Vec::new(),
+            light_data: Vec::new(),
         };
         let mut wire = Vec::new();
         encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;

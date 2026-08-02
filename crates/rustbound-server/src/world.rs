@@ -36,6 +36,8 @@ pub struct Chunk {
     pub data: Vec<u8>,
     /// Block entity NBT blobs.
     pub block_entities: Vec<Vec<u8>>,
+    /// The light data blob (masks + light arrays).
+    pub light_data: Vec<u8>,
 }
 
 impl Chunk {
@@ -47,19 +49,22 @@ impl Chunk {
             heightmaps: Vec::new(),
             data: Vec::new(),
             block_entities: Vec::new(),
+            light_data: Vec::new(),
         }
     }
 
     /// Creates a new generated chunk at the given position using the flat
     /// world generator.
     pub fn generate(pos: ChunkPos) -> Self {
-        let (heightmaps, data, block_entities) = crate::chunk::generate_chunk(pos.x, pos.z);
+        let (heightmaps, data, block_entities, light_data) =
+            crate::chunk::generate_chunk(pos.x, pos.z);
         Self {
             pos,
             generated: true,
             heightmaps,
             data,
             block_entities,
+            light_data,
         }
     }
 
@@ -71,6 +76,7 @@ impl Chunk {
             heightmaps: self.heightmaps.clone(),
             data: self.data.clone(),
             block_entities: self.block_entities.clone(),
+            light_data: self.light_data.clone(),
         }
     }
 }
