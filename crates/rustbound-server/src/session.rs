@@ -61,6 +61,13 @@ pub enum SessionEvent {
         /// The leaving player's UUID.
         uuid: Uuid,
     },
+    /// A block was changed; send Block Update.
+    BlockUpdate {
+        /// The block position.
+        position: (i32, i32, i32),
+        /// The new block state ID (0 = air).
+        block_state: i32,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -554,6 +561,13 @@ impl PlayerSession {
                     self.send_remove_entities(stream, entity_id)?;
                     processed = true;
                 }
+                SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                } => {
+                    self.send_block_update(stream, position, block_state)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -634,8 +648,58 @@ impl PlayerSession {
                 });
                 Ok(())
             }
+            PlayPacket::PlayerDigging(dig) => {
+                // Creative mode: instant break on StartDestroy
+                if matches!(
+                    dig.action,
+                    rustbound_protocol::play::PlayerDiggingAction::StartDestroy
+                ) {
+                    // Set block to air (state 0)
+                    let _ = self.tick_sender.send(TickMessage::SetBlock {
+                        position: dig.position,
+                        block_state: 0,
+                    });
+                }
+                // Survival: acknowledge and ignore (no physics yet)
+                Ok(())
+            }
+            PlayPacket::UseItemOn(place) => {
+                // Creative mode: place block (stone = state 1) on the face
+                let (x, y, z) = place.position;
+                let target = match place.face {
+                    0 => (x, y - 1, z), // bottom
+                    1 => (x, y + 1, z), // top
+                    2 => (x, y, z - 1), // north
+                    3 => (x, y, z + 1), // south
+                    4 => (x - 1, y, z), // west
+                    5 => (x + 1, y, z), // east
+                    _ => (x, y, z),
+                };
+                let _ = self.tick_sender.send(TickMessage::SetBlock {
+                    position: target,
+                    block_state: 1, // stone
+                });
+                Ok(())
+            }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
+    }
+
+    /// Sends a Block Update packet to the client.
+    pub fn send_block_update(
+        &self,
+        stream: &mut TcpStream,
+        position: (i32, i32, i32),
+        block_state: i32,
+    ) -> Result<(), SessionError> {
+        let packet = rustbound_protocol::play::BlockUpdate {
+            position,
+            block_state,
+        };
+        let mut wire = Vec::new();
+        rustbound_protocol::play::encode_block_update(&packet, self.max_frame_length, &mut wire)?;
+        stream.write_all(&wire)?;
+        Ok(())
     }
 
     /// Sends a Disconnect (Play) packet with a reason string.

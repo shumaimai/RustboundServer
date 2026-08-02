@@ -91,6 +91,9 @@ pub struct World {
     spawn_x: f64,
     spawn_y: f64,
     spawn_z: f64,
+    /// Block state overrides from dig/place, keyed by absolute position.
+    /// Block state 0 = air.
+    block_overrides: HashMap<(i32, i32, i32), i32>,
 }
 
 impl World {
@@ -103,6 +106,7 @@ impl World {
             spawn_x: 0.0,
             spawn_y: 64.0,
             spawn_z: 0.0,
+            block_overrides: HashMap::new(),
         }
     }
 
@@ -194,6 +198,29 @@ impl World {
     /// Gets a mutable player by entity ID.
     pub fn get_player_mut(&mut self, entity_id: i32) -> Option<&mut PlayerHandle> {
         self.players.get_mut(&entity_id)
+    }
+
+    /// Sets a block at the given absolute position to the given block state.
+    ///
+    /// This stores an override in the world's block override map. The chunk
+    /// data blob itself is not modified (it remains the generated snapshot).
+    /// Block state 0 = air.
+    pub fn set_block(&mut self, x: i32, y: i32, z: i32, block_state: i32) {
+        self.block_overrides.insert((x, y, z), block_state);
+    }
+
+    /// Gets the block state at the given absolute position.
+    ///
+    /// Returns the override if present, otherwise 0 (air) for unloaded
+    /// chunks. For loaded chunks without an override, returns 0 (air) as
+    /// well since the flat generator produces air above the surface.
+    pub fn get_block(&self, x: i32, y: i32, z: i32) -> i32 {
+        self.block_overrides.get(&(x, y, z)).copied().unwrap_or(0)
+    }
+
+    /// Returns the number of block overrides.
+    pub fn block_override_count(&self) -> usize {
+        self.block_overrides.len()
     }
 }
 
@@ -387,5 +414,20 @@ mod tests {
             }
             None => panic!("chunk should be loaded"),
         }
+    }
+
+    #[test]
+    fn set_and_get_block_override() {
+        let mut world = World::new();
+        // Default is air (0)
+        assert_eq!(world.get_block(10, 64, -20), 0);
+        // Set to stone (1)
+        world.set_block(10, 64, -20, 1);
+        assert_eq!(world.get_block(10, 64, -20), 1);
+        assert_eq!(world.block_override_count(), 1);
+        // Set to air (0) - still an override
+        world.set_block(10, 64, -20, 0);
+        assert_eq!(world.get_block(10, 64, -20), 0);
+        assert_eq!(world.block_override_count(), 1);
     }
 }

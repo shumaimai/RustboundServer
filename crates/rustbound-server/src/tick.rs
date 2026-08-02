@@ -62,6 +62,13 @@ pub enum TickMessage {
         /// Whether the player is on the ground.
         on_ground: bool,
     },
+    /// A block was changed by a player (dig/place).
+    SetBlock {
+        /// The block position.
+        position: (i32, i32, i32),
+        /// The new block state ID (0 = air).
+        block_state: i32,
+    },
 }
 
 /// A message sent from the tick loop to the server.
@@ -264,6 +271,19 @@ fn run_tick_loop(
                     if let Some(player) = world.get_player_mut(entity_id) {
                         player.set_position(x, y, z);
                         player.set_rotation(yaw, pitch);
+                    }
+                }
+                TickMessage::SetBlock {
+                    position,
+                    block_state,
+                } => {
+                    world.set_block(position.0, position.1, position.2, block_state);
+                    // Broadcast Block Update to all sessions
+                    for sender in session_senders.values() {
+                        let _ = sender.send(SessionEvent::BlockUpdate {
+                            position,
+                            block_state,
+                        });
                     }
                 }
             }

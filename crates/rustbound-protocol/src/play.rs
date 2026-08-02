@@ -96,6 +96,18 @@ pub const SET_SIMULATION_DISTANCE_PACKET_ID: i32 = 0x5C;
 /// Packet ID for the clientbound Update Recipes packet.
 pub const UPDATE_RECIPES_PACKET_ID: i32 = 0x6D;
 
+/// Packet ID for the serverbound Player Digging packet.
+pub const PLAYER_DIGGING_PACKET_ID: i32 = 0x1D;
+
+/// Packet ID for the serverbound Use Item On (Place Block) packet.
+pub const USE_ITEM_ON_PACKET_ID: i32 = 0x31;
+
+/// Packet ID for the clientbound Block Update packet.
+pub const BLOCK_UPDATE_PACKET_ID: i32 = 0x0A;
+
+/// Packet ID for the clientbound Acknowledge Block Change packet.
+pub const ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID: i32 = 0x06;
+
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
 
@@ -238,6 +250,14 @@ pub enum PlayPacket {
     SpawnPlayer(SpawnPlayer),
     /// Clientbound Remove Entities (Play `0x3E`).
     RemoveEntities(RemoveEntities),
+    /// Serverbound Player Digging (Play `0x1D`).
+    PlayerDigging(PlayerDigging),
+    /// Serverbound Use Item On (Play `0x31`).
+    UseItemOn(UseItemOn),
+    /// Clientbound Block Update (Play `0x0A`).
+    BlockUpdate(BlockUpdate),
+    /// Clientbound Acknowledge Block Change (Play `0x06`).
+    AcknowledgeBlockChange(AcknowledgeBlockChange),
 }
 
 /// The player's gamemode.
@@ -2352,6 +2372,386 @@ pub fn encode_remove_entities(
 }
 
 // ---------------------------------------------------------------------------
+// Block interaction packets (protocol 763)
+// ---------------------------------------------------------------------------
+
+/// Player digging action type (serverbound Play `0x1D`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerDiggingAction {
+    /// Start destroying block.
+    StartDestroy = 0,
+    /// Abort destroying block.
+    AbortDestroy = 1,
+    /// Stop destroying block.
+    StopDestroy = 2,
+    /// Drop all items (ctrl+drop).
+    DropAllItems = 3,
+    /// Drop item (q).
+    DropItem = 4,
+    /// Shoot arrow / finish eating.
+    ShootArrowOrFinishEating = 5,
+    /// Swap item in hand.
+    SwapItemInHand = 6,
+}
+
+impl PlayerDiggingAction {
+    /// Converts from wire value.
+    pub fn from_wire(value: i32) -> Option<Self> {
+        match value {
+            0 => Some(Self::StartDestroy),
+            1 => Some(Self::AbortDestroy),
+            2 => Some(Self::StopDestroy),
+            3 => Some(Self::DropAllItems),
+            4 => Some(Self::DropItem),
+            5 => Some(Self::ShootArrowOrFinishEating),
+            6 => Some(Self::SwapItemInHand),
+            _ => None,
+        }
+    }
+}
+
+/// Serverbound Player Digging packet (Play `0x1D`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerDigging {
+    /// The digging action.
+    pub action: PlayerDiggingAction,
+    /// The block position.
+    pub position: (i32, i32, i32),
+    /// The face being dug (0-5).
+    pub face: u8,
+}
+
+/// Serverbound Use Item On (Place Block) packet (Play `0x31`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UseItemOn {
+    /// The block position being targeted.
+    pub position: (i32, i32, i32),
+    /// The face being targeted (0-5).
+    pub face: u8,
+    /// The hand used (0=main, 1=off).
+    pub hand: i32,
+    /// The cursor X position (0-1024, where 0 is 0 and 1024 is 1.0).
+    pub cursor_x: f32,
+    /// The cursor Y position.
+    pub cursor_y: f32,
+    /// The cursor Z position.
+    pub cursor_z: f32,
+    /// Whether the player's head is inside a block.
+    pub inside_block: bool,
+}
+
+/// Clientbound Block Update packet (Play `0x0A`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockUpdate {
+    /// The block position.
+    pub position: (i32, i32, i32),
+    /// The block state ID.
+    pub block_state: i32,
+}
+
+/// Clientbound Acknowledge Block Change packet (Play `0x06`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcknowledgeBlockChange {
+    /// The block position.
+    pub position: (i32, i32, i32),
+}
+
+/// Encodes a Player Digging packet (serverbound Play `0x1D`).
+pub fn encode_player_digging(
+    packet: &PlayerDigging,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.action as i32, &mut body);
+    encode_position(
+        packet.position.0,
+        packet.position.1,
+        packet.position.2,
+        &mut body,
+    );
+    encode_u8(packet.face, &mut body);
+    encode_frame(PLAYER_DIGGING_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Player Digging packet (serverbound Play `0x1D`).
+pub fn decode_player_digging(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != PLAYER_DIGGING_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: PLAYER_DIGGING_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let action_raw = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let action = PlayerDiggingAction::from_wire(action_raw).ok_or_else(|| {
+        *input = source;
+        PlayError::Codec(CodecError::InvalidBoolean)
+    })?;
+    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let face = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::PlayerDigging(
+        PlayerDigging {
+            action,
+            position: (x, y, z),
+            face,
+        },
+    )))
+}
+
+/// Encodes a Use Item On packet (serverbound Play `0x31`).
+pub fn encode_use_item_on(
+    packet: &UseItemOn,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_position(
+        packet.position.0,
+        packet.position.1,
+        packet.position.2,
+        &mut body,
+    );
+    encode_u8(packet.face, &mut body);
+    encode_var_int(packet.hand, &mut body);
+    encode_f32(packet.cursor_x, &mut body);
+    encode_f32(packet.cursor_y, &mut body);
+    encode_f32(packet.cursor_z, &mut body);
+    encode_bool(packet.inside_block, &mut body);
+    encode_frame(USE_ITEM_ON_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Use Item On packet (serverbound Play `0x31`).
+pub fn decode_use_item_on(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != USE_ITEM_ON_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: USE_ITEM_ON_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let face = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let hand = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let cursor_x = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let cursor_y = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let cursor_z = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let inside_block = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::UseItemOn(
+        UseItemOn {
+            position: (x, y, z),
+            face,
+            hand,
+            cursor_x,
+            cursor_y,
+            cursor_z,
+            inside_block,
+        },
+    )))
+}
+
+/// Encodes a Block Update packet (clientbound Play `0x0A`).
+pub fn encode_block_update(
+    packet: &BlockUpdate,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_position(
+        packet.position.0,
+        packet.position.1,
+        packet.position.2,
+        &mut body,
+    );
+    encode_var_int(packet.block_state, &mut body);
+    encode_frame(BLOCK_UPDATE_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Block Update packet (clientbound Play `0x0A`).
+pub fn decode_block_update(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != BLOCK_UPDATE_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: BLOCK_UPDATE_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let block_state = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::BlockUpdate(
+        BlockUpdate {
+            position: (x, y, z),
+            block_state,
+        },
+    )))
+}
+
+/// Encodes an Acknowledge Block Change packet (clientbound Play `0x06`).
+pub fn encode_acknowledge_block_change(
+    packet: &AcknowledgeBlockChange,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_position(
+        packet.position.0,
+        packet.position.1,
+        packet.position.2,
+        &mut body,
+    );
+    encode_frame(
+        ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Acknowledge Block Change packet (clientbound Play `0x06`).
+pub fn decode_acknowledge_block_change(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::AcknowledgeBlockChange(AcknowledgeBlockChange {
+            position: (x, y, z),
+        }),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Chunk Data and Update Light (clientbound Play 0x24)
 // ---------------------------------------------------------------------------
 
@@ -2483,29 +2883,34 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeDifficulty, ChatMode, ChunkData, ClientInformation, ConfirmTeleportation,
-        DisconnectPlay, EntityEvent, GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
-        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand, PlayDecodeOutcome, PlayError,
-        PlayPacket, PlayerAbilities, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
+        AcknowledgeBlockChange, BlockUpdate, ChangeDifficulty, ChatMode, ChunkData,
+        ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent, GameEvent, GameMode,
+        JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand,
+        PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities, PlayerDigging,
+        PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
         PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, SetCenterChunk,
         SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
         SetPlayerRotation, SetRenderDistance, SetSimulationDistance, SpawnPlayer,
-        SynchronizePlayerPosition, decode_change_difficulty, decode_chunk_data,
-        decode_client_information, decode_confirm_teleportation, decode_disconnect_play,
-        decode_entity_event, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
-        decode_keep_alive_serverbound, decode_player_abilities, decode_plugin_message_clientbound,
-        decode_set_center_chunk, decode_set_default_spawn_position, decode_set_held_item,
-        decode_set_player_position, decode_set_player_position_and_rotation,
-        decode_set_player_rotation, decode_set_render_distance, decode_set_simulation_distance,
-        decode_synchronize_player_position, encode_change_difficulty, encode_chunk_data,
+        SynchronizePlayerPosition, UseItemOn, decode_acknowledge_block_change, decode_block_update,
+        decode_change_difficulty, decode_chunk_data, decode_client_information,
+        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
+        decode_game_event, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, decode_player_abilities, decode_player_digging,
+        decode_plugin_message_clientbound, decode_set_center_chunk,
+        decode_set_default_spawn_position, decode_set_held_item, decode_set_player_position,
+        decode_set_player_position_and_rotation, decode_set_player_rotation,
+        decode_set_render_distance, decode_set_simulation_distance,
+        decode_synchronize_player_position, decode_use_item_on, encode_acknowledge_block_change,
+        encode_block_update, encode_change_difficulty, encode_chunk_data,
         encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
         encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
-        encode_keep_alive_serverbound, encode_player_abilities, encode_player_info_remove,
-        encode_player_info_update, encode_plugin_message_clientbound, encode_remove_entities,
-        encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
-        encode_set_player_position, encode_set_player_position_and_rotation,
+        encode_keep_alive_serverbound, encode_player_abilities, encode_player_digging,
+        encode_player_info_remove, encode_player_info_update, encode_plugin_message_clientbound,
+        encode_remove_entities, encode_set_center_chunk, encode_set_default_spawn_position,
+        encode_set_held_item, encode_set_player_position, encode_set_player_position_and_rotation,
         encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
-        encode_spawn_player, encode_synchronize_player_position, ensure_play_state,
+        encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
+        ensure_play_state,
     };
     use crate::state::ProtocolState;
 
@@ -3603,5 +4008,108 @@ mod tests {
         assert!(actions.has(PlayerInfoActions::ADD_PLAYER));
         assert!(actions.has(PlayerInfoActions::UPDATE_LATENCY));
         assert!(!actions.has(PlayerInfoActions::UPDATE_GAMEMODE));
+    }
+
+    // --- Block interaction packets ---
+
+    #[test]
+    fn player_digging_roundtrip() -> Result<(), PlayError> {
+        let packet = PlayerDigging {
+            action: PlayerDiggingAction::StartDestroy,
+            position: (10, 64, -20),
+            face: 1,
+        };
+        let mut wire = Vec::new();
+        encode_player_digging(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_player_digging(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::PlayerDigging(decoded)) => {
+                assert_eq!(decoded.action, PlayerDiggingAction::StartDestroy);
+                assert_eq!(decoded.position, (10, 64, -20));
+                assert_eq!(decoded.face, 1);
+            }
+            other => panic!("expected PlayerDigging, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn use_item_on_roundtrip() -> Result<(), PlayError> {
+        let packet = UseItemOn {
+            position: (0, 64, 0),
+            face: 2,
+            hand: 0,
+            cursor_x: 0.5,
+            cursor_y: 0.5,
+            cursor_z: 0.5,
+            inside_block: false,
+        };
+        let mut wire = Vec::new();
+        encode_use_item_on(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_use_item_on(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::UseItemOn(decoded)) => {
+                assert_eq!(decoded.position, (0, 64, 0));
+                assert_eq!(decoded.face, 2);
+                assert_eq!(decoded.hand, 0);
+                assert_eq!(decoded.cursor_x, 0.5);
+                assert!(!decoded.inside_block);
+            }
+            other => panic!("expected UseItemOn, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn block_update_roundtrip() -> Result<(), PlayError> {
+        let packet = BlockUpdate {
+            position: (10, 64, -20),
+            block_state: 1, // stone
+        };
+        let mut wire = Vec::new();
+        encode_block_update(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_block_update(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::BlockUpdate(decoded)) => {
+                assert_eq!(decoded.position, (10, 64, -20));
+                assert_eq!(decoded.block_state, 1);
+            }
+            other => panic!("expected BlockUpdate, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn acknowledge_block_change_roundtrip() -> Result<(), PlayError> {
+        let packet = AcknowledgeBlockChange {
+            position: (10, 64, -20),
+        };
+        let mut wire = Vec::new();
+        encode_acknowledge_block_change(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_acknowledge_block_change(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::AcknowledgeBlockChange(decoded)) => {
+                assert_eq!(decoded.position, (10, 64, -20));
+            }
+            other => panic!("expected AcknowledgeBlockChange, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn player_digging_action_from_wire() {
+        assert_eq!(
+            PlayerDiggingAction::from_wire(0),
+            Some(PlayerDiggingAction::StartDestroy)
+        );
+        assert_eq!(
+            PlayerDiggingAction::from_wire(3),
+            Some(PlayerDiggingAction::DropAllItems)
+        );
+        assert_eq!(PlayerDiggingAction::from_wire(99), None);
     }
 }
