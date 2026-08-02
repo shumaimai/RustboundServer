@@ -8,9 +8,10 @@ use std::fmt;
 
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
-    CodecError, MAX_CHAT_COMPONENT_LENGTH, decode_bool, decode_byte_array, decode_i8, decode_i32,
-    decode_i64, decode_string, decode_u8, decode_var_int, encode_bool, encode_byte_array,
-    encode_i8, encode_i32, encode_i64, encode_string, encode_u8, encode_var_int,
+    CodecError, MAX_CHAT_COMPONENT_LENGTH, decode_bool, decode_byte_array, decode_f32, decode_i8,
+    decode_i32, decode_i64, decode_position, decode_string, decode_u8, decode_var_int, encode_bool,
+    encode_byte_array, encode_f32, encode_i8, encode_i32, encode_i64, encode_position,
+    encode_string, encode_u8, encode_var_int,
 };
 use crate::state::ProtocolState;
 
@@ -46,6 +47,45 @@ pub const CONFIRM_TELEPORTATION_PACKET_ID: i32 = 0x00;
 
 /// Packet ID for the serverbound Client Information packet.
 pub const CLIENT_INFORMATION_PACKET_ID: i32 = 0x08;
+
+/// Packet ID for the clientbound Plugin Message (Play) packet.
+pub const PLUGIN_MESSAGE_CLIENTBOUND_PACKET_ID: i32 = 0x17;
+
+/// Packet ID for the clientbound Change Difficulty packet.
+pub const CHANGE_DIFFICULTY_PACKET_ID: i32 = 0x0C;
+
+/// Packet ID for the clientbound Player Abilities packet.
+pub const PLAYER_ABILITIES_PACKET_ID: i32 = 0x34;
+
+/// Packet ID for the clientbound Set Held Item packet.
+pub const SET_HELD_ITEM_PACKET_ID: i32 = 0x4D;
+
+/// Packet ID for the clientbound Entity Event (Entity Status) packet.
+pub const ENTITY_EVENT_PACKET_ID: i32 = 0x1C;
+
+/// Packet ID for the clientbound Declare Commands packet.
+pub const DECLARE_COMMANDS_PACKET_ID: i32 = 0x10;
+
+/// Packet ID for the clientbound Player Info Update packet.
+pub const PLAYER_INFO_UPDATE_PACKET_ID: i32 = 0x3A;
+
+/// Packet ID for the clientbound Set Default Spawn Position packet.
+pub const SET_DEFAULT_SPAWN_POSITION_PACKET_ID: i32 = 0x50;
+
+/// Packet ID for the clientbound Game Event packet.
+pub const GAME_EVENT_PACKET_ID: i32 = 0x1F;
+
+/// Packet ID for the clientbound Set Center Chunk packet.
+pub const SET_CENTER_CHUNK_PACKET_ID: i32 = 0x4E;
+
+/// Packet ID for the clientbound Set Render Distance packet.
+pub const SET_RENDER_DISTANCE_PACKET_ID: i32 = 0x4F;
+
+/// Packet ID for the clientbound Set Simulation Distance packet.
+pub const SET_SIMULATION_DISTANCE_PACKET_ID: i32 = 0x5C;
+
+/// Packet ID for the clientbound Update Recipes packet.
+pub const UPDATE_RECIPES_PACKET_ID: i32 = 0x6D;
 
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
@@ -161,6 +201,26 @@ pub enum PlayPacket {
     ConfirmTeleportation(ConfirmTeleportation),
     /// Serverbound Client Information (Play `0x08`).
     ClientInformation(ClientInformation),
+    /// Clientbound Plugin Message (Play `0x17`).
+    PluginMessageClientbound(PluginMessageClientbound),
+    /// Clientbound Change Difficulty (Play `0x0C`).
+    ChangeDifficulty(ChangeDifficulty),
+    /// Clientbound Player Abilities (Play `0x34`).
+    PlayerAbilities(PlayerAbilities),
+    /// Clientbound Set Held Item (Play `0x4D`).
+    SetHeldItem(SetHeldItem),
+    /// Clientbound Entity Event (Play `0x1C`).
+    EntityEvent(EntityEvent),
+    /// Clientbound Game Event (Play `0x1F`).
+    GameEvent(GameEvent),
+    /// Clientbound Set Default Spawn Position (Play `0x50`).
+    SetDefaultSpawnPosition(SetDefaultSpawnPosition),
+    /// Clientbound Set Center Chunk (Play `0x4E`).
+    SetCenterChunk(SetCenterChunk),
+    /// Clientbound Set Render Distance (Play `0x4F`).
+    SetRenderDistance(SetRenderDistance),
+    /// Clientbound Set Simulation Distance (Play `0x5C`).
+    SetSimulationDistance(SetSimulationDistance),
 }
 
 /// The player's gamemode.
@@ -860,8 +920,8 @@ pub fn encode_set_player_position_and_rotation(
     crate::primitives::encode_f64(packet.x, &mut body);
     crate::primitives::encode_f64(packet.y, &mut body);
     crate::primitives::encode_f64(packet.z, &mut body);
-    crate::primitives::encode_f32(packet.yaw, &mut body);
-    crate::primitives::encode_f32(packet.pitch, &mut body);
+    encode_f32(packet.yaw, &mut body);
+    encode_f32(packet.pitch, &mut body);
     encode_bool(packet.on_ground, &mut body);
     encode_frame(
         SET_PLAYER_POSITION_AND_ROTATION_PACKET_ID,
@@ -912,11 +972,11 @@ pub fn decode_set_player_position_and_rotation(
         *input = source;
         PlayError::from(e)
     })?;
-    let yaw = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let yaw = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let pitch = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let pitch = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -953,8 +1013,8 @@ pub fn encode_set_player_rotation(
     output: &mut Vec<u8>,
 ) -> Result<(), PlayError> {
     let mut body = Vec::new();
-    crate::primitives::encode_f32(packet.yaw, &mut body);
-    crate::primitives::encode_f32(packet.pitch, &mut body);
+    encode_f32(packet.yaw, &mut body);
+    encode_f32(packet.pitch, &mut body);
     encode_bool(packet.on_ground, &mut body);
     encode_frame(
         SET_PLAYER_ROTATION_PACKET_ID,
@@ -993,11 +1053,11 @@ pub fn decode_set_player_rotation(
     }
 
     let mut body = frame.payload;
-    let yaw = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let yaw = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let pitch = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let pitch = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -1034,8 +1094,8 @@ pub fn encode_synchronize_player_position(
     crate::primitives::encode_f64(packet.x, &mut body);
     crate::primitives::encode_f64(packet.y, &mut body);
     crate::primitives::encode_f64(packet.z, &mut body);
-    crate::primitives::encode_f32(packet.yaw, &mut body);
-    crate::primitives::encode_f32(packet.pitch, &mut body);
+    encode_f32(packet.yaw, &mut body);
+    encode_f32(packet.pitch, &mut body);
     encode_i8(packet.flags, &mut body);
     encode_var_int(packet.teleport_id, &mut body);
     encode_frame(
@@ -1087,11 +1147,11 @@ pub fn decode_synchronize_player_position(
         *input = source;
         PlayError::from(e)
     })?;
-    let yaw = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let yaw = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
-    let pitch = crate::primitives::decode_f32(&mut body).map_err(|e| {
+    let pitch = decode_f32(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
@@ -1364,6 +1424,682 @@ pub fn decode_client_information(
 }
 
 // ---------------------------------------------------------------------------
+// Join sequence packets (clientbound Play, protocol 763)
+// ---------------------------------------------------------------------------
+
+/// Clientbound Plugin Message (Play `0x17`).
+///
+/// Carries custom payload data on a registered or brand channel.
+/// The brand channel `minecraft:brand` carries the server brand string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMessageClientbound {
+    /// The channel identifier (e.g. `minecraft:brand`).
+    pub channel: String,
+    /// The payload data.
+    pub data: Vec<u8>,
+}
+
+/// Clientbound Change Difficulty packet (Play `0x0C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeDifficulty {
+    /// The difficulty (0=Peaceful, 1=Easy, 2=Normal, 3=Hard).
+    pub difficulty: u8,
+    /// Whether the difficulty is locked.
+    pub locked: bool,
+}
+
+/// Clientbound Player Abilities packet (Play `0x34`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerAbilities {
+    /// Flags bitmask: bit 0 = invulnerable, bit 1 = flying,
+    /// bit 2 = allow flying, bit 3 = creative mode.
+    pub flags: u8,
+    /// Flying speed (0.0 E.0, typically 0.05).
+    pub flying_speed: f32,
+    /// Field of view modifier (0.0 E.0, typically 0.1).
+    pub fov_modifier: f32,
+}
+
+/// Clientbound Set Held Item packet (Play `0x4D`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetHeldItem {
+    /// The hotbar slot (0 E).
+    pub slot: u8,
+}
+
+/// Clientbound Entity Event (Entity Status) packet (Play `0x1C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityEvent {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// The entity status byte.
+    pub entity_status: u8,
+}
+
+/// Clientbound Game Event packet (Play `0x1F`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GameEvent {
+    /// The event type (e.g. 13 = Start Waiting for Level Chunks).
+    pub event_type: u8,
+    /// The event value (float, interpretation depends on event type).
+    pub value: f32,
+}
+
+/// Clientbound Set Default Spawn Position packet (Play `0x50`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetDefaultSpawnPosition {
+    /// The spawn position.
+    pub location: (i32, i32, i32),
+    /// The spawn angle (in degrees).
+    pub angle: f32,
+}
+
+/// Clientbound Set Center Chunk packet (Play `0x4E`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetCenterChunk {
+    /// The chunk X coordinate.
+    pub chunk_x: i32,
+    /// The chunk Z coordinate.
+    pub chunk_z: i32,
+}
+
+/// Clientbound Set Render Distance packet (Play `0x4F`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetRenderDistance {
+    /// The view distance (in chunks).
+    pub view_distance: i32,
+}
+
+/// Clientbound Set Simulation Distance packet (Play `0x5C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetSimulationDistance {
+    /// The simulation distance (in chunks).
+    pub simulation_distance: i32,
+}
+
+/// Encodes a Plugin Message (clientbound Play `0x17`).
+pub fn encode_plugin_message_clientbound(
+    packet: &PluginMessageClientbound,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_string(&packet.channel, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+        .map_err(PlayError::from)?;
+    body.extend_from_slice(&packet.data);
+    encode_frame(
+        PLUGIN_MESSAGE_CLIENTBOUND_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Plugin Message (clientbound Play `0x17`).
+pub fn decode_plugin_message_clientbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != PLUGIN_MESSAGE_CLIENTBOUND_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: PLUGIN_MESSAGE_CLIENTBOUND_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let channel = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::PluginMessageClientbound(PluginMessageClientbound {
+            channel: channel.to_string(),
+            data: body.to_vec(),
+        }),
+    ))
+}
+
+/// Encodes a Change Difficulty packet (clientbound Play `0x0C`).
+pub fn encode_change_difficulty(
+    packet: &ChangeDifficulty,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.difficulty, &mut body);
+    encode_bool(packet.locked, &mut body);
+    encode_frame(CHANGE_DIFFICULTY_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Change Difficulty packet (clientbound Play `0x0C`).
+pub fn decode_change_difficulty(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != CHANGE_DIFFICULTY_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CHANGE_DIFFICULTY_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let difficulty = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let locked = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::ChangeDifficulty(
+        ChangeDifficulty { difficulty, locked },
+    )))
+}
+
+/// Encodes a Player Abilities packet (clientbound Play `0x34`).
+pub fn encode_player_abilities(
+    packet: &PlayerAbilities,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.flags, &mut body);
+    encode_f32(packet.flying_speed, &mut body);
+    encode_f32(packet.fov_modifier, &mut body);
+    encode_frame(PLAYER_ABILITIES_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Player Abilities packet (clientbound Play `0x34`).
+pub fn decode_player_abilities(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != PLAYER_ABILITIES_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: PLAYER_ABILITIES_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let flags = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let flying_speed = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let fov_modifier = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::PlayerAbilities(
+        PlayerAbilities {
+            flags,
+            flying_speed,
+            fov_modifier,
+        },
+    )))
+}
+
+/// Encodes a Set Held Item packet (clientbound Play `0x4D`).
+pub fn encode_set_held_item(
+    packet: &SetHeldItem,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.slot, &mut body);
+    encode_frame(SET_HELD_ITEM_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Held Item packet (clientbound Play `0x4D`).
+pub fn decode_set_held_item(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_HELD_ITEM_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_HELD_ITEM_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let slot = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::SetHeldItem(
+        SetHeldItem { slot },
+    )))
+}
+
+/// Encodes an Entity Event packet (clientbound Play `0x1C`).
+pub fn encode_entity_event(
+    packet: &EntityEvent,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_i32(packet.entity_id, &mut body);
+    encode_u8(packet.entity_status, &mut body);
+    encode_frame(ENTITY_EVENT_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Entity Event packet (clientbound Play `0x1C`).
+pub fn decode_entity_event(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != ENTITY_EVENT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: ENTITY_EVENT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_i32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let entity_status = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::EntityEvent(
+        EntityEvent {
+            entity_id,
+            entity_status,
+        },
+    )))
+}
+
+/// Encodes a Game Event packet (clientbound Play `0x1F`).
+pub fn encode_game_event(
+    packet: &GameEvent,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.event_type, &mut body);
+    encode_f32(packet.value, &mut body);
+    encode_frame(GAME_EVENT_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Game Event packet (clientbound Play `0x1F`).
+pub fn decode_game_event(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != GAME_EVENT_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: GAME_EVENT_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let event_type = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let value = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::GameEvent(
+        GameEvent { event_type, value },
+    )))
+}
+
+/// Encodes a Set Default Spawn Position packet (clientbound Play `0x50`).
+pub fn encode_set_default_spawn_position(
+    packet: &SetDefaultSpawnPosition,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_position(
+        packet.location.0,
+        packet.location.1,
+        packet.location.2,
+        &mut body,
+    );
+    encode_f32(packet.angle, &mut body);
+    encode_frame(
+        SET_DEFAULT_SPAWN_POSITION_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Default Spawn Position packet (clientbound Play `0x50`).
+pub fn decode_set_default_spawn_position(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_DEFAULT_SPAWN_POSITION_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_DEFAULT_SPAWN_POSITION_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let (x, y, z) = decode_position(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let angle = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetDefaultSpawnPosition(SetDefaultSpawnPosition {
+            location: (x, y, z),
+            angle,
+        }),
+    ))
+}
+
+/// Encodes a Set Center Chunk packet (clientbound Play `0x4E`).
+pub fn encode_set_center_chunk(
+    packet: &SetCenterChunk,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.chunk_x, &mut body);
+    encode_var_int(packet.chunk_z, &mut body);
+    encode_frame(SET_CENTER_CHUNK_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Center Chunk packet (clientbound Play `0x4E`).
+pub fn decode_set_center_chunk(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_CENTER_CHUNK_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_CENTER_CHUNK_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let chunk_x = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let chunk_z = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::SetCenterChunk(
+        SetCenterChunk { chunk_x, chunk_z },
+    )))
+}
+
+/// Encodes a Set Render Distance packet (clientbound Play `0x4F`).
+pub fn encode_set_render_distance(
+    packet: &SetRenderDistance,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.view_distance, &mut body);
+    encode_frame(
+        SET_RENDER_DISTANCE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Render Distance packet (clientbound Play `0x4F`).
+pub fn decode_set_render_distance(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_RENDER_DISTANCE_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_RENDER_DISTANCE_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let view_distance = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::SetRenderDistance(
+        SetRenderDistance { view_distance },
+    )))
+}
+
+/// Encodes a Set Simulation Distance packet (clientbound Play `0x5C`).
+pub fn encode_set_simulation_distance(
+    packet: &SetSimulationDistance,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.simulation_distance, &mut body);
+    encode_frame(
+        SET_SIMULATION_DISTANCE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Simulation Distance packet (clientbound Play `0x5C`).
+pub fn decode_set_simulation_distance(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_SIMULATION_DISTANCE_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_SIMULATION_DISTANCE_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let simulation_distance = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::SetSimulationDistance(SetSimulationDistance {
+            simulation_distance,
+        }),
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Chunk Data and Update Light (clientbound Play 0x24)
 // ---------------------------------------------------------------------------
 
@@ -1495,17 +2231,26 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMode, ChunkData, ClientInformation, ConfirmTeleportation, DisconnectPlay, GameMode,
-        JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand,
-        PlayDecodeOutcome, PlayError, PlayPacket, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SynchronizePlayerPosition, decode_chunk_data, decode_client_information,
-        decode_confirm_teleportation, decode_disconnect_play, decode_join_game,
-        decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_set_player_position,
-        decode_set_player_position_and_rotation, decode_set_player_rotation,
-        decode_synchronize_player_position, encode_chunk_data, encode_client_information,
-        encode_confirm_teleportation, encode_disconnect_play, encode_join_game,
-        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_set_player_position,
-        encode_set_player_position_and_rotation, encode_set_player_rotation,
+        ChangeDifficulty, ChatMode, ChunkData, ClientInformation, ConfirmTeleportation,
+        DisconnectPlay, EntityEvent, GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand, PlayDecodeOutcome, PlayError,
+        PlayPacket, PlayerAbilities, PluginMessageClientbound, SetCenterChunk,
+        SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
+        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
+        decode_change_difficulty, decode_chunk_data, decode_client_information,
+        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
+        decode_game_event, decode_join_game, decode_keep_alive_clientbound,
+        decode_keep_alive_serverbound, decode_player_abilities, decode_plugin_message_clientbound,
+        decode_set_center_chunk, decode_set_default_spawn_position, decode_set_held_item,
+        decode_set_player_position, decode_set_player_position_and_rotation,
+        decode_set_player_rotation, decode_set_render_distance, decode_set_simulation_distance,
+        decode_synchronize_player_position, encode_change_difficulty, encode_chunk_data,
+        encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
+        encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
+        encode_keep_alive_serverbound, encode_player_abilities, encode_plugin_message_clientbound,
+        encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
+        encode_set_player_position, encode_set_player_position_and_rotation,
+        encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
         encode_synchronize_player_position, ensure_play_state,
     };
     use crate::state::ProtocolState;
@@ -2338,6 +3083,200 @@ mod tests {
         let mut input = wire.as_slice();
         let result = decode_client_information(&mut input, TEST_MAX_FRAME);
         assert!(matches!(result, Err(PlayError::WrongPacketId { .. })));
+        Ok(())
+    }
+
+    // --- Join sequence packets ---
+
+    #[test]
+    fn plugin_message_brand_roundtrip() -> Result<(), PlayError> {
+        let packet = PluginMessageClientbound {
+            channel: "minecraft:brand".to_string(),
+            data: b"rustbound".to_vec(),
+        };
+        let mut wire = Vec::new();
+        encode_plugin_message_clientbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_plugin_message_clientbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::PluginMessageClientbound(pm)) => {
+                assert_eq!(pm.channel, "minecraft:brand");
+                assert_eq!(pm.data, b"rustbound");
+            }
+            other => panic!("expected PluginMessageClientbound, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn change_difficulty_roundtrip() -> Result<(), PlayError> {
+        let packet = ChangeDifficulty {
+            difficulty: 2,
+            locked: true,
+        };
+        let mut wire = Vec::new();
+        encode_change_difficulty(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_change_difficulty(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ChangeDifficulty(cd)) => {
+                assert_eq!(cd.difficulty, 2);
+                assert!(cd.locked);
+            }
+            other => panic!("expected ChangeDifficulty, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn player_abilities_roundtrip() -> Result<(), PlayError> {
+        let packet = PlayerAbilities {
+            flags: 0x05,
+            flying_speed: 0.05,
+            fov_modifier: 0.1,
+        };
+        let mut wire = Vec::new();
+        encode_player_abilities(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_player_abilities(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::PlayerAbilities(pa)) => {
+                assert_eq!(pa.flags, 0x05);
+                assert_eq!(pa.flying_speed, 0.05);
+                assert_eq!(pa.fov_modifier, 0.1);
+            }
+            other => panic!("expected PlayerAbilities, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_held_item_roundtrip() -> Result<(), PlayError> {
+        let packet = SetHeldItem { slot: 4 };
+        let mut wire = Vec::new();
+        encode_set_held_item(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_held_item(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetHeldItem(si)) => {
+                assert_eq!(si.slot, 4);
+            }
+            other => panic!("expected SetHeldItem, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn entity_event_roundtrip() -> Result<(), PlayError> {
+        let packet = EntityEvent {
+            entity_id: 42,
+            entity_status: 28,
+        };
+        let mut wire = Vec::new();
+        encode_entity_event(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_entity_event(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::EntityEvent(ee)) => {
+                assert_eq!(ee.entity_id, 42);
+                assert_eq!(ee.entity_status, 28);
+            }
+            other => panic!("expected EntityEvent, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn game_event_roundtrip() -> Result<(), PlayError> {
+        let packet = GameEvent {
+            event_type: 13, // Start waiting for level chunks
+            value: 0.0,
+        };
+        let mut wire = Vec::new();
+        encode_game_event(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_game_event(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::GameEvent(ge)) => {
+                assert_eq!(ge.event_type, 13);
+                assert_eq!(ge.value, 0.0);
+            }
+            other => panic!("expected GameEvent, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_default_spawn_position_roundtrip() -> Result<(), PlayError> {
+        let packet = SetDefaultSpawnPosition {
+            location: (0, 64, 0),
+            angle: 0.0,
+        };
+        let mut wire = Vec::new();
+        encode_set_default_spawn_position(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_default_spawn_position(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetDefaultSpawnPosition(sp)) => {
+                assert_eq!(sp.location, (0, 64, 0));
+                assert_eq!(sp.angle, 0.0);
+            }
+            other => panic!("expected SetDefaultSpawnPosition, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_center_chunk_roundtrip() -> Result<(), PlayError> {
+        let packet = SetCenterChunk {
+            chunk_x: 10,
+            chunk_z: -5,
+        };
+        let mut wire = Vec::new();
+        encode_set_center_chunk(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_center_chunk(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetCenterChunk(sc)) => {
+                assert_eq!(sc.chunk_x, 10);
+                assert_eq!(sc.chunk_z, -5);
+            }
+            other => panic!("expected SetCenterChunk, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_render_distance_roundtrip() -> Result<(), PlayError> {
+        let packet = SetRenderDistance { view_distance: 10 };
+        let mut wire = Vec::new();
+        encode_set_render_distance(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_render_distance(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetRenderDistance(rd)) => {
+                assert_eq!(rd.view_distance, 10);
+            }
+            other => panic!("expected SetRenderDistance, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_simulation_distance_roundtrip() -> Result<(), PlayError> {
+        let packet = SetSimulationDistance {
+            simulation_distance: 8,
+        };
+        let mut wire = Vec::new();
+        encode_set_simulation_distance(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_simulation_distance(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetSimulationDistance(sd)) => {
+                assert_eq!(sd.simulation_distance, 8);
+            }
+            other => panic!("expected SetSimulationDistance, got {other:?}"),
+        }
+        assert!(input.is_empty());
         Ok(())
     }
 }

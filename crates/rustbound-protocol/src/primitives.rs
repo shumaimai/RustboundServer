@@ -212,6 +212,28 @@ pub fn decode_f32(input: &mut &[u8]) -> Result<f32, CodecError> {
     Ok(value)
 }
 
+/// Encodes a block position as a 64-bit packed integer.
+///
+/// Format: `(x & 0x3FFFFFF) << 38 | (z & 0x3FFFFFF) << 12 | (y & 0xFFF)`
+pub fn encode_position(x: i32, y: i32, z: i32, output: &mut Vec<u8>) {
+    let x = (x as i64) & 0x3FFFFFF;
+    let y = (y as i64) & 0xFFF;
+    let z = (z as i64) & 0x3FFFFFF;
+    let value = (x << 38) | (z << 12) | y;
+    encode_i64(value, output);
+}
+
+/// Decodes a block position from a 64-bit packed integer.
+///
+/// Returns `(x, y, z)` as signed 32-bit integers.
+pub fn decode_position(input: &mut &[u8]) -> Result<(i32, i32, i32), CodecError> {
+    let value = decode_i64(input)?;
+    let x = (value >> 38) as i32;
+    let y = ((value << 52) >> 52) as i32;
+    let z = ((value << 26) >> 38) as i32;
+    Ok((x, y, z))
+}
+
 /// Appends a 64-bit floating-point value in network (big-endian) byte order.
 pub fn encode_f64(value: f64, output: &mut Vec<u8>) {
     output.extend_from_slice(&value.to_be_bytes());

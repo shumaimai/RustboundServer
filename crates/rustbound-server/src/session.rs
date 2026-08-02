@@ -15,11 +15,16 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use rustbound_protocol::play::{
-    ClientInformation, ConfirmTeleportation, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome,
-    PlayError, PlayPacket, SynchronizePlayerPosition, decode_client_information,
+    ChangeDifficulty, ClientInformation, ConfirmTeleportation, EntityEvent, GameEvent, GameMode,
+    JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities,
+    PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition, SetHeldItem,
+    SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition, decode_client_information,
     decode_confirm_teleportation, decode_keep_alive_serverbound, decode_set_player_position,
-    decode_set_player_position_and_rotation, decode_set_player_rotation, encode_join_game,
-    encode_keep_alive_clientbound, encode_synchronize_player_position,
+    decode_set_player_position_and_rotation, decode_set_player_rotation, encode_change_difficulty,
+    encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
+    encode_player_abilities, encode_plugin_message_clientbound, encode_set_center_chunk,
+    encode_set_default_spawn_position, encode_set_held_item, encode_set_render_distance,
+    encode_set_simulation_distance, encode_synchronize_player_position,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -217,6 +222,112 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends the vanilla join-sequence packets after Join Game.
+    ///
+    /// This sends the minimum set of clientbound Play packets required for a
+    /// vanilla 1.20.1 client to proceed past the "Loading terrain" screen
+    /// (once chunks are available). The sequence is:
+    ///
+    /// 1. Plugin Message (brand)
+    /// 2. Change Difficulty
+    /// 3. Player Abilities
+    /// 4. Set Held Item
+    /// 5. Entity Event (player status)
+    /// 6. Set Default Spawn Position
+    /// 7. Set Center Chunk
+    /// 8. Set Render Distance
+    /// 9. Set Simulation Distance
+    /// 10. Game Event (start waiting for level chunks)
+    pub fn send_join_sequence(&self, stream: &mut TcpStream) -> Result<(), SessionError> {
+        let mfl = self.max_frame_length;
+
+        // 1. Plugin Message (brand) — 0x17
+        let brand = PluginMessageClientbound {
+            channel: "minecraft:brand".to_string(),
+            data: b"rustbound".to_vec(),
+        };
+        let mut wire = Vec::new();
+        encode_plugin_message_clientbound(&brand, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 2. Change Difficulty — 0x0C
+        let diff = ChangeDifficulty {
+            difficulty: 1, // Easy
+            locked: false,
+        };
+        wire.clear();
+        encode_change_difficulty(&diff, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 3. Player Abilities — 0x34
+        let abilities = PlayerAbilities {
+            flags: 0x04, // allow flying bit
+            flying_speed: 0.05,
+            fov_modifier: 0.1,
+        };
+        wire.clear();
+        encode_player_abilities(&abilities, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 4. Set Held Item — 0x4D
+        let held = SetHeldItem { slot: 0 };
+        wire.clear();
+        encode_set_held_item(&held, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 5. Entity Event (player status: 28 = op permission level 4) — 0x1C
+        let entity_event = EntityEvent {
+            entity_id: self.entity_id,
+            entity_status: 28,
+        };
+        wire.clear();
+        encode_entity_event(&entity_event, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 6. Set Default Spawn Position — 0x50
+        let spawn = SetDefaultSpawnPosition {
+            location: (0, 64, 0),
+            angle: 0.0,
+        };
+        wire.clear();
+        encode_set_default_spawn_position(&spawn, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 7. Set Center Chunk — 0x4E
+        let center = SetCenterChunk {
+            chunk_x: 0,
+            chunk_z: 0,
+        };
+        wire.clear();
+        encode_set_center_chunk(&center, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 8. Set Render Distance — 0x4F
+        let render = SetRenderDistance { view_distance: 10 };
+        wire.clear();
+        encode_set_render_distance(&render, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 9. Set Simulation Distance — 0x5C
+        let sim = SetSimulationDistance {
+            simulation_distance: 10,
+        };
+        wire.clear();
+        encode_set_simulation_distance(&sim, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        // 10. Game Event (13 = Start waiting for level chunks) — 0x1F
+        let game_event = GameEvent {
+            event_type: 13,
+            value: 0.0,
+        };
+        wire.clear();
+        encode_game_event(&game_event, mfl, &mut wire)?;
+        stream.write_all(&wire)?;
+
+        Ok(())
+    }
+
     /// Sends a Synchronize Player Position packet and returns the teleport ID.
     pub fn send_synchronize_position(
         &mut self,
@@ -373,7 +484,7 @@ impl Clone for EntityIdAllocator {
 /// This is a valid NBT compound tag with an empty name and no entries:
 /// `0x0a` (TAG_Compound) + empty name (2 zero bytes) + `0x00` (TAG_End).
 fn minimal_registry_codec() -> Vec<u8> {
-    vec![0x0a, 0x00, 0x00, 0x00]
+    rustbound_protocol::registry_codec::build_registry_codec()
 }
 
 /// Reads and decodes a single play packet from the buffer.
@@ -495,6 +606,9 @@ pub fn run_play_loop(
 
     // Send Join Game
     session.send_join_game(stream)?;
+
+    // Send vanilla join-sequence packets (brand, abilities, spawn pos, etc.)
+    session.send_join_sequence(stream)?;
 
     // Send Synchronize Player Position
     session.send_synchronize_position(stream)?;
@@ -623,7 +737,12 @@ mod tests {
     #[test]
     fn minimal_registry_codec_is_valid_nbt() {
         let codec = minimal_registry_codec();
-        // TAG_Compound (0x0a), empty name (2 zero bytes), TAG_End (0x00)
-        assert_eq!(codec, vec![0x0a, 0x00, 0x00, 0x00]);
+        // Root tag should be TAG_COMPOUND (0x0a)
+        assert_eq!(codec[0], 0x0a);
+        // Should contain dimension_type, biome, and chat_type registries
+        let codec_str = String::from_utf8_lossy(&codec);
+        assert!(codec_str.contains("minecraft:dimension_type"));
+        assert!(codec_str.contains("minecraft:worldgen/biome"));
+        assert!(codec_str.contains("minecraft:chat_type"));
     }
 }
