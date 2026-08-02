@@ -20,9 +20,14 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | M2: Login | 7 | 4 | 129 | 完了 |
 | M3: Play | 7 | 2 | 163 | 完了 |
 | M4: Server Core | 6 | 4 | 33 | 完了 |
-| **合計** | **25** | **15** | **240** | **全完了** |
+| Phase A: Play Integration | 4 | 1 | — | 完了 |
+| Phase B: Login SM+Compression | 6 | 3 | — | 完了 |
+| Phase C: World Visibility | 3 | 1 | — | 完了 |
+| Phase D: Multiplayer | 3 | 1 | — | 完了 |
+| Phase E: Polish | 5 | 3 | — | 完了 |
+| **合計** | **46** | **24** | **299** | **全完了** |
 
-全240テスト合格 (23 conformance + 184 protocol + 33 server)
+全299テスト合格 (28 conformance + 219 protocol + 52 server, 1 ignored)
 `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` クリーン
 
 ---
@@ -149,9 +154,75 @@ rustbound-server      — サーバーコア (listener, connection, tick, world,
 
 ---
 
+## Phase A-E: 機能拡張 (完了)
+
+### Phase A: Play Integration (#52-#55)
+- PR #77 — LoginStateMachine統合、Play状態遷移、conformance play probe
+- Login状態機械をconnection handlerに統合、Play状態への遷移を自動化
+
+### Phase B: Login SM + Compression + Join Sequence (#56-#62)
+- PR #78 — LoginStateMachine統合、compression有効化、Client Information
+- PR #79 — Joinシーケンスパケット (Plugin Message, Change Difficulty, Player Abilities, Set Held Item, Entity Event, Set Default Spawn Position, Set Center Chunk, Set Render/Simulation Distance, Game Event) とregistry codec fixture
+- #60 (Online-mode encryption) は延期、#62 (play.rs分割) は不要と判断
+
+### Phase C: World Visibility (#63-#65)
+- PR #80 — Flat/voidチャンクジェネレーター、チャンクload/unload、初期チャンク送信
+- Chunk::generate() でスーパーフラット世界生成、send_initial_chunks() で半径2のチャンク送信
+
+### Phase D: Multiplayer (#66-#68)
+- PR #81 — サーバーバウンド移動パケット転送、Player Info Update/Remove、Spawn Player/Remove Entities
+- TickMessage::PlayerPositionUpdate にyaw/pitch/on_ground追加
+- PlayerInfoUpdate (0x3A), PlayerInfoRemove (0x39), SpawnPlayer (0x03), RemoveEntities (0x3E) コーデック
+- セッション参加/離脱時の全セッションへのブロードキャスト
+
+### Phase E: Polish (#69-#73)
+- PR #82 — 切断パス整理、ライブプレイヤー数表示、Ctrl+Cシャットダウン
+- PR #83 — 掘削/設置パケットコーデック とクリエイティブブロック更新
+- PR #84 — Play conformance probe拡張 とForge差分テストヘルパー
+
+**新規パケット (Phase B-E):**
+| パケット | 方向 | ID | Phase |
+|---|---|---|---|
+| Plugin Message (brand) | clientbound | 0x17 | B |
+| Change Difficulty | clientbound | 0x0C | B |
+| Player Abilities | clientbound | 0x34 | B |
+| Set Held Item | clientbound | 0x4D | B |
+| Entity Event | clientbound | 0x1C | B |
+| Set Default Spawn Position | clientbound | 0x50 | B |
+| Set Center Chunk | clientbound | 0x4E | B |
+| Set Render Distance | clientbound | 0x4F | B |
+| Set Simulation Distance | clientbound | 0x5C | B |
+| Game Event | clientbound | 0x1F | B |
+| Declare Commands | clientbound | 0x10 | B |
+| Update Recipes | clientbound | 0x6D | B |
+| Client Information | serverbound | 0x08 | B |
+| Confirm Teleportation | serverbound | 0x00 | B |
+| Player Info Update | clientbound | 0x3A | D |
+| Player Info Remove | clientbound | 0x39 | D |
+| Spawn Player | clientbound | 0x03 | D |
+| Remove Entities | clientbound | 0x3E | D |
+| Player Digging | serverbound | 0x1D | E |
+| Use Item On | serverbound | 0x31 | E |
+| Block Update | clientbound | 0x0A | E |
+| Acknowledge Block Change | clientbound | 0x06 | E |
+
+**新規モジュール:** registry_codec.rs, play_diff.rs
+
+**テスト:** 299 (28 conformance + 219 protocol + 52 server, 1 ignored) — 1 ignoredはForgeオラクル差分テスト
+
+---
+
 ## コミット履歴
 
 ```
+a49471b Phase E: Extend Play conformance probe and Forge differential helpers (#71) (#84)
+83206f3 Phase E: Basic dig/place packet codecs and Creative block updates (#69) (#83)
+89fd93e Phase E: Disconnect cleanup, live player count, Ctrl+C shutdown (#70, #72, #73) (#82)
+303e61f Phase D: Multiplayer - movement forwarding, Player Info, spawn/despawn (#66, #67, #68) (#81)
+12faeb6 Phase C: Flat/void chunk generator, chunk load/unload, initial chunks (#63, #64, #65) (#80)
+063377e Phase B: Join sequence packets and registry codec fixture (#58, #59) (#79)
+9855353 Phase B: LoginStateMachine integration, compression, Client Information (#56, #57, #61) (#78)
+fe276b9 Implement Phase A: Play integration (#52-#55) (#77)
 ad9c663 Implement server configuration, startup, and conformance integration. (#48)
 d33a4d7 Implement tick loop, world management, and player sessions. (#47)
 d4dd604 Implement connection handler and state router. (#46)
