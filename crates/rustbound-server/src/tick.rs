@@ -1019,11 +1019,16 @@ fn run_tick_loop(
             if let Some(player) = world.get_player(entity_id) {
                 if player.y < VOID_DEATH_Y {
                     inv.kill();
+                    let username = player.username.clone();
                     if let Some(sender) = session_senders.get(&entity_id) {
                         let _ = sender.send(SessionEvent::SetHealth {
                             health: inv.health,
                             food: inv.food,
                             food_saturation: inv.food_saturation,
+                        });
+                        let _ = sender.send(SessionEvent::CombatDeath {
+                            player_id: entity_id,
+                            message: format!("{{\"text\":\"{} fell out of the world\"}}", username),
                         });
                     }
                 }
@@ -1053,6 +1058,17 @@ fn run_tick_loop(
                             food: inv.food,
                             food_saturation: inv.food_saturation,
                         });
+                        // If starvation killed the player, send Combat Death
+                        if inv.is_dead {
+                            let username = world
+                                .get_player(entity_id)
+                                .map(|p| p.username.clone())
+                                .unwrap_or_else(|| "Player".to_string());
+                            let _ = sender.send(SessionEvent::CombatDeath {
+                                player_id: entity_id,
+                                message: format!("{{\"text\":\"{} starved to death\"}}", username),
+                            });
+                        }
                     }
                 }
             }
@@ -2320,13 +2336,21 @@ mod tests {
         // Wait for the tick loop to detect void death and send SetHealth(0)
         let start = Instant::now();
         let mut got_death = false;
+        let mut got_combat_death = false;
         while start.elapsed() < Duration::from_millis(500) {
             match event_rx.try_recv() {
                 Ok(SessionEvent::SetHealth { health, .. }) => {
                     if health <= 0.0 {
                         got_death = true;
-                        break;
                     }
+                }
+                Ok(SessionEvent::CombatDeath { player_id, message }) => {
+                    assert_eq!(player_id, 1);
+                    assert!(
+                        message.contains("Steve"),
+                        "death message should contain username"
+                    );
+                    got_combat_death = true;
                 }
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
@@ -2335,6 +2359,10 @@ mod tests {
         assert!(
             got_death,
             "should receive SetHealth with 0 HP on void death"
+        );
+        assert!(
+            got_combat_death,
+            "should receive CombatDeath event on void death"
         );
 
         handle.shutdown();
