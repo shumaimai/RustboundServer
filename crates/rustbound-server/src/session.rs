@@ -19,13 +19,15 @@ use rustbound_protocol::play::{
     GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
     PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetDefaultSpawnPosition,
     SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
-    decode_client_information, decode_confirm_teleportation, decode_keep_alive_serverbound,
-    decode_player_digging, decode_set_player_position, decode_set_player_position_and_rotation,
+    SystemChatMessage, decode_chat_message_serverbound, decode_client_information,
+    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
+    decode_set_player_position, decode_set_player_position_and_rotation,
     decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
     encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
     encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
     encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
     encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
+    encode_system_chat_message,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -146,6 +148,11 @@ pub enum SessionEvent {
         chunk_x: i32,
         /// The chunk Z coordinate.
         chunk_z: i32,
+    },
+    /// Send a system chat message to the client.
+    SystemChat {
+        /// The JSON chat component string.
+        content: String,
     },
 }
 
@@ -566,6 +573,25 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends a System Chat Message to the client.
+    ///
+    /// The content should be a JSON chat component string. In offline mode,
+    /// all chat (player and system) is sent via this packet.
+    pub fn send_system_chat(
+        &self,
+        stream: &mut TcpStream,
+        content: &str,
+    ) -> Result<(), SessionError> {
+        let packet = SystemChatMessage {
+            content: content.to_string(),
+            overlay: false,
+        };
+        let mut wire = Vec::new();
+        encode_system_chat_message(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
     /// Sends a Synchronize Player Position packet and returns the teleport ID.
     pub fn send_synchronize_position(
         &mut self,
@@ -777,6 +803,10 @@ impl PlayerSession {
                     self.send_single_chunk(stream, chunk_x, chunk_z)?;
                     processed = true;
                 }
+                SessionEvent::SystemChat { content } => {
+                    self.send_system_chat(stream, &content)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -899,6 +929,16 @@ impl PlayerSession {
                 }
                 // Always ACK the place packet (protocol requires it)
                 Ok(Some(place.sequence))
+            }
+            PlayPacket::ChatMessageServerbound(chat) => {
+                // Forward chat to tick loop for broadcasting
+                let _ = self.tick_sender.send(TickMessage::ChatMessage {
+                    entity_id: self.entity_id,
+                    uuid: self.uuid,
+                    username: self.username.clone(),
+                    message: chat.message,
+                });
+                Ok(None)
             }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
@@ -1279,6 +1319,20 @@ fn try_decode_play_packet_inner(
 
     // Use Item On (0x31)
     match decode_use_item_on(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Chat Message serverbound (0x01)
+    match decode_chat_message_serverbound(&mut input, max_frame_length) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);

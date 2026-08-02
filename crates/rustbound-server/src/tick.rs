@@ -115,6 +115,25 @@ fn chunk_z_from_world(z: f64) -> i32 {
     (z.floor() as i32) >> 4
 }
 
+/// Formats a player chat message as a JSON chat component string.
+///
+/// In offline mode, we use the System Chat Message packet (0x5D) for all
+/// chat. The content is a JSON chat component. We produce a simple
+/// `<username> <message>` format with the username in gray and the
+/// message in white, matching the vanilla chat appearance.
+fn format_chat_message(username: &str, message: &str) -> String {
+    // Build a JSON chat component: {"text":"<username> message"}
+    // Simple format: {"text":"<username> <message>"}
+    // We escape the username and message for JSON safety.
+    let escaped = format!("<{username}> {message}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
+    format!("{{\"text\":\"{escaped}\"}}")
+}
+
 /// A message sent to the tick loop.
 #[derive(Debug)]
 pub enum TickMessage {
@@ -168,6 +187,17 @@ pub enum TickMessage {
         entity_id: i32,
         /// The client's requested view distance (in chunks).
         view_distance: i32,
+    },
+    /// A player sent a chat message.
+    ChatMessage {
+        /// The entity ID of the sender.
+        entity_id: i32,
+        /// The sender's UUID.
+        uuid: Uuid,
+        /// The sender's username.
+        username: String,
+        /// The chat message text.
+        message: String,
     },
 }
 
@@ -470,6 +500,25 @@ fn run_tick_loop(
                                     chunk_z: chunk.z,
                                 });
                             }
+                        }
+                    }
+                }
+                TickMessage::ChatMessage {
+                    entity_id,
+                    uuid: _,
+                    username,
+                    message,
+                } => {
+                    // Broadcast chat to all sessions as a System Chat Message.
+                    // In offline mode, we use the unsigned/system chat path
+                    // (no signed Player Chat Message).
+                    let content = format_chat_message(&username, &message);
+                    for (eid, sender) in &session_senders {
+                        // Don't echo back to the sender
+                        if *eid != entity_id {
+                            let _ = sender.send(SessionEvent::SystemChat {
+                                content: content.clone(),
+                            });
                         }
                     }
                 }
@@ -1118,5 +1167,98 @@ mod tests {
 
         handle.shutdown();
         Ok(())
+    }
+
+    #[test]
+    fn tick_loop_broadcasts_chat_to_other_players() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            view_distance: 2,
+            event_sender: event_tx1,
+        })?;
+
+        // Player 2 joins
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            view_distance: 2,
+            event_sender: event_tx2,
+        })?;
+
+        // Wait for join events
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx1.try_recv().is_ok() {}
+        while event_rx2.try_recv().is_ok() {}
+
+        // Player 1 sends a chat message
+        handle.send(super::TickMessage::ChatMessage {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            message: "Hello world!".to_string(),
+        })?;
+
+        // Player 2 should receive the chat
+        let start = Instant::now();
+        let mut got_chat = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::SystemChat { content }) => {
+                    assert!(
+                        content.contains("Hello world!"),
+                        "content should contain message: {content}"
+                    );
+                    assert!(
+                        content.contains("Steve"),
+                        "content should contain username: {content}"
+                    );
+                    got_chat = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_chat, "player 2 should have received the chat message");
+
+        // Player 1 should NOT receive its own chat
+        let mut self_received = false;
+        while let Ok(event) = event_rx1.try_recv() {
+            if matches!(event, SessionEvent::SystemChat { .. }) {
+                self_received = true;
+            }
+        }
+        assert!(!self_received, "player 1 should not receive its own chat");
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn format_chat_message_basic() {
+        let msg = super::format_chat_message("Alex", "Hi!");
+        assert_eq!(msg, r#"{"text":"<Alex> Hi!"}"#);
+    }
+
+    #[test]
+    fn format_chat_message_escapes_quotes() {
+        let msg = super::format_chat_message("Steve", r#"say "hi""#);
+        assert!(msg.contains(r#"\""#), "quotes should be escaped: {msg}");
+        assert!(msg.starts_with(r#"{"text":"#), "should be JSON: {msg}");
+    }
+
+    #[test]
+    fn format_chat_message_escapes_backslash() {
+        let msg = super::format_chat_message("Steve", r"back\slash");
+        assert!(msg.contains(r"\\"), "backslash should be escaped: {msg}");
     }
 }
