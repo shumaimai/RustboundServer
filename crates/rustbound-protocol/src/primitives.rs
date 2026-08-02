@@ -173,6 +173,11 @@ pub fn encode_u16(value: u16, output: &mut Vec<u8>) {
     output.extend_from_slice(&value.to_be_bytes());
 }
 
+/// Appends a signed 16-bit integer in network (big-endian) byte order.
+pub fn encode_i16(value: i16, output: &mut Vec<u8>) {
+    output.extend_from_slice(&value.to_be_bytes());
+}
+
 /// Decodes an unsigned network-order 16-bit integer transactionally.
 pub fn decode_u16(input: &mut &[u8]) -> Result<u16, CodecError> {
     let source = *input;

@@ -23,13 +23,19 @@ impl ChunkPos {
     }
 }
 
-/// A loaded chunk. For the initial implementation, chunk data is opaque.
+/// A loaded chunk with its data payload.
 #[derive(Debug, Clone)]
 pub struct Chunk {
     /// The chunk position.
     pub pos: ChunkPos,
     /// Whether the chunk has been generated.
     pub generated: bool,
+    /// The heightmaps NBT blob.
+    pub heightmaps: Vec<u8>,
+    /// The chunk sections and biomes data.
+    pub data: Vec<u8>,
+    /// Block entity NBT blobs.
+    pub block_entities: Vec<Vec<u8>>,
 }
 
 impl Chunk {
@@ -38,6 +44,33 @@ impl Chunk {
         Self {
             pos,
             generated: false,
+            heightmaps: Vec::new(),
+            data: Vec::new(),
+            block_entities: Vec::new(),
+        }
+    }
+
+    /// Creates a new generated chunk at the given position using the flat
+    /// world generator.
+    pub fn generate(pos: ChunkPos) -> Self {
+        let (heightmaps, data, block_entities) = crate::chunk::generate_chunk(pos.x, pos.z);
+        Self {
+            pos,
+            generated: true,
+            heightmaps,
+            data,
+            block_entities,
+        }
+    }
+
+    /// Returns a `ChunkData` packet from this chunk's data.
+    pub fn to_chunk_data(&self) -> rustbound_protocol::play::ChunkData {
+        rustbound_protocol::play::ChunkData {
+            chunk_x: self.pos.x,
+            chunk_z: self.pos.z,
+            heightmaps: self.heightmaps.clone(),
+            data: self.data.clone(),
+            block_entities: self.block_entities.clone(),
         }
     }
 }
@@ -92,9 +125,9 @@ impl World {
         self.spawn_z = z;
     }
 
-    /// Loads a chunk at the given position.
+    /// Loads a chunk at the given position, generating its data.
     pub fn load_chunk(&mut self, pos: ChunkPos) {
-        self.chunks.insert(pos, Chunk::new(pos));
+        self.chunks.insert(pos, Chunk::generate(pos));
     }
 
     /// Unloads a chunk at the given position.
@@ -105,6 +138,27 @@ impl World {
     /// Returns whether a chunk is loaded.
     pub fn is_chunk_loaded(&self, pos: ChunkPos) -> bool {
         self.chunks.contains_key(&pos)
+    }
+
+    /// Returns a reference to a loaded chunk, if present.
+    pub fn get_chunk(&self, pos: ChunkPos) -> Option<&Chunk> {
+        self.chunks.get(&pos)
+    }
+
+    /// Computes the set of chunk positions within the given radius of a
+    /// center chunk position.
+    ///
+    /// The radius is the view distance (in chunks). The result includes
+    /// all chunks within a square of side `2*radius + 1` centered on
+    /// `(center_x, center_z)`.
+    pub fn desired_chunks(center_x: i32, center_z: i32, radius: i32) -> Vec<ChunkPos> {
+        let mut result = Vec::new();
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                result.push(ChunkPos::new(center_x + dx, center_z + dz));
+            }
+        }
+        result
     }
 
     /// Returns the number of loaded chunks.
@@ -214,7 +268,7 @@ impl PlayerHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkPos, PlayerHandle, World};
+    use super::{Chunk, ChunkPos, PlayerHandle, World};
     use rustbound_protocol::primitives::Uuid;
 
     #[test]
@@ -281,5 +335,57 @@ mod tests {
         let mut world = World::new();
         world.set_spawn_point(128.0, 70.0, -256.0);
         assert_eq!(world.spawn_point(), (128.0, 70.0, -256.0));
+    }
+
+    #[test]
+    fn desired_chunks_radius_0() {
+        let chunks = World::desired_chunks(0, 0, 0);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks.contains(&ChunkPos::new(0, 0)));
+    }
+
+    #[test]
+    fn desired_chunks_radius_1() {
+        let chunks = World::desired_chunks(0, 0, 1);
+        assert_eq!(chunks.len(), 9); // 3x3
+        assert!(chunks.contains(&ChunkPos::new(-1, -1)));
+        assert!(chunks.contains(&ChunkPos::new(0, 0)));
+        assert!(chunks.contains(&ChunkPos::new(1, 1)));
+    }
+
+    #[test]
+    fn desired_chunks_radius_2() {
+        let chunks = World::desired_chunks(10, -5, 2);
+        assert_eq!(chunks.len(), 25); // 5x5
+        assert!(chunks.contains(&ChunkPos::new(8, -7)));
+        assert!(chunks.contains(&ChunkPos::new(12, -3)));
+    }
+
+    #[test]
+    fn desired_chunks_radius_10() {
+        let chunks = World::desired_chunks(0, 0, 10);
+        assert_eq!(chunks.len(), 441); // 21x21
+    }
+
+    #[test]
+    fn generated_chunk_has_data() {
+        let chunk = Chunk::generate(ChunkPos::new(0, 0));
+        assert!(chunk.generated);
+        assert!(!chunk.heightmaps.is_empty());
+        assert!(!chunk.data.is_empty());
+    }
+
+    #[test]
+    fn load_chunk_generates_data() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(5, 10);
+        world.load_chunk(pos);
+        match world.get_chunk(pos) {
+            Some(chunk) => {
+                assert!(chunk.generated);
+                assert!(!chunk.data.is_empty());
+            }
+            None => panic!("chunk should be loaded"),
+        }
     }
 }

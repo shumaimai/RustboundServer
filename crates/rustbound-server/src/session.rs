@@ -21,10 +21,10 @@ use rustbound_protocol::play::{
     SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition, decode_client_information,
     decode_confirm_teleportation, decode_keep_alive_serverbound, decode_set_player_position,
     decode_set_player_position_and_rotation, decode_set_player_rotation, encode_change_difficulty,
-    encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
-    encode_player_abilities, encode_plugin_message_clientbound, encode_set_center_chunk,
-    encode_set_default_spawn_position, encode_set_held_item, encode_set_render_distance,
-    encode_set_simulation_distance, encode_synchronize_player_position,
+    encode_chunk_data, encode_entity_event, encode_game_event, encode_join_game,
+    encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
+    encode_set_center_chunk, encode_set_default_spawn_position, encode_set_held_item,
+    encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -328,6 +328,28 @@ impl PlayerSession {
         Ok(())
     }
 
+    /// Sends initial chunk columns around spawn to the client.
+    ///
+    /// Generates and sends Chunk Data packets for all chunks within the
+    /// given radius of the spawn position (chunk 0,0).
+    pub fn send_initial_chunks(
+        &self,
+        stream: &mut TcpStream,
+        radius: i32,
+    ) -> Result<(), SessionError> {
+        let mfl = self.max_frame_length;
+        let positions = crate::world::World::desired_chunks(0, 0, radius);
+
+        for pos in positions {
+            let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z);
+            let mut wire = Vec::new();
+            encode_chunk_data(&chunk_data, mfl, &mut wire)?;
+            stream.write_all(&wire)?;
+        }
+
+        Ok(())
+    }
+
     /// Sends a Synchronize Player Position packet and returns the teleport ID.
     pub fn send_synchronize_position(
         &mut self,
@@ -609,6 +631,9 @@ pub fn run_play_loop(
 
     // Send vanilla join-sequence packets (brand, abilities, spawn pos, etc.)
     session.send_join_sequence(stream)?;
+
+    // Send initial chunk columns (radius 2 for bootstrapping)
+    session.send_initial_chunks(stream, 2)?;
 
     // Send Synchronize Player Position
     session.send_synchronize_position(stream)?;
