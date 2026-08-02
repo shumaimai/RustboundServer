@@ -300,6 +300,7 @@ pub fn handle_connection(
                                             gamemode: 0,
                                             max_frame_length: config.max_frame_length,
                                             read_timeout: config.play_read_timeout,
+                                            compression_threshold: config.compression_threshold,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),

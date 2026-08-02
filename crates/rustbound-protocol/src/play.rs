@@ -130,6 +130,8 @@ pub enum PlayError {
     Framing(FramingError),
     /// A primitive codec error occurred.
     Codec(CodecError),
+    /// A compression error occurred.
+    Compression(crate::compression::CompressionError),
     /// The packet ID does not match the expected value.
     WrongPacketId { received: i32, expected: i32 },
     /// The packet contained trailing bytes after the expected fields.
@@ -145,6 +147,7 @@ impl fmt::Display for PlayError {
         match self {
             Self::Framing(error) => write!(formatter, "framing error: {error}"),
             Self::Codec(error) => write!(formatter, "codec error: {error}"),
+            Self::Compression(error) => write!(formatter, "compression error: {error}"),
             Self::WrongPacketId { received, expected } => {
                 write!(formatter, "expected packet ID {expected}, got {received}")
             }
@@ -164,6 +167,7 @@ impl std::error::Error for PlayError {
         match self {
             Self::Framing(error) => Some(error),
             Self::Codec(error) => Some(error),
+            Self::Compression(error) => Some(error),
             _ => None,
         }
     }
@@ -184,6 +188,15 @@ impl From<CodecError> for PlayError {
         match error {
             CodecError::IncompleteInput => Self::Incomplete,
             other => Self::Codec(other),
+        }
+    }
+}
+
+impl From<crate::compression::CompressionError> for PlayError {
+    fn from(error: crate::compression::CompressionError) -> Self {
+        match error {
+            crate::compression::CompressionError::Incomplete => Self::Incomplete,
+            other => Self::Compression(other),
         }
     }
 }

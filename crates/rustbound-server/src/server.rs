@@ -283,6 +283,36 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn server_handles_play_conformance_with_compression() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            network_compression_threshold: 256, // default
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let probe_config = rustbound_conformance::PlayProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "PlayTestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(2),
+        };
+        let snapshot = rustbound_conformance::run_play_probe(&probe_config)?;
+
+        assert_eq!(snapshot.username, "PlayTestPlayer");
+        assert_eq!(snapshot.dimension_name, "minecraft:overworld");
+
+        server.shutdown();
+        Ok(())
+    }
+
     /// Oracle differential test: compares Rustbound's play snapshot against
     /// a local Forge 47.4.10 server.
     ///

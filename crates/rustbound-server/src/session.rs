@@ -151,6 +151,8 @@ pub struct SessionConfig {
     pub max_frame_length: usize,
     /// The read timeout for the TCP stream.
     pub read_timeout: Duration,
+    /// Compression threshold (-1 = disabled, >= 0 = enabled).
+    pub compression_threshold: i32,
 }
 
 /// A player session in the Play state.
@@ -174,6 +176,8 @@ pub struct PlayerSession {
     event_receiver: Receiver<SessionEvent>,
     /// The maximum frame length for encoding.
     max_frame_length: usize,
+    /// Compression threshold (-1 = disabled, >= 0 = enabled).
+    compression_threshold: i32,
     /// Last known position X (cached for rotation-only updates).
     last_x: f64,
     /// Last known position Y.
@@ -221,6 +225,7 @@ impl PlayerSession {
             tick_sender,
             event_receiver: event_rx,
             max_frame_length: config.max_frame_length,
+            compression_threshold: config.compression_threshold,
             last_x: 0.0,
             last_y: 64.0,
             last_z: 0.0,
@@ -242,6 +247,44 @@ impl PlayerSession {
     /// Returns the player's username.
     pub fn username(&self) -> &str {
         &self.username
+    }
+
+    /// Sends an already-encoded packet wire, re-encoding with compression
+    /// if a compression threshold has been negotiated.
+    ///
+    /// The input `wire` must be a single uncompressed frame produced by one
+    /// of the `encode_*` functions (i.e. `[length][packet_id][payload]`).
+    fn send_wire(&self, stream: &mut TcpStream, wire: &[u8]) -> Result<(), SessionError> {
+        if self.compression_threshold < 0 {
+            // Compression disabled: send as-is
+            stream.write_all(wire)?;
+            return Ok(());
+        }
+        // Compression enabled: extract packet_id + payload from the
+        // uncompressed frame, then re-encode as a compressed frame.
+        let mut input = wire;
+        let frame = rustbound_protocol::framing::decode_frame(&mut input, self.max_frame_length)
+            .map_err(|e| SessionError::Play(PlayError::from(e)))?;
+        match frame {
+            rustbound_protocol::framing::DecodeOutcome::Complete(f) => {
+                let mut compressed = Vec::new();
+                rustbound_protocol::compression::encode_compressed_frame(
+                    f.packet_id,
+                    f.payload,
+                    self.compression_threshold,
+                    self.max_frame_length,
+                    &mut compressed,
+                )
+                .map_err(|e| SessionError::Play(PlayError::from(e)))?;
+                stream.write_all(&compressed)?;
+            }
+            rustbound_protocol::framing::DecodeOutcome::Incomplete => {
+                return Err(SessionError::Play(PlayError::Codec(
+                    rustbound_protocol::primitives::CodecError::IncompleteInput,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Sends the Join Game packet to the client.
@@ -266,7 +309,7 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         encode_join_game(&join_game, self.max_frame_length, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -289,25 +332,25 @@ impl PlayerSession {
     pub fn send_join_sequence(&self, stream: &mut TcpStream) -> Result<(), SessionError> {
         let mfl = self.max_frame_length;
 
-        // 1. Plugin Message (brand) — 0x17
+        // 1. Plugin Message (brand)  E0x17
         let brand = PluginMessageClientbound {
             channel: "minecraft:brand".to_string(),
             data: b"rustbound".to_vec(),
         };
         let mut wire = Vec::new();
         encode_plugin_message_clientbound(&brand, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 2. Change Difficulty — 0x0C
+        // 2. Change Difficulty  E0x0C
         let diff = ChangeDifficulty {
             difficulty: 1, // Easy
             locked: false,
         };
         wire.clear();
         encode_change_difficulty(&diff, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 3. Player Abilities — 0x34
+        // 3. Player Abilities  E0x34
         let abilities = PlayerAbilities {
             flags: 0x04, // allow flying bit
             flying_speed: 0.05,
@@ -315,63 +358,63 @@ impl PlayerSession {
         };
         wire.clear();
         encode_player_abilities(&abilities, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 4. Set Held Item — 0x4D
+        // 4. Set Held Item  E0x4D
         let held = SetHeldItem { slot: 0 };
         wire.clear();
         encode_set_held_item(&held, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 5. Entity Event (player status: 28 = op permission level 4) — 0x1C
+        // 5. Entity Event (player status: 28 = op permission level 4)  E0x1C
         let entity_event = EntityEvent {
             entity_id: self.entity_id,
             entity_status: 28,
         };
         wire.clear();
         encode_entity_event(&entity_event, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 6. Set Default Spawn Position — 0x50
+        // 6. Set Default Spawn Position  E0x50
         let spawn = SetDefaultSpawnPosition {
             location: (0, 64, 0),
             angle: 0.0,
         };
         wire.clear();
         encode_set_default_spawn_position(&spawn, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 7. Set Center Chunk — 0x4E
+        // 7. Set Center Chunk  E0x4E
         let center = SetCenterChunk {
             chunk_x: 0,
             chunk_z: 0,
         };
         wire.clear();
         encode_set_center_chunk(&center, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 8. Set Render Distance — 0x4F
+        // 8. Set Render Distance  E0x4F
         let render = SetRenderDistance { view_distance: 10 };
         wire.clear();
         encode_set_render_distance(&render, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 9. Set Simulation Distance — 0x5C
+        // 9. Set Simulation Distance  E0x5C
         let sim = SetSimulationDistance {
             simulation_distance: 10,
         };
         wire.clear();
         encode_set_simulation_distance(&sim, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
-        // 10. Game Event (13 = Start waiting for level chunks) — 0x1F
+        // 10. Game Event (13 = Start waiting for level chunks)  E0x1F
         let game_event = GameEvent {
             event_type: 13,
             value: 0.0,
         };
         wire.clear();
         encode_game_event(&game_event, mfl, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
 
         Ok(())
     }
@@ -392,7 +435,7 @@ impl PlayerSession {
             let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z);
             let mut wire = Vec::new();
             encode_chunk_data(&chunk_data, mfl, &mut wire)?;
-            stream.write_all(&wire)?;
+            self.send_wire(stream, &wire)?;
         }
 
         Ok(())
@@ -417,7 +460,7 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         encode_synchronize_player_position(&packet, self.max_frame_length, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(teleport_id)
     }
 
@@ -430,7 +473,7 @@ impl PlayerSession {
         let packet = KeepAlive { payload };
         let mut wire = Vec::new();
         encode_keep_alive_clientbound(&packet, self.max_frame_length, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -467,7 +510,7 @@ impl PlayerSession {
             self.max_frame_length,
             &mut wire,
         )?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -484,7 +527,7 @@ impl PlayerSession {
             self.max_frame_length,
             &mut wire,
         )?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -509,7 +552,7 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         rustbound_protocol::play::encode_spawn_player(&packet, self.max_frame_length, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -528,7 +571,7 @@ impl PlayerSession {
             self.max_frame_length,
             &mut wire,
         )?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -698,7 +741,7 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         rustbound_protocol::play::encode_block_update(&packet, self.max_frame_length, &mut wire)?;
-        stream.write_all(&wire)?;
+        self.send_wire(stream, &wire)?;
         Ok(())
     }
 
@@ -789,7 +832,52 @@ fn minimal_registry_codec() -> Vec<u8> {
 ///
 /// Returns `Ok(Some(packet))` if a complete packet was decoded,
 /// `Ok(None)` if more data is needed, or `Err` on error.
+///
+/// When `compression_threshold >= 0`, the input buffer is expected to contain
+/// compressed frames. The compressed frame is decoded, re-encoded as an
+/// uncompressed frame into a temporary buffer, and then passed to the
+/// existing uncompressed decode path.
 pub fn try_decode_play_packet(
+    buffer: &mut Vec<u8>,
+    max_frame_length: usize,
+    compression_threshold: i32,
+) -> Result<Option<PlayPacket>, SessionError> {
+    if compression_threshold < 0 {
+        return try_decode_play_packet_inner(buffer, max_frame_length);
+    }
+
+    // Compression enabled: decode one compressed frame, re-encode as
+    // uncompressed, then delegate to the inner decoder.
+    let source = buffer.as_slice();
+    let mut input = source;
+    let compressed = match rustbound_protocol::compression::decode_compressed_frame(
+        &mut input,
+        compression_threshold,
+        max_frame_length,
+    ) {
+        Ok(rustbound_protocol::compression::CompressedDecodeOutcome::Complete(pkt)) => pkt,
+        Ok(rustbound_protocol::compression::CompressedDecodeOutcome::Incomplete) => {
+            return Ok(None);
+        }
+        Err(e) => return Err(SessionError::Play(PlayError::from(e))),
+    };
+    let consumed = source.len() - input.len();
+    buffer.drain(..consumed);
+
+    // Re-encode as uncompressed frame into a temporary buffer
+    let mut temp = Vec::new();
+    rustbound_protocol::framing::encode_frame(
+        compressed.packet_id,
+        &compressed.payload,
+        max_frame_length,
+        &mut temp,
+    )
+    .map_err(|e| SessionError::Play(PlayError::from(e)))?;
+
+    try_decode_play_packet_inner(&mut temp, max_frame_length)
+}
+
+fn try_decode_play_packet_inner(
     buffer: &mut Vec<u8>,
     max_frame_length: usize,
 ) -> Result<Option<PlayPacket>, SessionError> {
@@ -931,7 +1019,11 @@ pub fn run_play_loop(
         }
 
         // Try to decode a packet
-        match try_decode_play_packet(&mut read_buffer, session_config.max_frame_length) {
+        match try_decode_play_packet(
+            &mut read_buffer,
+            session_config.max_frame_length,
+            session_config.compression_threshold,
+        ) {
             Ok(Some(packet)) => {
                 if let Err(e) = session.handle_play_packet(packet) {
                     // Send disconnect before returning the error
@@ -1008,6 +1100,7 @@ mod tests {
             gamemode: 0,
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -1043,6 +1136,7 @@ mod tests {
             gamemode: 0,
             max_frame_length: PROTOCOL_MAX_FRAME_LENGTH,
             read_timeout: Duration::from_secs(5),
+            compression_threshold: -1,
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
