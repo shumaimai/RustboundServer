@@ -396,10 +396,12 @@ impl std::error::Error for TickStartError {
 ///
 /// Returns a handle for sending messages and a receiver for events.
 /// The `player_count` atomic is incremented on join and decremented on leave.
-/// The `level_name` is used to load/save block overrides to disk.
+/// The `level_name` is used to load/save block overrides and player data to disk.
+/// The `autosave_interval_secs` controls periodic saves (0 = disabled, save only on shutdown).
 pub fn start_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
+    autosave_interval_secs: u64,
 ) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
     let (event_tx, event_rx) = channel::<TickEvent>();
@@ -409,7 +411,14 @@ pub fn start_tick_loop(
     let thread = thread::Builder::new()
         .name("rustbound-tick".to_string())
         .spawn(move || {
-            run_tick_loop(msg_rx, event_tx, shutdown_clone, player_count, level_name);
+            run_tick_loop(
+                msg_rx,
+                event_tx,
+                shutdown_clone,
+                player_count,
+                level_name,
+                autosave_interval_secs,
+            );
         })
         .map_err(TickStartError::ThreadSpawn)?;
 
@@ -429,12 +438,16 @@ fn run_tick_loop(
     shutdown: Arc<AtomicBool>,
     player_count: Arc<AtomicUsize>,
     level_name: String,
+    autosave_interval_secs: u64,
 ) {
     // Load block overrides and player data from disk on startup
     let loaded = crate::persist::load_overrides(&level_name);
     let saved_players = crate::persist::load_players(&level_name);
     let mut world = World::new();
     world.load_block_overrides(loaded);
+    // Autosave interval in ticks (20 TPS). 0 means disabled.
+    let autosave_interval_ticks: u64 = autosave_interval_secs.saturating_mul(20);
+    let mut last_autosave_tick: u64 = 0;
     let mut tick_count: u64 = 0;
     let mut last_keep_alive_tick: u64 = 0;
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
@@ -818,6 +831,19 @@ fn run_tick_loop(
             }
         }
 
+        // Periodic task: autosave block overrides and player data
+        if autosave_interval_ticks > 0 && tick_count - last_autosave_tick >= autosave_interval_ticks
+        {
+            if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
+                eprintln!("error: autosave failed for block overrides: {}", e);
+            }
+            let player_data = collect_player_data(&world, &inventories);
+            if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+                eprintln!("error: autosave failed for player data: {}", e);
+            }
+            last_autosave_tick = tick_count;
+        }
+
         tick_count += 1;
 
         // Sleep for the remaining tick time
@@ -825,6 +851,17 @@ fn run_tick_loop(
         if elapsed < TICK_DURATION {
             thread::sleep(TICK_DURATION - elapsed);
         }
+    }
+
+    // Flush remaining data to disk on shutdown (covers the case where the
+    // shutdown flag was set before the Shutdown message was processed).
+    // The Shutdown message handler also saves, but this is a safety net.
+    if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
+        eprintln!("error: failed to save block overrides on shutdown: {}", e);
+    }
+    let player_data = collect_player_data(&world, &inventories);
+    if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+        eprintln!("error: failed to save player data on shutdown: {}", e);
     }
 
     let _ = event_tx.send(TickEvent::Shutdown);
@@ -892,6 +929,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
         std::thread::sleep(Duration::from_millis(100));
         handle.shutdown();
@@ -903,6 +941,7 @@ mod tests {
         let (mut handle, event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx_session) = channel::<SessionEvent>();
@@ -957,6 +996,7 @@ mod tests {
         let (mut handle, event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
         handle.send(super::TickMessage::Shutdown)?;
 
@@ -983,6 +1023,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player 1 joins and digs some blocks (creates overrides)
@@ -1084,6 +1125,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player joins a clean world (no overrides)
@@ -1122,6 +1164,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player 1 joins
@@ -1211,6 +1254,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player 1 joins
@@ -1354,6 +1398,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player joins at spawn (0, 64, 0) -> chunk (0, 0)
@@ -1413,6 +1458,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1466,6 +1512,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1560,6 +1607,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1605,6 +1653,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1662,6 +1711,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1707,6 +1757,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1757,6 +1808,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         // Player 1 joins
@@ -1855,6 +1907,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1915,6 +1968,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -1970,6 +2024,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2048,6 +2103,7 @@ mod tests {
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             "test-world".to_string(),
+            0, // disable autosave in tests
         )?;
 
         let (event_tx, event_rx) = channel::<SessionEvent>();
@@ -2087,6 +2143,93 @@ mod tests {
         );
 
         handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_autosave_persists_blocks() -> Result<(), Box<dyn std::error::Error>> {
+        // Use a unique level name to avoid conflicts
+        let level_name = format!(
+            "test-autosave-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Start tick loop with 1-second autosave
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level_name.clone(),
+            1, // 1 second autosave
+        )?;
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (10, 64, 20),
+            block_state: 1,
+        })?;
+
+        // Wait for autosave to trigger (at least 1 second + buffer)
+        std::thread::sleep(Duration::from_millis(1500));
+
+        // Shut down
+        handle.shutdown();
+
+        // Verify the block was saved
+        let loaded = crate::persist::load_overrides(&level_name);
+        assert_eq!(
+            loaded.get(&(10, 64, 20)),
+            Some(&1),
+            "block should be persisted by autosave"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&level_name).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_shutdown_flushes_data() -> Result<(), Box<dyn std::error::Error>> {
+        let level_name = format!(
+            "test-shutdown-flush-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+
+        // Start tick loop with autosave disabled (0)
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level_name.clone(),
+            0, // autosave disabled
+        )?;
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (5, 70, -10),
+            block_state: 10,
+        })?;
+
+        // Wait a bit for the block to be processed
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Shut down - should flush data even with autosave disabled
+        handle.shutdown();
+
+        // Verify the block was saved on shutdown
+        let loaded = crate::persist::load_overrides(&level_name);
+        assert_eq!(
+            loaded.get(&(5, 70, -10)),
+            Some(&10),
+            "block should be persisted on shutdown even with autosave disabled"
+        );
+
+        // Cleanup
+        std::fs::remove_dir_all(&level_name).ok();
         Ok(())
     }
 }
