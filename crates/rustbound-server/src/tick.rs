@@ -238,6 +238,8 @@ pub enum TickMessage {
         uuid: Uuid,
         /// The player's username.
         username: String,
+        /// The player's gamemode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator).
+        gamemode: u8,
         /// The server view distance (in chunks).
         view_distance: i32,
         /// Channel for sending events back to this player's session.
@@ -448,11 +450,16 @@ fn run_tick_loop(
                     entity_id,
                     uuid,
                     username,
+                    gamemode,
                     view_distance,
                     event_sender,
                 } => {
-                    let player =
-                        crate::world::PlayerHandle::new(entity_id, uuid, username.clone(), 0);
+                    let player = crate::world::PlayerHandle::new(
+                        entity_id,
+                        uuid,
+                        username.clone(),
+                        gamemode,
+                    );
                     let (px, py, pz) = player.position();
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
@@ -482,7 +489,7 @@ fn run_tick_loop(
                                 entity_id,
                                 uuid,
                                 username: username.clone(),
-                                gamemode: 0,
+                                gamemode,
                                 x: px,
                                 y: py,
                                 z: pz,
@@ -825,6 +832,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -900,6 +908,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -939,6 +948,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -999,6 +1009,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1035,6 +1046,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1045,6 +1057,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1122,6 +1135,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx1,
         })?;
@@ -1132,6 +1146,7 @@ mod tests {
             entity_id: 2,
             uuid: Uuid::new(1, 0),
             username: "Alex".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx2,
         })?;
@@ -1263,6 +1278,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1319,6 +1335,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 2,
             event_sender: event_tx,
         })?;
@@ -1370,6 +1387,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1462,6 +1480,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1505,6 +1524,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1560,6 +1580,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1603,6 +1624,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1747,6 +1769,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1805,6 +1828,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1858,6 +1882,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1934,6 +1959,7 @@ mod tests {
             entity_id: 1,
             uuid: Uuid::new(0, 0),
             username: "Steve".to_string(),
+            gamemode: 0,
             view_distance: 10,
             event_sender: event_tx,
         })?;
@@ -1963,6 +1989,66 @@ mod tests {
         assert!(
             !got_respawn,
             "should not receive RespawnPlayer when player is alive"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_gamemode_passed_to_handle_and_peers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut handle, _event_rx) =
+            start_tick_loop(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)))?;
+
+        // Player 1 joins in Creative (gamemode=1)
+        let (event_tx1, event_rx1) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1,
+            view_distance: 10,
+            event_sender: event_tx1,
+        })?;
+
+        // Wait for player 1 to be added
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx1.try_recv().is_ok() {}
+
+        // Player 2 joins - should see player 1's Creative gamemode
+        let (event_tx2, event_rx2) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 2,
+            uuid: Uuid::new(1, 0),
+            username: "Alex".to_string(),
+            gamemode: 0,
+            view_distance: 10,
+            event_sender: event_tx2,
+        })?;
+
+        // Player 2 should receive PlayerJoined for player 1 with gamemode=1
+        let start = Instant::now();
+        let mut got_creative_peer = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx2.try_recv() {
+                Ok(SessionEvent::PlayerJoined {
+                    entity_id,
+                    gamemode,
+                    ..
+                }) => {
+                    if entity_id == 1 && gamemode == 1 {
+                        got_creative_peer = true;
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_creative_peer,
+            "player 2 should see player 1 with Creative gamemode (1)"
         );
 
         handle.shutdown();
