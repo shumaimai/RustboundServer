@@ -1,0 +1,16 @@
+# Rustbound example config (Minecraft Java 1.20.1 / protocol 763, offline mode)
+# Copy to server.properties or pass --config path/to/this-file
+
+server-ip=0.0.0.0
+server-port=25565
+online-mode=false
+max-players=20
+motd=Rustbound offline pre-alpha
+gamemode=1
+view-distance=8
+simulation-distance=8
+level-name=world
+network-compression-threshold=256
+connection-timeout=30
+keep-alive-timeout=30
+autosave-interval=300

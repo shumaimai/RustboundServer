@@ -123,6 +123,23 @@ impl PlayerInventory {
         }
     }
 
+    /// Fresh Creative inventory with a few placeable hotbar stubs.
+    ///
+    /// Item IDs match the flat-world palette registry (stone/dirt/oak/cobble/grass).
+    fn creative_starter() -> Self {
+        let mut inv = Self::new();
+        let starters = [(1_i32, 64_i8), (10, 64), (8, 64), (11, 64), (7, 64)];
+        for (slot, (item_id, count)) in starters.into_iter().enumerate() {
+            inv.slots[slot] = rustbound_protocol::play::Slot {
+                present: true,
+                item_id,
+                count,
+                nbt: Vec::new(),
+            };
+        }
+        inv
+    }
+
     /// Sets a slot and returns true if the slot actually changed.
     fn set_slot(&mut self, index: usize, item: rustbound_protocol::play::Slot) -> bool {
         if index >= self.slots.len() {
@@ -633,8 +650,12 @@ fn run_tick_loop(
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
                     chunk_states.insert(entity_id, PlayerChunkState::new(view_distance));
-                    // Restore inventory or create new
-                    let mut inv = PlayerInventory::new();
+                    // Restore inventory or create new (Creative gets starter blocks)
+                    let mut inv = if saved.is_none() && gamemode == GAMEMODE_CREATIVE {
+                        PlayerInventory::creative_starter()
+                    } else {
+                        PlayerInventory::new()
+                    };
                     if let Some(ref d) = saved {
                         inv.held_slot = d.held_slot;
                         inv.health = d.health;
@@ -982,7 +1003,7 @@ fn run_tick_loop(
                     }
                 }
                 TickMessage::ChatMessage {
-                    entity_id,
+                    entity_id: _,
                     uuid: _,
                     username,
                     message,
@@ -991,13 +1012,12 @@ fn run_tick_loop(
                     // In offline mode, we use the unsigned/system chat path
                     // (no signed Player Chat Message).
                     let content = format_chat_message(&username, &message);
-                    for (eid, sender) in &session_senders {
-                        // Don't echo back to the sender
-                        if *eid != entity_id {
-                            let _ = sender.send(SessionEvent::SystemChat {
-                                content: content.clone(),
-                            });
-                        }
+                    // Broadcast to everyone including the sender so offline
+                    // clients without local echo still see their own chat.
+                    for sender in session_senders.values() {
+                        let _ = sender.send(SessionEvent::SystemChat {
+                            content: content.clone(),
+                        });
                     }
                 }
                 TickMessage::ClientStatus { entity_id, action } => {
@@ -2434,14 +2454,14 @@ mod tests {
         }
         assert!(got_chat, "player 2 should have received the chat message");
 
-        // Player 1 should NOT receive its own chat
+        // Player 1 also receives an echo (offline clients may lack local echo)
         let mut self_received = false;
         while let Ok(event) = event_rx1.try_recv() {
             if matches!(event, SessionEvent::SystemChat { .. }) {
                 self_received = true;
             }
         }
-        assert!(!self_received, "player 1 should not receive its own chat");
+        assert!(self_received, "player 1 should receive its own chat echo");
 
         handle.shutdown();
         Ok(())
@@ -2924,7 +2944,16 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         while event_rx.try_recv().is_ok() {}
 
-        // Held slot is empty (default) — place should do nothing
+        // Clear Creative starter hotbar so the held slot is empty
+        handle.send(super::TickMessage::SetCreativeSlot {
+            entity_id: 1,
+            slot: 0,
+            item: rustbound_protocol::play::Slot::empty(),
+        })?;
+        std::thread::sleep(Duration::from_millis(50));
+        while event_rx.try_recv().is_ok() {}
+
+        // Held slot is empty — place should do nothing
         handle.send(super::TickMessage::PlaceBlock {
             entity_id: 1,
             position: (0, 64, 0),
