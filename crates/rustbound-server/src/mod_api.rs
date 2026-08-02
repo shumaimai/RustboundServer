@@ -1,11 +1,10 @@
 //! Thin Rust Mod API (Issue #101).
 //!
 //! This module defines the core traits and types for the Mod API.
-//! The implementation is phased — see `docs/mod-api-design.md` for the
-//! full design document.
+//! See `docs/mod-api-design.md` for the full design document.
 //!
-//! Phase 1 (current): Core trait definitions and context types.
-//! The traits are defined but not yet wired into the tick loop.
+//! Phase 1: Core trait definitions, context types, and tick-loop wiring
+//! (`ModHost` init / tick / shutdown callbacks via `start_tick_loop`).
 
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
