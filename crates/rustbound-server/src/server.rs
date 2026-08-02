@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::config::ServerConfig;
 use crate::connection::{ConnectionConfig, default_status_response, handle_connection};
 use crate::listener::{ListenerConfig, ListenerHandle, start_listener};
+use crate::session::EntityIdAllocator;
 use crate::tick::{TickHandle, TickStartError, start_tick_loop};
 
 /// An error encountered while running the server.
@@ -60,10 +61,14 @@ impl Server {
     pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
         let (tick_handle, _event_rx) = start_tick_loop()?;
 
+        let tick_sender = tick_handle.sender();
         let connection_config = Arc::new(ConnectionConfig {
             status_response: default_status_response(),
             online_mode: config.online_mode,
             max_frame_length: 65536,
+            tick_sender,
+            entity_id_allocator: EntityIdAllocator::new(1),
+            play_read_timeout: Duration::from_secs(30),
         });
 
         let listener_config = ListenerConfig {
@@ -225,6 +230,38 @@ mod tests {
                 panic!("server disconnected: {reason}");
             }
         }
+
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_handles_play_conformance() -> Result<(), Box<dyn std::error::Error>> {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let probe_config = rustbound_conformance::PlayProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "PlayTestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(10),
+        };
+        let snapshot = rustbound_conformance::run_play_probe(&probe_config)?;
+
+        assert_eq!(snapshot.username, "PlayTestPlayer");
+        assert_eq!(snapshot.uuid, Uuid::new(0, 0));
+        assert_eq!(snapshot.gamemode, 0); // Survival
+        assert_eq!(snapshot.dimension_name, "minecraft:overworld");
+        assert!(!snapshot.is_hardcore);
+        assert!(snapshot.is_flat);
 
         server.shutdown();
         Ok(())
