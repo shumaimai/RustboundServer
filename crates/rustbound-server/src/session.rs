@@ -19,7 +19,7 @@ use rustbound_protocol::play::{
     GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
     PlayerAbilities, PluginMessageClientbound, Respawn, SetCenterChunk, SetContainerContent,
     SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetRenderDistance,
-    SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage,
+    SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage, UnloadChunk,
     decode_chat_message_serverbound, decode_client_information, decode_client_status,
     decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
     decode_set_creative_mode_slot, decode_set_held_item_serverbound, decode_set_player_position,
@@ -30,6 +30,7 @@ use rustbound_protocol::play::{
     encode_set_container_content, encode_set_container_slot, encode_set_default_spawn_position,
     encode_set_health, encode_set_held_item, encode_set_render_distance,
     encode_set_simulation_distance, encode_synchronize_player_position, encode_system_chat_message,
+    encode_unload_chunk,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -146,6 +147,13 @@ pub enum SessionEvent {
     },
     /// Send a Chunk Data packet for a newly loaded chunk.
     LoadChunk {
+        /// The chunk X coordinate.
+        chunk_x: i32,
+        /// The chunk Z coordinate.
+        chunk_z: i32,
+    },
+    /// Send an Unload Chunk packet for a chunk that left the player's view.
+    UnloadChunk {
         /// The chunk X coordinate.
         chunk_x: i32,
         /// The chunk Z coordinate.
@@ -903,6 +911,13 @@ impl PlayerSession {
                 }
                 SessionEvent::LoadChunk { chunk_x, chunk_z } => {
                     self.send_single_chunk(stream, chunk_x, chunk_z)?;
+                    processed = true;
+                }
+                SessionEvent::UnloadChunk { chunk_x, chunk_z } => {
+                    let packet = UnloadChunk { chunk_x, chunk_z };
+                    let mut wire = Vec::new();
+                    encode_unload_chunk(&packet, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
                     processed = true;
                 }
                 SessionEvent::SetContainerContent {
