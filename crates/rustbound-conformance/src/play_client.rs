@@ -15,7 +15,10 @@ use rustbound_protocol::handshake::{HandshakePacket, encode_handshake};
 use rustbound_protocol::login::{
     LoginDecodeOutcome, LoginPacket, LoginStart, decode_login_success, encode_login_start,
 };
-use rustbound_protocol::play::{PlayDecodeOutcome, PlayError, PlayPacket, decode_join_game};
+use rustbound_protocol::play::{
+    ConfirmTeleportation, PlayDecodeOutcome, PlayError, PlayPacket, decode_join_game,
+    decode_synchronize_player_position, encode_confirm_teleportation,
+};
 use rustbound_protocol::primitives::Uuid;
 use rustbound_protocol::state::NextState;
 
@@ -92,6 +95,25 @@ pub struct PlaySnapshot {
     pub uuid: Uuid,
     /// The player's username from Login Success.
     pub username: String,
+    /// The furthest phase reached by the probe.
+    pub phase_reached: PlayPhase,
+    /// Whether a Synchronize Player Position was received and confirmed.
+    pub teleport_confirmed: bool,
+    /// Whether a Keep Alive was observed.
+    pub keep_alive_seen: bool,
+    /// Whether a Chunk Data packet was observed.
+    pub chunk_data_seen: bool,
+}
+
+/// The furthest phase reached by a play conformance probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayPhase {
+    /// Join Game received.
+    JoinGame,
+    /// Synchronize Player Position received and teleport confirmed.
+    TeleportConfirmed,
+    /// At least one post-teleport packet observed (keepalive or chunk).
+    PostTeleport,
 }
 
 /// Configuration for a play conformance probe.
@@ -249,24 +271,42 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
     let (uuid, username) = login_success_info
         .ok_or_else(|| PlayClientError::Protocol("did not receive Login Success".to_string()))?;
 
-    // Now read frames until we get Join Game (Play 0x28)
+    // Now read frames in Play state.
+    // We continue past Join Game to observe:
+    //   - Synchronize Player Position (0x3C) → send Confirm Teleportation
+    //   - Keep Alive (0x23) → flag
+    //   - Chunk Data (0x24) → flag
+    // The probe ends after a short observation window or on timeout.
     buffer.clear();
 
+    let mut snapshot_entity_id: Option<i32> = None;
+    let mut snapshot_gamemode: Option<u8> = None;
+    let mut snapshot_dimension: Option<String> = None;
+    let mut snapshot_hashed_seed: Option<i64> = None;
+    let mut snapshot_hardcore: Option<bool> = None;
+    let mut snapshot_flat: Option<bool> = None;
+    let mut teleport_confirmed = false;
+    let mut keep_alive_seen = false;
+    let mut chunk_data_seen = false;
+    let mut phase = PlayPhase::JoinGame;
+
+    // Read packets until we either time out (natural end of observation)
+    // or have observed enough post-teleport packets.
     loop {
         let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::WouldBlock
-                || error.kind() == std::io::ErrorKind::TimedOut
-            {
-                PlayClientError::Timeout
-            } else {
-                PlayClientError::Io(error)
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => return Err(PlayClientError::PrematureEof),
+            Ok(n) => n,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut
+                {
+                    // Timeout - natural end of observation window
+                    break;
+                }
+                return Err(PlayClientError::Io(error));
             }
-        })?;
-
-        if n == 0 {
-            return Err(PlayClientError::PrematureEof);
-        }
+        };
 
         buffer.extend_from_slice(&chunk[..n]);
 
@@ -284,9 +324,9 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
             let consumed = buffer.len() - input.len();
             buffer.drain(..consumed);
 
-            // In Play state, packet ID 0x28 = Join Game
             match packet_id {
                 0x28 => {
+                    // Join Game
                     let mut reconstructed = Vec::new();
                     encode_frame(
                         0x28,
@@ -297,16 +337,13 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
                     let mut recon_input = reconstructed.as_slice();
                     match decode_join_game(&mut recon_input, PROTOCOL_MAX_FRAME_LENGTH)? {
                         PlayDecodeOutcome::Complete(PlayPacket::JoinGame(join)) => {
-                            return Ok(PlaySnapshot {
-                                entity_id: join.entity_id,
-                                gamemode: join.gamemode.to_wire(),
-                                dimension_name: join.dimension_name,
-                                hashed_seed: join.hashed_seed,
-                                is_hardcore: join.is_hardcore,
-                                is_flat: join.is_flat,
-                                uuid,
-                                username,
-                            });
+                            snapshot_entity_id = Some(join.entity_id);
+                            snapshot_gamemode = Some(join.gamemode.to_wire());
+                            snapshot_dimension = Some(join.dimension_name);
+                            snapshot_hashed_seed = Some(join.hashed_seed);
+                            snapshot_hardcore = Some(join.is_hardcore);
+                            snapshot_flat = Some(join.is_flat);
+                            phase = PlayPhase::JoinGame;
                         }
                         _ => {
                             return Err(PlayClientError::Protocol(
@@ -315,17 +352,102 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
                         }
                     }
                 }
+                0x3C => {
+                    // Synchronize Player Position - contains teleport ID
+                    let mut reconstructed = Vec::new();
+                    encode_frame(
+                        0x3C,
+                        &payload,
+                        PROTOCOL_MAX_FRAME_LENGTH,
+                        &mut reconstructed,
+                    )?;
+                    let mut recon_input = reconstructed.as_slice();
+                    match decode_synchronize_player_position(
+                        &mut recon_input,
+                        PROTOCOL_MAX_FRAME_LENGTH,
+                    ) {
+                        Ok(PlayDecodeOutcome::Complete(PlayPacket::SynchronizePlayerPosition(
+                            sync,
+                        ))) => {
+                            // Send Confirm Teleportation back
+                            let confirm = ConfirmTeleportation {
+                                teleport_id: sync.teleport_id,
+                            };
+                            let mut confirm_wire = Vec::new();
+                            encode_confirm_teleportation(
+                                &confirm,
+                                PROTOCOL_MAX_FRAME_LENGTH,
+                                &mut confirm_wire,
+                            )
+                            .map_err(|e| PlayClientError::Protocol(e.to_string()))?;
+                            stream
+                                .write_all(&confirm_wire)
+                                .map_err(PlayClientError::Io)?;
+                            teleport_confirmed = true;
+                            phase = PlayPhase::TeleportConfirmed;
+                        }
+                        Ok(_) => {}
+                        Err(_) => {}
+                    }
+                }
+                0x23 => {
+                    // Keep Alive (clientbound)
+                    keep_alive_seen = true;
+                    if teleport_confirmed {
+                        phase = PlayPhase::PostTeleport;
+                    }
+                }
+                0x24 => {
+                    // Chunk Data
+                    chunk_data_seen = true;
+                    if teleport_confirmed {
+                        phase = PlayPhase::PostTeleport;
+                    }
+                }
                 _ => {
-                    // Skip other play packets for now
+                    // Skip other play packets
                 }
             }
         }
+
+        // If we've seen post-teleport packets, we can stop
+        if phase == PlayPhase::PostTeleport {
+            break;
+        }
     }
+
+    let entity_id = snapshot_entity_id
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+    let gamemode = snapshot_gamemode
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+    let dimension_name = snapshot_dimension
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+    let hashed_seed = snapshot_hashed_seed
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+    let is_hardcore = snapshot_hardcore
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+    let is_flat = snapshot_flat
+        .ok_or_else(|| PlayClientError::Protocol("did not receive Join Game".to_string()))?;
+
+    Ok(PlaySnapshot {
+        entity_id,
+        gamemode,
+        dimension_name,
+        hashed_seed,
+        is_hardcore,
+        is_flat,
+        uuid,
+        username,
+        phase_reached: phase,
+        teleport_confirmed,
+        keep_alive_seen,
+        chunk_data_seen,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PlayClientError, PlaySnapshot};
+    use super::{PlayClientError, PlayPhase, PlaySnapshot};
 
     #[test]
     fn play_client_error_display_is_informative() {
@@ -345,6 +467,10 @@ mod tests {
             is_flat: false,
             uuid,
             username: "Steve".to_string(),
+            phase_reached: PlayPhase::JoinGame,
+            teleport_confirmed: false,
+            keep_alive_seen: false,
+            chunk_data_seen: false,
         };
         let b = PlaySnapshot {
             entity_id: 42,
@@ -355,6 +481,10 @@ mod tests {
             is_flat: false,
             uuid,
             username: "Steve".to_string(),
+            phase_reached: PlayPhase::JoinGame,
+            teleport_confirmed: false,
+            keep_alive_seen: false,
+            chunk_data_seen: false,
         };
         assert_eq!(a, b);
     }
