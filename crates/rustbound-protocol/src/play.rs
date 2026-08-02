@@ -138,6 +138,12 @@ pub const MAX_CONTAINER_SLOTS: usize = 256;
 /// Maximum size of an item NBT blob.
 pub const MAX_ITEM_NBT_SIZE: usize = 65536;
 
+/// Packet ID for the serverbound Chat Message packet.
+pub const CHAT_MESSAGE_SERVERBOUND_PACKET_ID: i32 = 0x01;
+
+/// Packet ID for the clientbound System Chat Message packet.
+pub const SYSTEM_CHAT_MESSAGE_PACKET_ID: i32 = 0x5D;
+
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
 
@@ -309,7 +315,7 @@ pub enum PlayPacket {
     MoveEntityRot(MoveEntityRot),
     /// Clientbound Entity Teleport (Play `0x57`).
     EntityTeleport(EntityTeleport),
-    /// Clientbound Set Container Content (Play `0x12`).
+/// Clientbound Set Container Content (Play `0x12`).
     SetContainerContent(SetContainerContent),
     /// Clientbound Set Container Slot (Play `0x14`).
     SetContainerSlot(SetContainerSlot),
@@ -317,6 +323,10 @@ pub enum PlayPacket {
     SetHeldItemServerbound(SetHeldItemServerbound),
     /// Serverbound Set Creative Mode Slot (Play `0x2B`).
     SetCreativeModeSlot(SetCreativeModeSlot),
+    /// Serverbound Chat Message (Play `0x01`).
+    ChatMessageServerbound(ChatMessageServerbound),
+    /// Clientbound System Chat Message (Play `0x5D`).
+    SystemChatMessage(SystemChatMessage),
 }
 
 /// The player's gamemode.
@@ -3116,6 +3126,29 @@ pub fn decode_set_creative_mode_slot(
     ))
 }
 
+/// Serverbound Chat Message (Play `0x01`).
+///
+/// In offline mode, the signature fields are ignored. Only the `message`
+/// field is used for chat broadcasting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatMessageServerbound {
+    /// The chat message text (max 256 characters).
+    pub message: String,
+}
+
+/// Clientbound System Chat Message (Play `0x5D`).
+///
+/// Used for system messages and, in offline mode, for player chat
+/// (since signed chat is not applicable without online mode).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SystemChatMessage {
+    /// The chat content as a JSON chat component string.
+    pub content: String,
+    /// Whether this message should be shown as an overlay (above hotbar)
+    /// rather than in the chat box.
+    pub overlay: bool,
+}
+
 /// Encodes a Player Info Update packet (clientbound Play `0x3A`).
 pub fn encode_player_info_update(
     packet: &PlayerInfoUpdate,
@@ -3592,6 +3625,72 @@ pub fn decode_entity_teleport(
             on_ground,
         },
     )))
+}
+
+// ---------------------------------------------------------------------------
+// Chat packets (protocol 763)
+// ---------------------------------------------------------------------------
+
+/// Encodes a System Chat Message packet (clientbound Play `0x5D`).
+pub fn encode_system_chat_message(
+    packet: &SystemChatMessage,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_string(&packet.content, 32767, &mut body).map_err(PlayError::Codec)?;
+    encode_bool(packet.overlay, &mut body);
+    encode_frame(
+        SYSTEM_CHAT_MESSAGE_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Chat Message packet (serverbound Play `0x01`).
+///
+/// In offline mode, only the `message` field is extracted. The remaining
+/// fields (timestamp, salt, signature, acknowledgements) are consumed
+/// and discarded, as they are only relevant for signed chat (online mode).
+pub fn decode_chat_message_serverbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != CHAT_MESSAGE_SERVERBOUND_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CHAT_MESSAGE_SERVERBOUND_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    // Message: String (max 256)
+    let message = decode_string(&mut body, 256).map_err(|e| {
+        *input = source;
+        PlayError::Codec(e)
+    })?;
+    let message = message.to_string();
+    // Remaining fields (timestamp, salt, signature, acknowledgements) are
+    // skipped for offline mode. We don't need to parse them individually;
+    // the frame boundary ensures we consume the right number of bytes.
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::ChatMessageServerbound(ChatMessageServerbound { message }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4117,18 +4216,19 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        AcknowledgeBlockChange, BlockUpdate, ChangeDifficulty, ChatMode, ChunkData,
-        ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent, EntityTeleport,
-        GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
-        KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome,
-        PlayError, PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction,
-        PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
-        PluginMessageClientbound, RemoveEntities, SET_CREATIVE_MODE_SLOT_PACKET_ID,
-        SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SetCenterChunk, SetContainerContent, SetContainerSlot,
-        SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, Slot, SpawnPlayer,
-        SynchronizePlayerPosition, UseItemOn, decode_acknowledge_block_change, decode_block_update,
-        decode_change_difficulty, decode_chunk_data, decode_client_information,
+        AcknowledgeBlockChange, BlockUpdate, CHAT_MESSAGE_SERVERBOUND_PACKET_ID, ChangeDifficulty,
+        ChatMode, ChunkData, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
+        EntityTeleport, GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot,
+        MoveEntityRot, PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities, PlayerDigging,
+        PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
+        PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, SET_CREATIVE_MODE_SLOT_PACKET_ID,
+        SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SYSTEM_CHAT_MESSAGE_PACKET_ID, SetCenterChunk,
+        SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHeldItem,
+        SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation, SetRenderDistance,
+        SetSimulationDistance, Slot, SpawnPlayer, SynchronizePlayerPosition, SystemChatMessage,
+        UseItemOn, decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
+        decode_chat_message_serverbound, decode_chunk_data, decode_client_information,
         decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
         decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
         decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
@@ -4150,9 +4250,11 @@ mod tests {
         encode_set_default_spawn_position, encode_set_held_item, encode_set_player_position,
         encode_set_player_position_and_rotation, encode_set_player_rotation,
         encode_set_render_distance, encode_set_simulation_distance, encode_slot,
-        encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
+        encode_spawn_player, encode_synchronize_player_position, encode_system_chat_message,
+        encode_use_item_on,
         ensure_play_state,
     };
+    use crate::primitives::{decode_bool, decode_string};
     use crate::state::ProtocolState;
 
     const TEST_MAX_FRAME: usize = 1048576;
@@ -5738,6 +5840,114 @@ mod tests {
                 assert!(!decoded.item.present);
             }
             other => panic!("expected SetCreativeModeSlot, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn system_chat_message_roundtrip() -> Result<(), PlayError> {
+        let packet = SystemChatMessage {
+            content: r#"{"text":"Hello, world!"}"#.to_string(),
+            overlay: false,
+        };
+        let mut wire = Vec::new();
+        encode_system_chat_message(&packet, TEST_MAX_FRAME, &mut wire)?;
+        // Verify the packet ID is correct
+        let mut input = wire.as_slice();
+        let frame =
+            crate::framing::decode_frame(&mut input, TEST_MAX_FRAME).map_err(PlayError::from)?;
+        match frame {
+            crate::framing::DecodeOutcome::Complete(f) => {
+                assert_eq!(f.packet_id, SYSTEM_CHAT_MESSAGE_PACKET_ID);
+                let mut body = f.payload;
+                let content = decode_string(&mut body, 32767).map_err(PlayError::Codec)?;
+                assert_eq!(content, r#"{"text":"Hello, world!"}"#);
+                let overlay = decode_bool(&mut body).map_err(PlayError::Codec)?;
+                assert!(!overlay);
+                assert!(body.is_empty());
+            }
+            crate::framing::DecodeOutcome::Incomplete => panic!("expected complete frame"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn system_chat_message_overlay() -> Result<(), PlayError> {
+        let packet = SystemChatMessage {
+            content: r#"{"text":"Game tip!"}"#.to_string(),
+            overlay: true,
+        };
+        let mut wire = Vec::new();
+        encode_system_chat_message(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        let frame =
+            crate::framing::decode_frame(&mut input, TEST_MAX_FRAME).map_err(PlayError::from)?;
+        match frame {
+            crate::framing::DecodeOutcome::Complete(f) => {
+                assert_eq!(f.packet_id, SYSTEM_CHAT_MESSAGE_PACKET_ID);
+                let mut body = f.payload;
+                let _content = decode_string(&mut body, 32767).map_err(PlayError::Codec)?;
+                let overlay = decode_bool(&mut body).map_err(PlayError::Codec)?;
+                assert!(overlay);
+            }
+            crate::framing::DecodeOutcome::Incomplete => panic!("expected complete frame"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decode_chat_message_serverbound_extracts_message() -> Result<(), PlayError> {
+        // Build a Chat Message serverbound packet manually.
+        // Format: packet_id (0x01) + message_string + trailing_fields
+        let mut body = Vec::new();
+        crate::primitives::encode_string("Hello chat!", 256, &mut body).map_err(PlayError::from)?;
+        // Add dummy trailing fields (timestamp, salt, signature, acks)
+        // that would normally be present in a real chat packet.
+        crate::primitives::encode_i64(1234567890, &mut body); // timestamp
+        crate::primitives::encode_i64(0, &mut body); // salt
+        crate::primitives::encode_bool(false, &mut body); // no signature
+        // Minimal acknowledgements: count=0
+        crate::primitives::encode_var_int(0, &mut body); // offset
+        // 3 bytes of bitset for acknowledged (simplified)
+        body.extend_from_slice(&[0, 0, 0]);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(
+            CHAT_MESSAGE_SERVERBOUND_PACKET_ID,
+            &body,
+            TEST_MAX_FRAME,
+            &mut wire,
+        )
+        .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_chat_message_serverbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ChatMessageServerbound(chat)) => {
+                assert_eq!(chat.message, "Hello chat!");
+            }
+            other => panic!("expected ChatMessageServerbound, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn decode_chat_message_wrong_id_returns_error() -> Result<(), PlayError> {
+        // Build a frame with wrong packet ID
+        let body = vec![0u8; 10];
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(0x99, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        let result = decode_chat_message_serverbound(&mut input, TEST_MAX_FRAME);
+        assert!(result.is_err());
+        match result {
+            Err(PlayError::WrongPacketId { received, expected }) => {
+                assert_eq!(received, 0x99);
+                assert_eq!(expected, CHAT_MESSAGE_SERVERBOUND_PACKET_ID);
+            }
+            other => panic!("expected WrongPacketId, got {other:?}"),
         }
         Ok(())
     }
