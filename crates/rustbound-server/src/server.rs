@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use crate::config::ServerConfig;
-use crate::connection::{ConnectionConfig, default_status_response, handle_connection};
+use crate::connection::{ConnectionConfig, handle_connection, status_response_from_config};
 use crate::listener::{ListenerConfig, ListenerHandle, start_listener};
 use crate::session::EntityIdAllocator;
 use crate::tick::{TickHandle, TickStartError, start_tick_loop};
@@ -66,7 +66,7 @@ impl Server {
         let tick_sender = tick_handle.sender();
         let max_players = config.max_players;
         let connection_config = Arc::new(ConnectionConfig {
-            status_response: default_status_response(),
+            status_response: status_response_from_config(&config.motd, config.max_players),
             online_mode: config.online_mode,
             max_frame_length: 65536,
             compression_threshold: config.network_compression_threshold,
@@ -77,6 +77,8 @@ impl Server {
             max_players,
             default_gamemode: config.default_gamemode,
             view_distance: config.view_distance,
+            simulation_distance: config.simulation_distance,
+            motd: config.motd.clone(),
         });
 
         let listener_config = ListenerConfig {

@@ -234,6 +234,10 @@ pub struct SessionConfig {
     pub compression_threshold: i32,
     /// The server view distance (in chunks).
     pub view_distance: i32,
+    /// The server simulation distance (in chunks).
+    pub simulation_distance: i32,
+    /// The maximum number of players.
+    pub max_players: i32,
 }
 
 /// A player session in the Play state.
@@ -269,6 +273,12 @@ pub struct PlayerSession {
     last_yaw: f32,
     /// Last known pitch (degrees).
     last_pitch: f32,
+    /// The server view distance (in chunks).
+    view_distance: i32,
+    /// The server simulation distance (in chunks).
+    simulation_distance: i32,
+    /// The maximum number of players.
+    max_players: i32,
 }
 
 impl PlayerSession {
@@ -313,6 +323,9 @@ impl PlayerSession {
             last_z: 0.0,
             last_yaw: 0.0,
             last_pitch: 0.0,
+            view_distance: config.view_distance,
+            simulation_distance: config.simulation_distance,
+            max_players: config.max_players,
         })
     }
 
@@ -381,9 +394,9 @@ impl PlayerSession {
             dimension_type: "minecraft:overworld".to_string(),
             dimension_name: "minecraft:overworld".to_string(),
             hashed_seed: 0,
-            max_players: 20,
-            view_distance: 10,
-            simulation_distance: 10,
+            max_players: self.max_players,
+            view_distance: self.view_distance,
+            simulation_distance: self.simulation_distance,
             reduce_debug_info: false,
             enable_respawn_screen: true,
             is_debug: false,
@@ -476,14 +489,16 @@ impl PlayerSession {
         self.send_wire(stream, &wire)?;
 
         // 8. Set Render Distance  E0x4F
-        let render = SetRenderDistance { view_distance: 10 };
+        let render = SetRenderDistance {
+            view_distance: self.view_distance,
+        };
         wire.clear();
         encode_set_render_distance(&render, mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
         // 9. Set Simulation Distance  E0x5C
         let sim = SetSimulationDistance {
-            simulation_distance: 10,
+            simulation_distance: self.simulation_distance,
         };
         wire.clear();
         encode_set_simulation_distance(&sim, mfl, &mut wire)?;
@@ -1451,6 +1466,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -1488,6 +1505,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1624,6 +1643,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1668,6 +1689,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1716,6 +1739,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -1755,6 +1780,8 @@ mod tests {
             read_timeout: Duration::from_secs(5),
             compression_threshold: -1,
             view_distance: 10,
+            simulation_distance: 10,
+            max_players: 20,
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
