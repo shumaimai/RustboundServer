@@ -17,16 +17,17 @@ use std::time::Duration;
 use rustbound_protocol::play::{
     ChangeDifficulty, ClientInformation, CombatDeath, ConfirmTeleportation, DisconnectPlay,
     EntityEvent, GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError,
-    PlayPacket, PlayerAbilities, PluginMessageClientbound, Respawn, SetCenterChunk,
-    SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem,
-    SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition, SystemChatMessage,
-    UnloadChunk, decode_chat_message_serverbound, decode_client_information, decode_client_status,
-    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
-    decode_set_creative_mode_slot, decode_set_held_item_serverbound, decode_set_player_position,
-    decode_set_player_position_and_rotation, decode_set_player_rotation, decode_use_item_on,
-    encode_change_difficulty, encode_chunk_data, encode_combat_death, encode_disconnect_play,
-    encode_entity_event, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
-    encode_player_abilities, encode_plugin_message_clientbound, encode_respawn,
+    PlayPacket, PlayerAbilities, PluginMessageClientbound, Respawn, SetBlockDestroyStage,
+    SetCenterChunk, SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth,
+    SetHeldItem, SetRenderDistance, SetSimulationDistance, SynchronizePlayerPosition,
+    SystemChatMessage, UnloadChunk, decode_chat_message_serverbound, decode_client_information,
+    decode_client_status, decode_confirm_teleportation, decode_keep_alive_serverbound,
+    decode_player_digging, decode_set_creative_mode_slot, decode_set_held_item_serverbound,
+    decode_set_player_position, decode_set_player_position_and_rotation,
+    decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
+    encode_combat_death, encode_disconnect_play, encode_entity_event, encode_game_event,
+    encode_join_game, encode_keep_alive_clientbound, encode_player_abilities,
+    encode_plugin_message_clientbound, encode_respawn, encode_set_block_destroy_stage,
     encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
     encode_set_default_spawn_position, encode_set_health, encode_set_held_item,
     encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
@@ -165,6 +166,15 @@ pub enum SessionEvent {
         player_id: i32,
         /// The death message as a JSON chat component string.
         message: String,
+    },
+    /// Send a Set Block Destroy Stage packet to show break progress.
+    SetBlockDestroyStage {
+        /// The entity ID breaking the block.
+        entity_id: i32,
+        /// The block position.
+        position: (i32, i32, i32),
+        /// The destroy stage (0–9 to set, any other to remove).
+        destroy_stage: i8,
     },
     /// Send a Set Container Content packet to initialize or sync the inventory.
     SetContainerContent {
@@ -934,6 +944,21 @@ impl PlayerSession {
                     self.send_wire(stream, &wire)?;
                     processed = true;
                 }
+                SessionEvent::SetBlockDestroyStage {
+                    entity_id,
+                    position,
+                    destroy_stage,
+                } => {
+                    let packet = SetBlockDestroyStage {
+                        entity_id,
+                        position,
+                        destroy_stage,
+                    };
+                    let mut wire = Vec::new();
+                    encode_set_block_destroy_stage(&packet, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
                 SessionEvent::SetContainerContent {
                     window_id,
                     state_id,
@@ -1119,7 +1144,7 @@ impl PlayerSession {
             }
             PlayPacket::PlayerDigging(dig) => {
                 // Creative mode: instant break on StartDestroy
-                // Survival: deny (no break progress yet) but still ACK
+                // Survival: forward to tick loop for break progress tracking
                 if self.gamemode == GameMode::Creative
                     && matches!(
                         dig.action,
@@ -1130,6 +1155,26 @@ impl PlayerSession {
                     let _ = self.tick_sender.send(TickMessage::SetBlock {
                         position: dig.position,
                         block_state: 0,
+                    });
+                } else if self.gamemode != GameMode::Creative
+                    && matches!(
+                        dig.action,
+                        rustbound_protocol::play::PlayerDiggingAction::StartDestroy
+                            | rustbound_protocol::play::PlayerDiggingAction::AbortDestroy
+                            | rustbound_protocol::play::PlayerDiggingAction::StopDestroy
+                    )
+                {
+                    // Forward dig action to tick loop for break progress
+                    let action = match dig.action {
+                        rustbound_protocol::play::PlayerDiggingAction::StartDestroy => 0,
+                        rustbound_protocol::play::PlayerDiggingAction::AbortDestroy => 1,
+                        rustbound_protocol::play::PlayerDiggingAction::StopDestroy => 2,
+                        _ => 0,
+                    };
+                    let _ = self.tick_sender.send(TickMessage::DigBlock {
+                        entity_id: self.entity_id,
+                        action,
+                        position: dig.position,
                     });
                 }
                 // Always ACK the dig packet (protocol requires it)
@@ -2214,10 +2259,15 @@ mod tests {
         // Should still return ACK sequence (protocol requires it)
         assert_eq!(ack, Some(99));
 
-        // Should NOT receive SetBlock (Survival doesn't instant-break)
+        // Should receive DigBlock (forwarded to tick loop for break progress)
         match rx.try_recv() {
-            Err(std::sync::mpsc::TryRecvError::Empty) => {} // Good: no SetBlock
-            Ok(msg) => panic!("Survival dig should not send SetBlock, got {msg:?}"),
+            Ok(TickMessage::DigBlock {
+                action, position, ..
+            }) => {
+                assert_eq!(action, 0, "should be StartDestroy action");
+                assert_eq!(position, (5, 10, 15));
+            }
+            Ok(msg) => panic!("expected DigBlock, got {msg:?}"),
             Err(e) => panic!("channel error: {e}"),
         }
         Ok(())
