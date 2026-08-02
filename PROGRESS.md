@@ -25,7 +25,7 @@ Minecraft Java Edition 1.20.1 (protocol 763) と互換性のあるピュアRust�
 | Phase C: World Visibility | 3 | 1 | — | 完了 |
 | Phase D: Multiplayer | 3 | 1 | — | 完了 |
 | Phase E: Polish | 5 | 3 | — | 完了 |
-| Phase F–I + Mod API design | — | — | — | F–H **完了** / I **一部完了** (#122/#131/#123/#124–#126) |
+| Phase F–I + Mod API design | — | — | — | F–I **完了** / Mod API 設計+façade 着地 (#101/#132) |
 | **合計 (A–E まで)** | **46** | **24** | **~298** | **A–E 完了** |
 
 テスト: conformance 28 + protocol 219 + server（persist/registry 追加）+ 1 ignored。
@@ -257,31 +257,34 @@ c587232 Establish clean-room Rust workspace.
 
 ---
 
-## 既知のギャップ（I 一部完了後）
+## 既知のギャップ（Phase I 完了後）
 
-- ~~Creative 設置が石固定~~ — **#123 Done**（ホットバー所持アイテム）
+- ~~Creative 設置が石固定~~ — **#123 Done**
 - ~~`PlayerHandle` / peer gamemode 0 固定~~ — **#122 Done**
-- ~~ブロック／プレイヤー永続化・autosave~~ — **#124–#126 Done**（leave 時も保存）
+- ~~ブロック／プレイヤー永続化・autosave~~ — **#124–#126 Done**
 - ~~最小 block/item ID registry~~ — **#131 Done**
-- チャンク Unload 未送信 — #127
-- リスポーン後のチャンク／インベントリ再同期不足 — #128
-- 食料消費・戦闘死なし — #129 / #130
-- Survival dig progress — #133
-- Tick-owned mutation façade — #132
+- ~~チャンク Unload~~ — **#127 Done**
+- ~~リスポーン後のチャンク／インベントリ再同期~~ — **#128 Done**
+- ~~食料消費・戦闘死~~ — **#129 / #130 Done**（スタブ）
+- ~~Survival dig progress~~ — **#133 Done**（均一 hardness）
+- ~~Tick-owned mutation façade~~ — **#132 Done**
+- ~~Mod API 設計ドキュメント + 型スケルトン~~ — **#101 Done**（未配線）
 - online mode 未実装 — #60
+- ModHost を tick ループへ接続 — follow-up of #101/#132
 
 ## 今後の展望
 
-Phases A–H 完了。Phase I の正しさ＋永続化コアは本ブランチで完了。残りは **Issue #134**。
+Phases A–I 完了。次は **#60 Online mode** または Mod API 配線。
 
 1. ~~正しさ — #122 / #131 / #123~~
 2. ~~永続化 — #124 / #125 / #126~~
-3. **ストリーム／リスポーン** — #127 unload → #128 respawn re-sync
-4. **Survival 感** — #129 food、#130 death、#133 dig progress
-5. **Online mode** — #60
-6. **Mod API 準備** — #132 façade → #101 設計（方針 A）
+3. ~~ストリーム／リスポーン — #127 / #128~~
+4. ~~Survival 感 — #129 / #130 / #133~~
+5. ~~Mod API 準備 — #132 / #101~~
+6. **Online mode** — #60
+7. **ModHost 配線** — tick コールバック接続
 
 ---
 
-*最終更新: Phase I コア（gamemode / registry / held place / persist / autosave）*
+*最終更新: Phase I polish (#127–#130/#133) + Mod API façade/design (#132/#101)*
 *テスト数: workspace 緑想定*
