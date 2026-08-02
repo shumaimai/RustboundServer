@@ -240,7 +240,7 @@ pub fn handle_connection(
                             online_mode: config.online_mode,
                             compression_threshold: config.compression_threshold,
                             max_frame_length: config.max_frame_length,
-                            offline_uuid: Uuid::new(0, 0),
+                            offline_uuid: Uuid::new(0, 0), // placeholder, replaced below
                         };
                         let mut login_sm = LoginStateMachine::new(login_config);
 
@@ -297,7 +297,8 @@ pub fn handle_connection(
 
                                     let username =
                                         login_sm.username().unwrap_or("Player").to_string();
-                                    let uuid = Uuid::new(0, 0);
+                                    let uuid =
+                                        crate::offline_uuid::offline_uuid_from_username(&username);
 
                                     // Transition to Play - enter the play loop
                                     match run_play_loop(
