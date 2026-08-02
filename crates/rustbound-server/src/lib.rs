@@ -8,11 +8,8 @@ pub mod config;
 pub mod connection;
 pub mod listener;
 pub mod offline_uuid;
-<<<<<<< HEAD
-pub mod registry;
-=======
 pub mod persist;
->>>>>>> c93316a (Persist world block overrides under level_name/ (#124))
+pub mod registry;
 pub mod server;
 pub mod session;
 pub mod tick;

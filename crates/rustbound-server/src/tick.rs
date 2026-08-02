@@ -443,8 +443,9 @@ fn run_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
 ) {
-    // Load block overrides from disk on startup
+    // Load block overrides and player data from disk on startup
     let loaded = crate::persist::load_overrides(&level_name);
+    let saved_players = crate::persist::load_players(&level_name);
     let mut world = World::new();
     world.load_block_overrides(loaded);
     let mut tick_count: u64 = 0;
@@ -466,6 +467,11 @@ fn run_tick_loop(
                     {
                         eprintln!("error: failed to save block overrides: {}", e);
                     }
+                    // Save all player data to disk
+                    let player_data = collect_player_data(&world, &inventories);
+                    if let Err(e) = crate::persist::save_players(&level_name, &player_data) {
+                        eprintln!("error: failed to save player data: {}", e);
+                    }
                     let _ = event_tx.send(TickEvent::Shutdown);
                     return;
                 }
@@ -477,19 +483,47 @@ fn run_tick_loop(
                     view_distance,
                     event_sender,
                 } => {
-                    let player = crate::world::PlayerHandle::new(
+                    // Check for saved player data
+                    let saved = saved_players.get(&uuid).cloned();
+                    // Prefer persisted gamemode; otherwise keep the join-message value (#122).
+                    let gamemode = saved.as_ref().map(|d| d.gamemode).unwrap_or(gamemode);
+                    let mut player = crate::world::PlayerHandle::new(
                         entity_id,
                         uuid,
                         username.clone(),
                         gamemode,
                     );
+                    // Restore position if saved
+                    if let Some(ref d) = saved {
+                        player.set_position(d.x, d.y, d.z);
+                        player.set_rotation(d.yaw, d.pitch);
+                    }
                     let (px, py, pz) = player.position();
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
                     chunk_states.insert(entity_id, PlayerChunkState::new(view_distance));
-                    inventories.insert(entity_id, PlayerInventory::new());
+                    // Restore inventory or create new
+                    let mut inv = PlayerInventory::new();
+                    if let Some(ref d) = saved {
+                        inv.held_slot = d.held_slot;
+                        inv.health = d.health;
+                        inv.food = d.food;
+                        inv.food_saturation = d.food_saturation;
+                        // Restore slots
+                        for (i, (present, item_id, count, nbt)) in d.slots.iter().enumerate() {
+                            if i < inv.slots.len() {
+                                inv.slots[i] = rustbound_protocol::play::Slot {
+                                    present: *present,
+                                    item_id: *item_id,
+                                    count: *count,
+                                    nbt: nbt.clone(),
+                                };
+                            }
+                        }
+                    }
+                    inventories.insert(entity_id, inv);
 
-                    // Send initial inventory (empty) to the new player
+                    // Send initial inventory to the new player
                     if let Some(inv) = inventories.get(&entity_id) {
                         let _ = event_sender.send(SessionEvent::SetContainerContent {
                             window_id: 0,
@@ -848,6 +882,40 @@ fn run_tick_loop(
     }
 
     let _ = event_tx.send(TickEvent::Shutdown);
+}
+
+/// Collects all player data for persistence.
+fn collect_player_data(
+    world: &World,
+    inventories: &HashMap<i32, PlayerInventory>,
+) -> HashMap<Uuid, crate::persist::PlayerData> {
+    let mut result = HashMap::new();
+    for player in world.players() {
+        if let Some(inv) = inventories.get(&player.entity_id) {
+            let slots: Vec<(bool, i32, i8, Vec<u8>)> = inv
+                .slots
+                .iter()
+                .map(|s| (s.present, s.item_id, s.count, s.nbt.clone()))
+                .collect();
+            result.insert(
+                player.uuid,
+                crate::persist::PlayerData {
+                    x: player.x,
+                    y: player.y,
+                    z: player.z,
+                    yaw: player.yaw,
+                    pitch: player.pitch,
+                    gamemode: player.gamemode,
+                    held_slot: inv.held_slot,
+                    health: inv.health,
+                    food: inv.food,
+                    food_saturation: inv.food_saturation,
+                    slots,
+                },
+            );
+        }
+    }
+    result
 }
 
 #[cfg(test)]
