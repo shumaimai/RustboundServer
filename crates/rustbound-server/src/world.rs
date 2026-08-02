@@ -228,6 +228,27 @@ impl World {
     pub fn block_override_count(&self) -> usize {
         self.block_overrides.len()
     }
+
+    /// Returns all block overrides within the given chunk's coordinate range.
+    ///
+    /// A chunk at `(chunk_x, chunk_z)` covers blocks `x in [chunk_x*16, chunk_x*16+15]`
+    /// and `z in [chunk_z*16, chunk_z*16+15]`, with `y` ranging from -64 to 319.
+    /// Returns a vector of `((x, y, z), block_state)` pairs.
+    pub fn get_block_overrides_for_chunk(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Vec<((i32, i32, i32), i32)> {
+        let x_min = chunk_x * 16;
+        let x_max = x_min + 15;
+        let z_min = chunk_z * 16;
+        let z_max = z_min + 15;
+        self.block_overrides
+            .iter()
+            .filter(|((x, _, z), _)| *x >= x_min && *x <= x_max && *z >= z_min && *z <= z_max)
+            .map(|(&pos, &state)| (pos, state))
+            .collect()
+    }
 }
 
 impl Default for World {
@@ -435,5 +456,65 @@ mod tests {
         world.set_block(10, 64, -20, 0);
         assert_eq!(world.get_block(10, 64, -20), 0);
         assert_eq!(world.block_override_count(), 1);
+    }
+
+    #[test]
+    fn get_block_overrides_for_chunk_returns_only_in_range() {
+        let mut world = World::new();
+        // Chunk (0, 0) covers x in [0, 15], z in [0, 15]
+        world.set_block(5, 64, 5, 1); // in chunk (0, 0)
+        world.set_block(15, 64, 15, 2); // in chunk (0, 0) (edge)
+        world.set_block(16, 64, 0, 3); // in chunk (1, 0) - out of range
+        world.set_block(0, 64, 16, 4); // in chunk (0, 1) - out of range
+        world.set_block(-1, 64, -1, 5); // in chunk (-1, -1) - out of range
+
+        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        assert_eq!(overrides.len(), 2);
+        // Should contain (5, 64, 5) -> 1 and (15, 64, 15) -> 2
+        let mut found_5_5 = false;
+        let mut found_15_15 = false;
+        for ((x, y, z), state) in &overrides {
+            if *x == 5 && *y == 64 && *z == 5 {
+                assert_eq!(*state, 1);
+                found_5_5 = true;
+            }
+            if *x == 15 && *y == 64 && *z == 15 {
+                assert_eq!(*state, 2);
+                found_15_15 = true;
+            }
+        }
+        assert!(found_5_5, "should have found override at (5, 64, 5)");
+        assert!(found_15_15, "should have found override at (15, 64, 15)");
+    }
+
+    #[test]
+    fn get_block_overrides_for_chunk_negative_coords() {
+        let mut world = World::new();
+        // Chunk (-1, -1) covers x in [-16, -1], z in [-16, -1]
+        world.set_block(-16, 64, -16, 1); // edge of chunk (-1, -1)
+        world.set_block(-1, 64, -1, 2); // edge of chunk (-1, -1)
+        world.set_block(0, 64, 0, 3); // in chunk (0, 0) - out of range
+
+        let overrides = world.get_block_overrides_for_chunk(-1, -1);
+        assert_eq!(overrides.len(), 2);
+    }
+
+    #[test]
+    fn get_block_overrides_for_empty_chunk() {
+        let world = World::new();
+        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        assert!(overrides.is_empty());
+    }
+
+    #[test]
+    fn get_block_overrides_for_chunk_includes_all_y() {
+        let mut world = World::new();
+        // Y ranges from -64 to 319 in 1.20.1; all should be included
+        world.set_block(0, -64, 0, 1);
+        world.set_block(0, 0, 0, 2);
+        world.set_block(0, 319, 0, 3);
+
+        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        assert_eq!(overrides.len(), 3);
     }
 }

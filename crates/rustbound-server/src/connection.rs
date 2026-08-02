@@ -176,6 +176,12 @@ pub struct ConnectionConfig {
     pub max_players: i32,
     /// Default gamemode for new players (0=Survival, 1=Creative).
     pub default_gamemode: u8,
+    /// Server view distance (in chunks).
+    pub view_distance: i32,
+    /// Server simulation distance (in chunks).
+    pub simulation_distance: i32,
+    /// Server MOTD (message of the day).
+    pub motd: String,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -303,6 +309,9 @@ pub fn handle_connection(
                                             max_frame_length: config.max_frame_length,
                                             read_timeout: config.play_read_timeout,
                                             compression_threshold: config.compression_threshold,
+                                            view_distance: config.view_distance,
+                                            simulation_distance: config.simulation_distance,
+                                            max_players: config.max_players,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
@@ -503,9 +512,32 @@ pub fn default_status_response() -> StatusResponse {
     }
 }
 
+/// Creates a `StatusResponse` from server config values.
+///
+/// Uses the config's MOTD for the description and `max_players` for the
+/// player cap. The online count is 0 (the actual count is injected by
+/// the connection handler if needed).
+pub fn status_response_from_config(motd: &str, max_players: i32) -> StatusResponse {
+    StatusResponse {
+        version: rustbound_protocol::status::StatusVersion {
+            name: "1.20.1".to_string(),
+            protocol: 763,
+        },
+        players: rustbound_protocol::status::StatusPlayers {
+            max: max_players,
+            online: 0,
+            sample: Some(Vec::new()),
+        },
+        description: rustbound_protocol::status::StatusDescription {
+            text: motd.to_string(),
+        },
+        favicon: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionConfig, default_status_response};
+    use super::{ConnectionConfig, default_status_response, status_response_from_config};
     use crate::session::EntityIdAllocator;
     use rustbound_protocol::framing::{decode_frame, encode_frame};
     use rustbound_protocol::handshake::HandshakePacket;
@@ -535,6 +567,9 @@ mod tests {
             player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_players: 20,
             default_gamemode: 0,
+            view_distance: 10,
+            simulation_distance: 10,
+            motd: "Test Server".to_string(),
         }
     }
 
@@ -660,5 +695,28 @@ mod tests {
 
         let _ = handler_thread.join();
         Ok(())
+    }
+
+    #[test]
+    fn status_response_from_config_uses_motd() {
+        let response = status_response_from_config("My Custom Server", 50);
+        assert_eq!(response.description.text, "My Custom Server");
+        assert_eq!(response.players.max, 50);
+        assert_eq!(response.version.name, "1.20.1");
+        assert_eq!(response.version.protocol, 763);
+    }
+
+    #[test]
+    fn status_response_from_config_empty_motd() {
+        let response = status_response_from_config("", 1);
+        assert_eq!(response.description.text, "");
+        assert_eq!(response.players.max, 1);
+    }
+
+    #[test]
+    fn default_status_response_has_defaults() {
+        let response = default_status_response();
+        assert_eq!(response.description.text, "A Rust Minecraft Server");
+        assert_eq!(response.players.max, 20);
     }
 }

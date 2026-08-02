@@ -187,6 +187,15 @@ pub fn decode_u16(input: &mut &[u8]) -> Result<u16, CodecError> {
     Ok(value)
 }
 
+/// Decodes a signed network-order 16-bit integer transactionally.
+pub fn decode_i16(input: &mut &[u8]) -> Result<i16, CodecError> {
+    let source = *input;
+    let bytes = source.get(..2).ok_or(CodecError::IncompleteInput)?;
+    let value = i16::from_be_bytes([bytes[0], bytes[1]]);
+    *input = &source[2..];
+    Ok(value)
+}
+
 /// Appends a signed 64-bit integer in network (big-endian) byte order.
 pub fn encode_i64(value: i64, output: &mut Vec<u8>) {
     output.extend_from_slice(&value.to_be_bytes());

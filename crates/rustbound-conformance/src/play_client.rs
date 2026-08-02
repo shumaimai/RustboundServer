@@ -294,7 +294,10 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
     //   - Keep Alive (0x23) → flag
     //   - Chunk Data (0x24) → flag
     // The probe ends after a short observation window or on timeout.
-    buffer.clear();
+    //
+    // Do NOT clear `buffer` here: Join Game (and later Play packets) may already
+    // be present in the same TCP read as Login Success. Discarding them causes
+    // flaky "did not receive Join Game" failures, especially without compression.
 
     let mut snapshot_entity_id: Option<i32> = None;
     let mut snapshot_gamemode: Option<u8> = None;

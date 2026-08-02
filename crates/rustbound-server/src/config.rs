@@ -8,6 +8,25 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 /// Server configuration parsed from server.properties.
+///
+/// # Field usage
+///
+/// **Wired into live behavior:**
+/// - `host`, `port`: TCP bind address
+/// - `max_players`: Status response + Join Game packet
+/// - `online_mode`: Login encryption (deferred, see #60)
+/// - `view_distance`: Join Game, Set Render Distance, chunk streaming
+/// - `simulation_distance`: Join Game, Set Simulation Distance
+/// - `motd`: Status response description
+/// - `default_gamemode`: Join Game gamemode for new players
+/// - `connection_timeout_secs`: TCP connection timeout
+/// - `network_compression_threshold`: Login Set Compression + Play framing
+///
+/// **Intentionally unused (parsed but not enforced):**
+/// - `white_list`: Whitelist enforcement is not implemented
+/// - `level_name`: Single-dimension world only
+/// - `pvp`: PvP damage rules not implemented
+/// - `allow_nether`: Multi-dimension support not implemented
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The host to bind to.
