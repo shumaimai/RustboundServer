@@ -75,6 +75,7 @@ impl Server {
             play_read_timeout: Duration::from_secs(30),
             player_count: player_count.clone(),
             max_players,
+            default_gamemode: config.default_gamemode,
         });
 
         let listener_config = ListenerConfig {
@@ -278,6 +279,36 @@ mod tests {
                 | rustbound_conformance::PlayPhase::TeleportConfirmed
                 | rustbound_conformance::PlayPhase::PostTeleport
         ));
+
+        server.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn server_handles_play_conformance_with_compression() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            online_mode: false,
+            network_compression_threshold: 256, // default
+            ..Default::default()
+        };
+        let mut server = Server::start(config)?;
+        let addr = server.bind_addr();
+
+        let probe_config = rustbound_conformance::PlayProbeConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            username: "PlayTestPlayer".to_string(),
+            uuid: Uuid::new(0, 0),
+            connect_timeout: Duration::from_secs(5),
+            read_timeout: Duration::from_secs(2),
+        };
+        let snapshot = rustbound_conformance::run_play_probe(&probe_config)?;
+
+        assert_eq!(snapshot.username, "PlayTestPlayer");
+        assert_eq!(snapshot.dimension_name, "minecraft:overworld");
 
         server.shutdown();
         Ok(())

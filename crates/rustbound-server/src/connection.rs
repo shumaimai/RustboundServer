@@ -174,6 +174,8 @@ pub struct ConnectionConfig {
     pub player_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Maximum players (from config).
     pub max_players: i32,
+    /// Default gamemode for new players (0=Survival, 1=Creative).
+    pub default_gamemode: u8,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -297,9 +299,10 @@ pub fn handle_connection(
                                         &SessionConfig {
                                             uuid,
                                             username,
-                                            gamemode: 0,
+                                            gamemode: config.default_gamemode,
                                             max_frame_length: config.max_frame_length,
                                             read_timeout: config.play_read_timeout,
+                                            compression_threshold: config.compression_threshold,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
@@ -531,6 +534,7 @@ mod tests {
             play_read_timeout: Duration::from_secs(5),
             player_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_players: 20,
+            default_gamemode: 0,
         }
     }
 

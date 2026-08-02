@@ -10,6 +10,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use rustbound_protocol::compression::{
+    COMPRESSION_DISABLED, CompressedDecodeOutcome, CompressionError, decode_compressed_frame,
+    encode_compressed_frame,
+};
 use rustbound_protocol::framing::{PROTOCOL_MAX_FRAME_LENGTH, decode_frame, encode_frame};
 use rustbound_protocol::handshake::{HandshakePacket, encode_handshake};
 use rustbound_protocol::login::{
@@ -19,7 +23,7 @@ use rustbound_protocol::play::{
     ConfirmTeleportation, PlayDecodeOutcome, PlayError, PlayPacket, decode_join_game,
     decode_synchronize_player_position, encode_confirm_teleportation,
 };
-use rustbound_protocol::primitives::Uuid;
+use rustbound_protocol::primitives::{Uuid, decode_var_int};
 use rustbound_protocol::state::NextState;
 
 /// An error encountered while running a play conformance probe.
@@ -73,6 +77,12 @@ impl From<rustbound_protocol::login::LoginError> for PlayClientError {
 impl From<PlayError> for PlayClientError {
     fn from(error: PlayError) -> Self {
         Self::Protocol(format!("play error: {error}"))
+    }
+}
+
+impl From<CompressionError> for PlayClientError {
+    fn from(error: CompressionError) -> Self {
+        Self::Protocol(format!("compression error: {error}"))
     }
 }
 
@@ -185,6 +195,7 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
     // Read frames until we get Login Success
     let mut buffer = Vec::new();
     let mut login_success_info: Option<(Uuid, String)> = None;
+    let mut compression_threshold: i32 = COMPRESSION_DISABLED;
 
     loop {
         let mut chunk = [0u8; 4096];
@@ -204,14 +215,16 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
 
         buffer.extend_from_slice(&chunk[..n]);
 
-        // Try to decode frames
+        // Try to decode frames using the appropriate compression mode
         loop {
             let mut input = buffer.as_slice();
-            let (packet_id, payload) = match decode_frame(&mut input, PROTOCOL_MAX_FRAME_LENGTH) {
-                Ok(rustbound_protocol::framing::DecodeOutcome::Complete(frame)) => {
-                    (frame.packet_id, frame.payload.to_vec())
-                }
-                Ok(rustbound_protocol::framing::DecodeOutcome::Incomplete) => break,
+            let (packet_id, payload) = match decode_compressed_frame(
+                &mut input,
+                compression_threshold,
+                PROTOCOL_MAX_FRAME_LENGTH,
+            ) {
+                Ok(CompressedDecodeOutcome::Complete(packet)) => (packet.packet_id, packet.payload),
+                Ok(CompressedDecodeOutcome::Incomplete) => break,
                 Err(error) => return Err(PlayClientError::from(error)),
             };
 
@@ -243,7 +256,11 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
                     }
                 }
                 0x03 => {
-                    // Set Compression - skip for now
+                    // Set Compression - parse threshold from payload
+                    let mut payload_input = payload.as_slice();
+                    let threshold = decode_var_int(&mut payload_input)
+                        .map_err(|e| PlayClientError::Protocol(e.to_string()))?;
+                    compression_threshold = threshold;
                 }
                 0x00 => {
                     // Login Disconnect
@@ -310,14 +327,16 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
 
         buffer.extend_from_slice(&chunk[..n]);
 
-        // Try to decode frames
+        // Try to decode frames using the appropriate compression mode
         loop {
             let mut input = buffer.as_slice();
-            let (packet_id, payload) = match decode_frame(&mut input, PROTOCOL_MAX_FRAME_LENGTH) {
-                Ok(rustbound_protocol::framing::DecodeOutcome::Complete(frame)) => {
-                    (frame.packet_id, frame.payload.to_vec())
-                }
-                Ok(rustbound_protocol::framing::DecodeOutcome::Incomplete) => break,
+            let (packet_id, payload) = match decode_compressed_frame(
+                &mut input,
+                compression_threshold,
+                PROTOCOL_MAX_FRAME_LENGTH,
+            ) {
+                Ok(CompressedDecodeOutcome::Complete(packet)) => (packet.packet_id, packet.payload),
+                Ok(CompressedDecodeOutcome::Incomplete) => break,
                 Err(error) => return Err(PlayClientError::from(error)),
             };
 
@@ -373,13 +392,36 @@ pub fn run_play_probe(config: &PlayProbeConfig) -> Result<PlaySnapshot, PlayClie
                             let confirm = ConfirmTeleportation {
                                 teleport_id: sync.teleport_id,
                             };
-                            let mut confirm_wire = Vec::new();
+                            // Encode Confirm Teleportation with compression
+                            let mut confirm_body = Vec::new();
                             encode_confirm_teleportation(
                                 &confirm,
                                 PROTOCOL_MAX_FRAME_LENGTH,
-                                &mut confirm_wire,
+                                &mut confirm_body,
                             )
                             .map_err(|e| PlayClientError::Protocol(e.to_string()))?;
+                            // confirm_body is an uncompressed frame; extract
+                            // packet_id + payload and re-encode compressed
+                            let mut confirm_input = confirm_body.as_slice();
+                            let (confirm_pid, confirm_payload) =
+                                match decode_frame(&mut confirm_input, PROTOCOL_MAX_FRAME_LENGTH) {
+                                    Ok(rustbound_protocol::framing::DecodeOutcome::Complete(f)) => {
+                                        (f.packet_id, f.payload.to_vec())
+                                    }
+                                    _ => {
+                                        return Err(PlayClientError::Protocol(
+                                            "failed to re-encode Confirm Teleportation".to_string(),
+                                        ));
+                                    }
+                                };
+                            let mut confirm_wire = Vec::new();
+                            encode_compressed_frame(
+                                confirm_pid,
+                                &confirm_payload,
+                                compression_threshold,
+                                PROTOCOL_MAX_FRAME_LENGTH,
+                                &mut confirm_wire,
+                            )?;
                             stream
                                 .write_all(&confirm_wire)
                                 .map_err(PlayClientError::Io)?;

@@ -41,6 +41,72 @@ const TAG_END: u8 = 0;
 /// 256 entries * 9 bits = 2304 bits / 64 = 36 longs.
 const HEIGHTMAP_LONGS: usize = 36;
 
+/// Number of light sections in a 1.20.1 world.
+/// The world is 384 blocks tall (-64 to 319), which is 24 sections.
+/// Light data includes one extra section above and below, so 26 total.
+const NUM_LIGHT_SECTIONS: usize = 26;
+
+/// Size of a single light array in bytes (2048 bytes = 16384 nibbles for
+/// 16x16x16 blocks).
+const LIGHT_ARRAY_SIZE: usize = 2048;
+
+/// Builds a BitSet as encoded in protocol 763: VarInt length followed by
+/// that many i64 longs (big-endian).
+fn encode_bitset(buf: &mut Vec<u8>, longs: &[i64]) {
+    encode_var_int(longs.len() as i32, buf);
+    for &val in longs {
+        buf.extend_from_slice(&val.to_be_bytes());
+    }
+}
+
+/// Builds the light data blob for a flat/void world.
+///
+/// For a flat world with no obstructions, all sections have full skylight
+/// (level 15). Block light is zero everywhere (no light sources).
+///
+/// The light data format (protocol 763) is:
+/// 1. SkyLightMask (BitSet)
+/// 2. BlockLightMask (BitSet)
+/// 3. EmptySkyLightMask (BitSet)
+/// 4. EmptyBlockLightMask (BitSet)
+/// 5. SkyLight arrays (VarInt count + each 2048 bytes)
+/// 6. BlockLight arrays (VarInt count + each 2048 bytes)
+///
+/// We set SkyLightMask to cover all 26 light sections (bits 0..25 = 0x3FFFFFF),
+/// provide 26 full skylight arrays (all 0xFF = level 15), and leave
+/// BlockLightMask empty (no block light data).
+fn build_light_data() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // SkyLightMask: bits 0..25 set = all 26 light sections have skylight data
+    // 0x3FFFFFF = 0b00000000000000111111111111111111111111 (26 bits)
+    let sky_mask: i64 = 0x03FF_FFFF;
+    encode_bitset(&mut buf, &[sky_mask]);
+
+    // BlockLightMask: no block light data (all zeros)
+    encode_bitset(&mut buf, &[]);
+
+    // EmptySkyLightMask: no empty skylight sections (we provide data for all)
+    encode_bitset(&mut buf, &[]);
+
+    // EmptyBlockLightMask: all sections are empty block light (all zeros)
+    // This tells the client block light = 0 for all sections
+    encode_bitset(&mut buf, &[sky_mask]);
+
+    // SkyLight arrays: 26 arrays, each 2048 bytes of 0xFF (full skylight)
+    encode_var_int(NUM_LIGHT_SECTIONS as i32, &mut buf);
+    for _ in 0..NUM_LIGHT_SECTIONS {
+        // Each light array is a byte array of 2048 bytes
+        // 0xFF = every nibble is 15 (full skylight)
+        buf.extend_from_slice(&[0xFF; LIGHT_ARRAY_SIZE]);
+    }
+
+    // BlockLight arrays: 0 arrays (no block light data)
+    encode_var_int(0, &mut buf);
+
+    buf
+}
+
 /// Builds a minimal valid heightmaps NBT blob for a void/flat world.
 ///
 /// Contains `MOTION_BLOCKING` and `WORLD_SURFACE` heightmaps with all
@@ -137,24 +203,26 @@ fn build_section_data() -> Vec<u8> {
 
 /// Generates a complete chunk data payload for the given chunk position.
 ///
-/// Returns a tuple of (heightmaps_nbt, section_data, block_entities).
+/// Returns a tuple of (heightmaps_nbt, section_data, block_entities, light_data).
 /// Block entities is empty for a flat world.
-pub fn generate_chunk(_chunk_x: i32, _chunk_z: i32) -> (Vec<u8>, Vec<u8>, Vec<Vec<u8>>) {
+pub fn generate_chunk(_chunk_x: i32, _chunk_z: i32) -> (Vec<u8>, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
     let heightmaps = build_heightmaps_nbt();
     let data = build_section_data();
     let block_entities: Vec<Vec<u8>> = Vec::new();
-    (heightmaps, data, block_entities)
+    let light_data = build_light_data();
+    (heightmaps, data, block_entities, light_data)
 }
 
 /// Builds a `ChunkData` packet ready for encoding.
 pub fn build_chunk_data_packet(chunk_x: i32, chunk_z: i32) -> rustbound_protocol::play::ChunkData {
-    let (heightmaps, data, block_entities) = generate_chunk(chunk_x, chunk_z);
+    let (heightmaps, data, block_entities, light_data) = generate_chunk(chunk_x, chunk_z);
     rustbound_protocol::play::ChunkData {
         chunk_x,
         chunk_z,
         heightmaps,
         data,
         block_entities,
+        light_data,
     }
 }
 
@@ -164,6 +232,7 @@ mod tests {
     use rustbound_protocol::play::{
         PlayDecodeOutcome, PlayPacket, decode_chunk_data, encode_chunk_data,
     };
+    use std::io::Read;
 
     const TEST_MAX_FRAME: usize = 65536 * 4;
 
@@ -201,6 +270,10 @@ mod tests {
                 assert_eq!(decoded.chunk_z, -5);
                 assert!(!decoded.heightmaps.is_empty());
                 assert!(!decoded.data.is_empty());
+                assert!(
+                    !decoded.light_data.is_empty(),
+                    "light data should not be empty"
+                );
             }
             _ => panic!("expected complete ChunkData"),
         }
@@ -209,18 +282,66 @@ mod tests {
     }
 
     #[test]
+    fn light_data_is_valid_format() -> Result<(), Box<dyn std::error::Error>> {
+        let light = build_light_data();
+        // Should be non-empty
+        assert!(!light.is_empty());
+
+        // Decode the light data to verify structure
+        let mut input = light.as_slice();
+        // SkyLightMask: VarInt count + longs
+        let sky_mask_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(sky_mask_count, 1, "sky mask should have 1 long");
+        let _sky_mask = rustbound_protocol::primitives::decode_i64(&mut input)?;
+
+        // BlockLightMask: 0 longs
+        let block_mask_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(block_mask_count, 0, "block light mask should be empty");
+
+        // EmptySkyLightMask: 0 longs
+        let empty_sky_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(empty_sky_count, 0, "empty sky mask should be empty");
+
+        // EmptyBlockLightMask: 1 long
+        let empty_block_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(empty_block_count, 1, "empty block mask should have 1 long");
+        let _empty_block = rustbound_protocol::primitives::decode_i64(&mut input)?;
+
+        // SkyLight arrays: 26 arrays of 2048 bytes each
+        let sky_array_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(
+            sky_array_count, NUM_LIGHT_SECTIONS as i32,
+            "should have {NUM_LIGHT_SECTIONS} sky light arrays"
+        );
+        for _ in 0..NUM_LIGHT_SECTIONS {
+            // Each array is 2048 bytes of 0xFF
+            let mut array = [0u8; LIGHT_ARRAY_SIZE];
+            input.read_exact(&mut array)?;
+            assert!(array.iter().all(|&b| b == 0xFF), "skylight should be 0xFF");
+        }
+
+        // BlockLight arrays: 0
+        let block_array_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+        assert_eq!(block_array_count, 0, "should have 0 block light arrays");
+
+        assert!(input.is_empty(), "no trailing bytes in light data");
+        Ok(())
+    }
+
+    #[test]
     fn chunk_generation_is_deterministic() {
-        let (h1, d1, _) = generate_chunk(0, 0);
-        let (h2, d2, _) = generate_chunk(0, 0);
+        let (h1, d1, _, l1) = generate_chunk(0, 0);
+        let (h2, d2, _, l2) = generate_chunk(0, 0);
         assert_eq!(h1, h2);
         assert_eq!(d1, d2);
+        assert_eq!(l1, l2);
     }
 
     #[test]
     fn different_chunks_have_same_data() {
         // Flat world: all chunks have the same section data
-        let (_, d1, _) = generate_chunk(0, 0);
-        let (_, d2, _) = generate_chunk(100, -200);
+        let (_, d1, _, _) = generate_chunk(0, 0);
+        let (_, d2, _, _) = generate_chunk(100, -200);
         assert_eq!(d1, d2);
     }
 }
