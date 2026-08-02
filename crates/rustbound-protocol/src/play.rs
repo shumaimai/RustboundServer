@@ -132,6 +132,15 @@ pub const SET_HELD_ITEM_SERVERBOUND_PACKET_ID: i32 = 0x28;
 /// Packet ID for the serverbound Set Creative Mode Slot packet.
 pub const SET_CREATIVE_MODE_SLOT_PACKET_ID: i32 = 0x2B;
 
+/// Packet ID for the clientbound Set Health packet.
+pub const SET_HEALTH_PACKET_ID: i32 = 0x5B;
+
+/// Packet ID for the clientbound Respawn packet.
+pub const RESPAWN_PACKET_ID: i32 = 0x45;
+
+/// Packet ID for the serverbound Client Status packet.
+pub const CLIENT_STATUS_PACKET_ID: i32 = 0x08;
+
 /// Maximum number of slots in a single container content packet.
 pub const MAX_CONTAINER_SLOTS: usize = 256;
 
@@ -317,6 +326,12 @@ pub enum PlayPacket {
     SetHeldItemServerbound(SetHeldItemServerbound),
     /// Serverbound Set Creative Mode Slot (Play `0x2B`).
     SetCreativeModeSlot(SetCreativeModeSlot),
+    /// Clientbound Set Health (Play `0x5B`).
+    SetHealth(SetHealth),
+    /// Clientbound Respawn (Play `0x45`).
+    Respawn(Respawn),
+    /// Serverbound Client Status (Play `0x08`).
+    ClientStatus(ClientStatus),
 }
 
 /// The player's gamemode.
@@ -2476,6 +2491,305 @@ pub struct SetCreativeModeSlot {
     pub item: Slot,
 }
 
+/// Clientbound Set Health packet (Play `0x5B`).
+///
+/// Sets the player's health, food, and food saturation. Health <= 0
+/// triggers the death screen on the client.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SetHealth {
+    /// The player's health (0 or less = dead, 20 = full HP).
+    pub health: f32,
+    /// The player's food level (0-20).
+    pub food: i32,
+    /// The player's food saturation (0.0 to 5.0).
+    pub food_saturation: f32,
+}
+
+/// Clientbound Respawn packet (Play `0x45`).
+///
+/// Sent to respawn the player after death or change dimensions.
+/// For a simple death/respawn in the same dimension, most fields can
+/// be defaulted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Respawn {
+    /// The dimension type identifier (e.g. "minecraft:overworld").
+    pub dimension_type: String,
+    /// The dimension name identifier (e.g. "minecraft:overworld").
+    pub dimension_name: String,
+    /// First 8 bytes of the SHA-256 hash of the world's seed.
+    pub hashed_seed: i64,
+    /// The player's game mode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator).
+    pub gamemode: u8,
+    /// The previous game mode (-1 = undefined).
+    pub previous_gamemode: i8,
+    /// Whether the world is a debug mode world.
+    pub is_debug: bool,
+    /// Whether the world is a superflat world.
+    pub is_flat: bool,
+    /// Whether death location data is present.
+    pub has_death_location: bool,
+    /// The dimension name where the player died (only if has_death_location).
+    pub death_dimension_name: String,
+    /// The location where the player died (only if has_death_location).
+    pub death_location: (i32, i32, i32),
+    /// The number of ticks until the player can use a portal again.
+    pub portal_cooldown: i32,
+    /// Bitmask of data to keep (0x01 = attributes, 0x02 = metadata).
+    pub data_kept: u8,
+}
+
+/// Serverbound Client Status packet (Play `0x08`).
+///
+/// Sent by the client to perform respawn after death or request stats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientStatus {
+    /// The action ID (0 = Perform respawn, 1 = Request stats).
+    pub action: i32,
+}
+
+/// Encodes a Set Health packet (clientbound Play `0x5B`).
+pub fn encode_set_health(
+    packet: &SetHealth,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_f32(packet.health, &mut body);
+    encode_var_int(packet.food, &mut body);
+    encode_f32(packet.food_saturation, &mut body);
+    encode_frame(SET_HEALTH_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Set Health packet (clientbound Play `0x5B`).
+pub fn decode_set_health(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != SET_HEALTH_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: SET_HEALTH_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let health = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let food = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let food_saturation = decode_f32(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::SetHealth(
+        SetHealth {
+            health,
+            food,
+            food_saturation,
+        },
+    )))
+}
+
+/// Encodes a Respawn packet (clientbound Play `0x45`).
+pub fn encode_respawn(
+    packet: &Respawn,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_string(&packet.dimension_type, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+        .map_err(PlayError::from)?;
+    encode_string(&packet.dimension_name, MAX_CHAT_COMPONENT_LENGTH, &mut body)
+        .map_err(PlayError::from)?;
+    encode_i64(packet.hashed_seed, &mut body);
+    encode_u8(packet.gamemode, &mut body);
+    encode_i8(packet.previous_gamemode, &mut body);
+    encode_bool(packet.is_debug, &mut body);
+    encode_bool(packet.is_flat, &mut body);
+    encode_bool(packet.has_death_location, &mut body);
+    if packet.has_death_location {
+        encode_string(
+            &packet.death_dimension_name,
+            MAX_CHAT_COMPONENT_LENGTH,
+            &mut body,
+        )
+        .map_err(PlayError::from)?;
+        encode_position(
+            packet.death_location.0,
+            packet.death_location.1,
+            packet.death_location.2,
+            &mut body,
+        );
+    }
+    encode_var_int(packet.portal_cooldown, &mut body);
+    encode_u8(packet.data_kept, &mut body);
+    encode_frame(RESPAWN_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Respawn packet (clientbound Play `0x45`).
+pub fn decode_respawn(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != RESPAWN_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: RESPAWN_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let dimension_type = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH)
+        .map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?
+        .to_string();
+    let dimension_name = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH)
+        .map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?
+        .to_string();
+    let hashed_seed = decode_i64(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let gamemode = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let previous_gamemode = decode_i8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let is_debug = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let is_flat = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let has_death_location = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let (death_dimension_name, death_location) = if has_death_location {
+        let dim = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH)
+            .map_err(|e| {
+                *input = source;
+                PlayError::from(e)
+            })?
+            .to_string();
+        let pos = decode_position(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        (dim, pos)
+    } else {
+        (String::new(), (0, 0, 0))
+    };
+    let portal_cooldown = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let data_kept = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::Respawn(Respawn {
+        dimension_type,
+        dimension_name,
+        hashed_seed,
+        gamemode,
+        previous_gamemode,
+        is_debug,
+        is_flat,
+        has_death_location,
+        death_dimension_name,
+        death_location,
+        portal_cooldown,
+        data_kept,
+    })))
+}
+
+/// Decodes a Client Status packet (serverbound Play `0x08`).
+pub fn decode_client_status(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != CLIENT_STATUS_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CLIENT_STATUS_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let action = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::ClientStatus(
+        ClientStatus { action },
+    )))
+}
+
 /// Encodes a slot to the given buffer.
 ///
 /// Format: bool present, then (if present) VarInt item_id, i8 count, optional NBT.
@@ -4117,40 +4431,42 @@ pub fn decode_chunk_data(
 #[cfg(test)]
 mod tests {
     use super::{
-        AcknowledgeBlockChange, BlockUpdate, ChangeDifficulty, ChatMode, ChunkData,
-        ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent, EntityTeleport,
-        GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID,
-        KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome,
-        PlayError, PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction,
-        PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
-        PluginMessageClientbound, RemoveEntities, SET_CREATIVE_MODE_SLOT_PACKET_ID,
-        SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SetCenterChunk, SetContainerContent, SetContainerSlot,
-        SetDefaultSpawnPosition, SetHeldItem, SetPlayerPosition, SetPlayerPositionAndRotation,
-        SetPlayerRotation, SetRenderDistance, SetSimulationDistance, Slot, SpawnPlayer,
-        SynchronizePlayerPosition, UseItemOn, decode_acknowledge_block_change, decode_block_update,
-        decode_change_difficulty, decode_chunk_data, decode_client_information,
+        AcknowledgeBlockChange, BlockUpdate, CLIENT_STATUS_PACKET_ID, ChangeDifficulty, ChatMode,
+        ChunkData, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
+        EntityTeleport, GameEvent, GameMode, JOIN_GAME_PACKET_ID, JoinGame,
+        KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive, MainHand, MoveEntityPos, MoveEntityPosRot,
+        MoveEntityRot, PlayDecodeOutcome, PlayError, PlayPacket, PlayerAbilities, PlayerDigging,
+        PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
+        PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, Respawn,
+        SET_CREATIVE_MODE_SLOT_PACKET_ID, SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SetCenterChunk,
+        SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem,
+        SetPlayerPosition, SetPlayerPositionAndRotation, SetPlayerRotation, SetRenderDistance,
+        SetSimulationDistance, Slot, SpawnPlayer, SynchronizePlayerPosition, UseItemOn,
+        decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
+        decode_chunk_data, decode_client_information, decode_client_status,
         decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
         decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
         decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
         decode_move_entity_rot, decode_player_abilities, decode_player_digging,
-        decode_plugin_message_clientbound, decode_set_center_chunk, decode_set_container_content,
-        decode_set_container_slot, decode_set_creative_mode_slot,
-        decode_set_default_spawn_position, decode_set_held_item, decode_set_held_item_serverbound,
-        decode_set_player_position, decode_set_player_position_and_rotation,
-        decode_set_player_rotation, decode_set_render_distance, decode_set_simulation_distance,
-        decode_slot, decode_synchronize_player_position, decode_use_item_on,
-        encode_acknowledge_block_change, encode_block_update, encode_change_difficulty,
-        encode_chunk_data, encode_client_information, encode_confirm_teleportation,
-        encode_disconnect_play, encode_entity_event, encode_entity_teleport, encode_game_event,
-        encode_join_game, encode_keep_alive_clientbound, encode_keep_alive_serverbound,
-        encode_move_entity_pos, encode_move_entity_pos_rot, encode_move_entity_rot,
-        encode_player_abilities, encode_player_digging, encode_player_info_remove,
-        encode_player_info_update, encode_plugin_message_clientbound, encode_remove_entities,
+        decode_plugin_message_clientbound, decode_respawn, decode_set_center_chunk,
+        decode_set_container_content, decode_set_container_slot, decode_set_creative_mode_slot,
+        decode_set_default_spawn_position, decode_set_health, decode_set_held_item,
+        decode_set_held_item_serverbound, decode_set_player_position,
+        decode_set_player_position_and_rotation, decode_set_player_rotation,
+        decode_set_render_distance, decode_set_simulation_distance, decode_slot,
+        decode_synchronize_player_position, decode_use_item_on, encode_acknowledge_block_change,
+        encode_block_update, encode_change_difficulty, encode_chunk_data,
+        encode_client_information, encode_confirm_teleportation, encode_disconnect_play,
+        encode_entity_event, encode_entity_teleport, encode_game_event, encode_join_game,
+        encode_keep_alive_clientbound, encode_keep_alive_serverbound, encode_move_entity_pos,
+        encode_move_entity_pos_rot, encode_move_entity_rot, encode_player_abilities,
+        encode_player_digging, encode_player_info_remove, encode_player_info_update,
+        encode_plugin_message_clientbound, encode_remove_entities, encode_respawn,
         encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
-        encode_set_default_spawn_position, encode_set_held_item, encode_set_player_position,
-        encode_set_player_position_and_rotation, encode_set_player_rotation,
-        encode_set_render_distance, encode_set_simulation_distance, encode_slot,
-        encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
+        encode_set_default_spawn_position, encode_set_health, encode_set_held_item,
+        encode_set_player_position, encode_set_player_position_and_rotation,
+        encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
+        encode_slot, encode_spawn_player, encode_synchronize_player_position, encode_use_item_on,
         ensure_play_state,
     };
     use crate::state::ProtocolState;
@@ -5738,6 +6054,155 @@ mod tests {
                 assert!(!decoded.item.present);
             }
             other => panic!("expected SetCreativeModeSlot, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn set_health_roundtrip() -> Result<(), PlayError> {
+        let packet = SetHealth {
+            health: 20.0,
+            food: 20,
+            food_saturation: 5.0,
+        };
+        let mut wire = Vec::new();
+        encode_set_health(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_health(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetHealth(decoded)) => {
+                assert_eq!(decoded.health, 20.0);
+                assert_eq!(decoded.food, 20);
+                assert_eq!(decoded.food_saturation, 5.0);
+            }
+            other => panic!("expected SetHealth, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn set_health_dead_roundtrip() -> Result<(), PlayError> {
+        let packet = SetHealth {
+            health: 0.0,
+            food: 0,
+            food_saturation: 0.0,
+        };
+        let mut wire = Vec::new();
+        encode_set_health(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_set_health(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::SetHealth(decoded)) => {
+                assert_eq!(decoded.health, 0.0);
+                assert_eq!(decoded.food, 0);
+            }
+            other => panic!("expected SetHealth, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn respawn_roundtrip_no_death() -> Result<(), PlayError> {
+        let packet = Respawn {
+            dimension_type: "minecraft:overworld".to_string(),
+            dimension_name: "minecraft:overworld".to_string(),
+            hashed_seed: 12345,
+            gamemode: 1, // Creative
+            previous_gamemode: -1,
+            is_debug: false,
+            is_flat: false,
+            has_death_location: false,
+            death_dimension_name: String::new(),
+            death_location: (0, 0, 0),
+            portal_cooldown: 0,
+            data_kept: 0,
+        };
+        let mut wire = Vec::new();
+        encode_respawn(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_respawn(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::Respawn(decoded)) => {
+                assert_eq!(decoded.dimension_type, "minecraft:overworld");
+                assert_eq!(decoded.dimension_name, "minecraft:overworld");
+                assert_eq!(decoded.hashed_seed, 12345);
+                assert_eq!(decoded.gamemode, 1);
+                assert_eq!(decoded.previous_gamemode, -1);
+                assert!(!decoded.is_debug);
+                assert!(!decoded.is_flat);
+                assert!(!decoded.has_death_location);
+                assert_eq!(decoded.portal_cooldown, 0);
+                assert_eq!(decoded.data_kept, 0);
+            }
+            other => panic!("expected Respawn, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn respawn_roundtrip_with_death_location() -> Result<(), PlayError> {
+        let packet = Respawn {
+            dimension_type: "minecraft:overworld".to_string(),
+            dimension_name: "minecraft:overworld".to_string(),
+            hashed_seed: 0,
+            gamemode: 0,
+            previous_gamemode: 0,
+            is_debug: false,
+            is_flat: false,
+            has_death_location: true,
+            death_dimension_name: "minecraft:the_nether".to_string(),
+            death_location: (10, 64, -20),
+            portal_cooldown: 300,
+            data_kept: 0,
+        };
+        let mut wire = Vec::new();
+        encode_respawn(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_respawn(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::Respawn(decoded)) => {
+                assert!(decoded.has_death_location);
+                assert_eq!(decoded.death_dimension_name, "minecraft:the_nether");
+                assert_eq!(decoded.death_location, (10, 64, -20));
+                assert_eq!(decoded.portal_cooldown, 300);
+            }
+            other => panic!("expected Respawn, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn client_status_respawn_roundtrip() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(0, &mut body); // action = Perform respawn
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(CLIENT_STATUS_PACKET_ID, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_client_status(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ClientStatus(decoded)) => {
+                assert_eq!(decoded.action, 0);
+            }
+            other => panic!("expected ClientStatus, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn client_status_request_stats_roundtrip() -> Result<(), PlayError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_var_int(1, &mut body); // action = Request stats
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(CLIENT_STATUS_PACKET_ID, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(PlayError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_client_status(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ClientStatus(decoded)) => {
+                assert_eq!(decoded.action, 1);
+            }
+            other => panic!("expected ClientStatus, got {other:?}"),
         }
         Ok(())
     }

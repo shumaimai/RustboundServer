@@ -17,17 +17,19 @@ use std::time::Duration;
 use rustbound_protocol::play::{
     ChangeDifficulty, ClientInformation, ConfirmTeleportation, DisconnectPlay, EntityEvent,
     GameEvent, GameMode, JoinGame, KeepAlive, PlayDecodeOutcome, PlayError, PlayPacket,
-    PlayerAbilities, PluginMessageClientbound, SetCenterChunk, SetContainerContent,
-    SetContainerSlot, SetDefaultSpawnPosition, SetHeldItem, SetRenderDistance,
+    PlayerAbilities, PluginMessageClientbound, Respawn, SetCenterChunk, SetContainerContent,
+    SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetRenderDistance,
     SetSimulationDistance, SynchronizePlayerPosition, decode_client_information,
-    decode_confirm_teleportation, decode_keep_alive_serverbound, decode_player_digging,
-    decode_set_creative_mode_slot, decode_set_held_item_serverbound, decode_set_player_position,
-    decode_set_player_position_and_rotation, decode_set_player_rotation, decode_use_item_on,
-    encode_change_difficulty, encode_chunk_data, encode_disconnect_play, encode_entity_event,
-    encode_game_event, encode_join_game, encode_keep_alive_clientbound, encode_player_abilities,
-    encode_plugin_message_clientbound, encode_set_center_chunk, encode_set_container_content,
-    encode_set_container_slot, encode_set_default_spawn_position, encode_set_held_item,
-    encode_set_render_distance, encode_set_simulation_distance, encode_synchronize_player_position,
+    decode_client_status, decode_confirm_teleportation, decode_keep_alive_serverbound,
+    decode_player_digging, decode_set_creative_mode_slot, decode_set_held_item_serverbound,
+    decode_set_player_position, decode_set_player_position_and_rotation,
+    decode_set_player_rotation, decode_use_item_on, encode_change_difficulty, encode_chunk_data,
+    encode_disconnect_play, encode_entity_event, encode_game_event, encode_join_game,
+    encode_keep_alive_clientbound, encode_player_abilities, encode_plugin_message_clientbound,
+    encode_respawn, encode_set_center_chunk, encode_set_container_content,
+    encode_set_container_slot, encode_set_default_spawn_position, encode_set_health,
+    encode_set_held_item, encode_set_render_distance, encode_set_simulation_distance,
+    encode_synchronize_player_position,
 };
 use rustbound_protocol::primitives::Uuid;
 
@@ -175,6 +177,48 @@ pub enum SessionEvent {
     SetHeldItemClientbound {
         /// The hotbar slot (0-8).
         slot: u8,
+    },
+    /// Send a Set Health packet to the client.
+    SetHealth {
+        /// The player's health (0 or less = dead, 20 = full HP).
+        health: f32,
+        /// The player's food level (0-20).
+        food: i32,
+        /// The player's food saturation (0.0 to 5.0).
+        food_saturation: f32,
+    },
+    /// Send a Respawn packet and re-synchronize the player after death.
+    RespawnPlayer {
+        /// The dimension type identifier.
+        dimension_type: String,
+        /// The dimension name identifier.
+        dimension_name: String,
+        /// The hashed seed.
+        hashed_seed: i64,
+        /// The player's gamemode.
+        gamemode: u8,
+        /// The previous gamemode (-1 = undefined).
+        previous_gamemode: i8,
+        /// Whether the world is debug.
+        is_debug: bool,
+        /// Whether the world is flat.
+        is_flat: bool,
+        /// Whether death location data is present.
+        has_death_location: bool,
+        /// The dimension name where the player died.
+        death_dimension_name: String,
+        /// The location where the player died.
+        death_location: (i32, i32, i32),
+        /// Portal cooldown in ticks.
+        portal_cooldown: i32,
+        /// Data kept bitmask.
+        data_kept: u8,
+        /// The new position after respawn (spawn point).
+        x: f64,
+        /// The new Y position.
+        y: f64,
+        /// The new Z position.
+        z: f64,
     },
 }
 
@@ -732,7 +776,7 @@ impl PlayerSession {
     /// Polls for tick loop events and handles them.
     ///
     /// Returns `true` if at least one event was processed.
-    pub fn poll_events(&self, stream: &mut TcpStream) -> Result<bool, SessionError> {
+    pub fn poll_events(&mut self, stream: &mut TcpStream) -> Result<bool, SessionError> {
         let mut processed = false;
         while let Ok(event) = self.event_receiver.try_recv() {
             match event {
@@ -834,6 +878,66 @@ impl PlayerSession {
                     let held = SetHeldItem { slot };
                     let mut wire = Vec::new();
                     encode_set_held_item(&held, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::SetHealth {
+                    health,
+                    food,
+                    food_saturation,
+                } => {
+                    self.send_set_health(stream, health, food, food_saturation)?;
+                    processed = true;
+                }
+                SessionEvent::RespawnPlayer {
+                    dimension_type,
+                    dimension_name,
+                    hashed_seed,
+                    gamemode,
+                    previous_gamemode,
+                    is_debug,
+                    is_flat,
+                    has_death_location,
+                    death_dimension_name,
+                    death_location,
+                    portal_cooldown,
+                    data_kept,
+                    x,
+                    y,
+                    z,
+                } => {
+                    self.send_respawn(
+                        stream,
+                        &dimension_type,
+                        &dimension_name,
+                        hashed_seed,
+                        gamemode,
+                        previous_gamemode,
+                        is_debug,
+                        is_flat,
+                        has_death_location,
+                        &death_dimension_name,
+                        death_location,
+                        portal_cooldown,
+                        data_kept,
+                    )?;
+                    // After respawn, re-synchronize position to spawn point
+                    self.last_x = x;
+                    self.last_y = y;
+                    self.last_z = z;
+                    let teleport_id = self.next_teleport_id;
+                    self.next_teleport_id += 1;
+                    let sync = SynchronizePlayerPosition {
+                        x,
+                        y,
+                        z,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        flags: 0,
+                        teleport_id,
+                    };
+                    let mut wire = Vec::new();
+                    encode_synchronize_player_position(&sync, self.max_frame_length, &mut wire)?;
                     self.send_wire(stream, &wire)?;
                     processed = true;
                 }
@@ -977,6 +1081,14 @@ impl PlayerSession {
                 });
                 Ok(None)
             }
+            PlayPacket::ClientStatus(status) => {
+                // Forward to tick loop for respawn handling
+                let _ = self.tick_sender.send(TickMessage::ClientStatus {
+                    entity_id: self.entity_id,
+                    action: status.action,
+                });
+                Ok(None)
+            }
             _ => Err(SessionError::UnexpectedPacket(-1)),
         }
     }
@@ -1040,6 +1152,63 @@ impl PlayerSession {
         };
         let mut wire = Vec::new();
         encode_set_container_slot(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Set Health packet to the client.
+    pub fn send_set_health(
+        &self,
+        stream: &mut TcpStream,
+        health: f32,
+        food: i32,
+        food_saturation: f32,
+    ) -> Result<(), SessionError> {
+        let packet = SetHealth {
+            health,
+            food,
+            food_saturation,
+        };
+        let mut wire = Vec::new();
+        encode_set_health(&packet, self.max_frame_length, &mut wire)?;
+        self.send_wire(stream, &wire)?;
+        Ok(())
+    }
+
+    /// Sends a Respawn packet to the client.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_respawn(
+        &self,
+        stream: &mut TcpStream,
+        dimension_type: &str,
+        dimension_name: &str,
+        hashed_seed: i64,
+        gamemode: u8,
+        previous_gamemode: i8,
+        is_debug: bool,
+        is_flat: bool,
+        has_death_location: bool,
+        death_dimension_name: &str,
+        death_location: (i32, i32, i32),
+        portal_cooldown: i32,
+        data_kept: u8,
+    ) -> Result<(), SessionError> {
+        let packet = Respawn {
+            dimension_type: dimension_type.to_string(),
+            dimension_name: dimension_name.to_string(),
+            hashed_seed,
+            gamemode,
+            previous_gamemode,
+            is_debug,
+            is_flat,
+            has_death_location,
+            death_dimension_name: death_dimension_name.to_string(),
+            death_location,
+            portal_cooldown,
+            data_kept,
+        };
+        let mut wire = Vec::new();
+        encode_respawn(&packet, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
         Ok(())
     }
@@ -1430,6 +1599,20 @@ fn try_decode_play_packet_inner(
 
     // Set Creative Mode Slot (0x2B)
     match decode_set_creative_mode_slot(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Client Status (0x08)
+    match decode_client_status(&mut input, max_frame_length) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);
