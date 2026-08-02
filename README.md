@@ -64,7 +64,7 @@ Optional: `--config path/to/server.properties`, `--host`, `--port`. Stop with Ct
 | **H** | Inventory, chat, KA timeout, UUID, vitals (#95–#99) | **Done** |
 | **I** | Persistence + polish (#122–#133) | **Done** — see [#134](https://github.com/shumaimai/RustboundServer/issues/134) leftovers (#60) |
 | Later | Online mode (#60) | Queued |
-| Long-term | Thin Rust Mod API (#101, #132) | Design + façade landed; wire next |
+| Long-term | Thin Rust Mod API (#101, #132) | Façade + host wired; load/register mods next |
 
 **Not a goal:** drop-in Java Forge mod compatibility or an automatic Forge→Rust compiler.
 

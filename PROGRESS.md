@@ -268,23 +268,24 @@ c587232 Establish clean-room Rust workspace.
 - ~~食料消費・戦闘死~~ — **#129 / #130 Done**（スタブ）
 - ~~Survival dig progress~~ — **#133 Done**（均一 hardness）
 - ~~Tick-owned mutation façade~~ — **#132 Done**
-- ~~Mod API 設計ドキュメント + 型スケルトン~~ — **#101 Done**（未配線）
+- ~~Mod API 設計ドキュメント + 型スケルトン~~ — **#101 Done**
+- ~~ModHost を tick ループへ接続~~ — **Done**（init/tick/shutdown；本番 mods はまだ空）
 - online mode 未実装 — #60
-- ModHost を tick ループへ接続 — follow-up of #101/#132
+- 動的 mod ロード / 登録 UI — follow-up
 
 ## 今後の展望
 
-Phases A–I 完了。次は **#60 Online mode** または Mod API 配線。
+Phases A–I 完了。ModHost は tick に配線済み。次は **#60 Online mode** または実 mod の登録経路。
 
 1. ~~正しさ — #122 / #131 / #123~~
 2. ~~永続化 — #124 / #125 / #126~~
 3. ~~ストリーム／リスポーン — #127 / #128~~
 4. ~~Survival 感 — #129 / #130 / #133~~
-5. ~~Mod API 準備 — #132 / #101~~
+5. ~~Mod API 準備 — #132 / #101 / tick 配線~~
 6. **Online mode** — #60
-7. **ModHost 配線** — tick コールバック接続
+7. **実 mod 登録** — `Server` へ mods を渡す経路
 
 ---
 
-*最終更新: Phase I polish (#127–#130/#133) + Mod API façade/design (#132/#101)*
+*最終更新: ModHost tick 配線*
 *テスト数: workspace 緑想定*
