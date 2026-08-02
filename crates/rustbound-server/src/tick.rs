@@ -65,6 +65,24 @@ pub const FOOD_DRAIN_INTERVAL_TICKS: u64 = 80; // 4 seconds per drain tick
 pub const STARVATION_DAMAGE: f32 = 1.0;
 /// Gamemode Creative (exempt from food drain).
 pub const GAMEMODE_CREATIVE: u8 = 1;
+/// Default block hardness for the minimal stub (seconds to break by hand).
+/// Real Minecraft varies per block type; this is a uniform approximation.
+pub const DEFAULT_BLOCK_HARDNESS_TICKS: u64 = 30; // 1.5 seconds at 20 TPS
+/// Number of destroy stages (0–9).
+pub const MAX_DESTROY_STAGE: i8 = 9;
+
+/// Tracks per-player block break progress.
+#[derive(Debug, Clone)]
+struct BlockBreakProgress {
+    /// The block position being broken.
+    position: (i32, i32, i32),
+    /// Ticks elapsed since break started.
+    ticks_elapsed: u64,
+    /// Total ticks needed to break (based on hardness).
+    total_ticks: u64,
+    /// Last destroy stage sent to client.
+    last_stage: i8,
+}
 
 /// Per-player inventory state, owned by the tick loop.
 ///
@@ -354,6 +372,15 @@ pub enum TickMessage {
         /// The client's requested view distance (in chunks).
         view_distance: i32,
     },
+    /// A Survival player started/aborted/stopped destroying a block.
+    DigBlock {
+        /// The entity ID of the player.
+        entity_id: i32,
+        /// The dig action (0=start, 1=abort, 2=stop).
+        action: i32,
+        /// The block position.
+        position: (i32, i32, i32),
+    },
     /// A creative-mode player set a slot (Set Creative Mode Slot packet).
     SetCreativeSlot {
         /// The entity ID of the player.
@@ -528,6 +555,7 @@ fn run_tick_loop(
     let mut session_senders: HashMap<i32, Sender<SessionEvent>> = HashMap::new();
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
     let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
+    let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
 
     while !shutdown.load(Ordering::Acquire) {
         let tick_start = Instant::now();
@@ -840,6 +868,38 @@ fn run_tick_loop(
                         }
                     }
                 }
+                TickMessage::DigBlock {
+                    entity_id,
+                    action,
+                    position,
+                } => {
+                    match action {
+                        0 => {
+                            // StartDestroy: begin tracking break progress
+                            let progress = BlockBreakProgress {
+                                position,
+                                ticks_elapsed: 0,
+                                total_ticks: DEFAULT_BLOCK_HARDNESS_TICKS,
+                                last_stage: -1,
+                            };
+                            break_progress.insert(entity_id, progress);
+                        }
+                        1 | 2 => {
+                            // AbortDestroy or StopDestroy: cancel break
+                            if let Some(progress) = break_progress.remove(&entity_id) {
+                                // Remove the break animation
+                                if let Some(sender) = session_senders.get(&entity_id) {
+                                    let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                                        entity_id,
+                                        position: progress.position,
+                                        destroy_stage: -1, // remove animation
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 TickMessage::SetCreativeSlot {
                     entity_id,
                     slot,
@@ -1071,6 +1131,45 @@ fn run_tick_loop(
                         }
                     }
                 }
+            }
+        }
+
+        // Periodic task: update block break progress for Survival players
+        let mut completed_breaks: Vec<(i32, (i32, i32, i32))> = Vec::new();
+        for (&entity_id, progress) in break_progress.iter_mut() {
+            progress.ticks_elapsed += 1;
+            // Calculate destroy stage: 0 to MAX_DESTROY_STAGE
+            let stage = u64::checked_div(
+                progress.ticks_elapsed * (MAX_DESTROY_STAGE as u64 + 1),
+                progress.total_ticks,
+            )
+            .map(|v| (v as i8).min(MAX_DESTROY_STAGE))
+            .unwrap_or(MAX_DESTROY_STAGE);
+            if stage != progress.last_stage {
+                progress.last_stage = stage;
+                if let Some(sender) = session_senders.get(&entity_id) {
+                    let _ = sender.send(SessionEvent::SetBlockDestroyStage {
+                        entity_id,
+                        position: progress.position,
+                        destroy_stage: stage,
+                    });
+                }
+            }
+            // Check if break is complete
+            if progress.ticks_elapsed >= progress.total_ticks {
+                completed_breaks.push((entity_id, progress.position));
+            }
+        }
+        // Complete breaks: set block to air and remove progress
+        for (entity_id, position) in completed_breaks {
+            break_progress.remove(&entity_id);
+            world.set_block(position.0, position.1, position.2, 0);
+            // Broadcast Block Update to all sessions
+            for sender in session_senders.values() {
+                let _ = sender.send(SessionEvent::BlockUpdate {
+                    position,
+                    block_state: 0,
+                });
             }
         }
 
@@ -2956,5 +3055,155 @@ mod tests {
         // 80 ticks at 20 TPS = 4 seconds
         assert_eq!(FOOD_DRAIN_INTERVAL_TICKS, 80);
         assert_eq!(FOOD_DRAIN_INTERVAL_TICKS / TPS, 4);
+    }
+
+    // --- Block break progress tests ---
+
+    #[test]
+    fn tick_loop_survival_dig_completes_break() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0, // Survival
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place a block at (0, 100, 0)
+        handle.send(super::TickMessage::SetBlock {
+            position: (0, 100, 0),
+            block_state: 1,
+        })?;
+
+        // Wait for block set
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Start digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 0, // StartDestroy
+            position: (0, 100, 0),
+        })?;
+
+        // Wait for break to complete (DEFAULT_BLOCK_HARDNESS_TICKS = 30 ticks = 1.5s)
+        // plus some margin for tick loop scheduling
+        let start = Instant::now();
+        let mut got_block_update = false;
+        while start.elapsed() < Duration::from_secs(5) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate {
+                    position,
+                    block_state,
+                }) => {
+                    if position == (0, 100, 0) && block_state == 0 {
+                        got_block_update = true;
+                        break;
+                    }
+                }
+                Ok(SessionEvent::SetBlockDestroyStage { .. }) => {
+                    // Expected: progress updates
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        assert!(
+            got_block_update,
+            "should receive BlockUpdate with air after break completes"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_survival_dig_abort_cancels_break() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0, // Survival
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        // Wait for join
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place a block
+        handle.send(super::TickMessage::SetBlock {
+            position: (0, 100, 0),
+            block_state: 1,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Start digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 0,
+            position: (0, 100, 0),
+        })?;
+
+        // Wait a bit for some progress
+        std::thread::sleep(Duration::from_millis(200));
+        while event_rx.try_recv().is_ok() {}
+
+        // Abort digging
+        handle.send(super::TickMessage::DigBlock {
+            entity_id: 1,
+            action: 1, // AbortDestroy
+            position: (0, 100, 0),
+        })?;
+
+        // Wait and check that no BlockUpdate (air) is sent — block should remain
+        let start = Instant::now();
+        let mut got_unexpected_air = false;
+        while start.elapsed() < Duration::from_secs(2) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::BlockUpdate { block_state: 0, .. }) => {
+                    got_unexpected_air = true;
+                }
+                Ok(SessionEvent::SetBlockDestroyStage { destroy_stage, .. }) => {
+                    // Should receive -1 to remove animation
+                    assert_eq!(
+                        destroy_stage, -1,
+                        "abort should send destroy_stage -1 to remove animation"
+                    );
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        assert!(
+            !got_unexpected_air,
+            "should not receive BlockUpdate(air) after abort"
+        );
+
+        handle.shutdown();
+        Ok(())
     }
 }
