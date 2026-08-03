@@ -433,6 +433,14 @@ pub struct JoinGame {
     pub is_debug: bool,
     /// Whether the world is flat.
     pub is_flat: bool,
+    /// Whether a death location is present.
+    pub has_death_location: bool,
+    /// Death dimension name (only if has_death_location).
+    pub death_dimension_name: String,
+    /// Death block position (only if has_death_location).
+    pub death_location: (i32, i32, i32),
+    /// Portal cooldown in ticks.
+    pub portal_cooldown: i32,
 }
 
 /// Keep Alive packet (clientbound Play `0x23` and serverbound Play `0x12`).
@@ -658,9 +666,11 @@ pub fn encode_join_game(
         encode_string(name, MAX_IDENTIFIER_LENGTH, &mut body).map_err(PlayError::from)?;
     }
 
-    // Registry codec (opaque bytes)
-    encode_byte_array(&packet.registry_codec, MAX_REGISTRY_CODEC_SIZE, &mut body)
-        .map_err(PlayError::from)?;
+    // Registry codec is raw NBT on the wire (self-delimiting; NOT length-prefixed).
+    if packet.registry_codec.len() > MAX_REGISTRY_CODEC_SIZE {
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
+    body.extend_from_slice(&packet.registry_codec);
 
     // Dimension type and name
     encode_string(&packet.dimension_type, MAX_IDENTIFIER_LENGTH, &mut body)
@@ -677,6 +687,22 @@ pub fn encode_join_game(
     encode_bool(packet.enable_respawn_screen, &mut body);
     encode_bool(packet.is_debug, &mut body);
     encode_bool(packet.is_flat, &mut body);
+    encode_bool(packet.has_death_location, &mut body);
+    if packet.has_death_location {
+        encode_string(
+            &packet.death_dimension_name,
+            MAX_IDENTIFIER_LENGTH,
+            &mut body,
+        )
+        .map_err(PlayError::from)?;
+        encode_position(
+            packet.death_location.0,
+            packet.death_location.1,
+            packet.death_location.2,
+            &mut body,
+        );
+    }
+    encode_var_int(packet.portal_cooldown, &mut body);
 
     encode_frame(JOIN_GAME_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
     Ok(())
@@ -764,12 +790,15 @@ pub fn decode_join_game(
         dimension_names.push(name.to_string());
     }
 
-    // Registry codec (opaque bytes)
-    let registry_codec =
-        decode_byte_array(&mut body, MAX_REGISTRY_CODEC_SIZE).map_err(|error| {
-            *input = source;
-            PlayError::from(error)
-        })?;
+    // Registry codec is raw NBT (self-delimiting).
+    let registry_codec = read_nbt_compound(&mut body).map_err(|error| {
+        *input = source;
+        PlayError::from(error)
+    })?;
+    if registry_codec.len() > MAX_REGISTRY_CODEC_SIZE {
+        *input = source;
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
 
     // Dimension type and name
     let dimension_type = decode_string(&mut body, MAX_IDENTIFIER_LENGTH).map_err(|error| {
@@ -814,6 +843,27 @@ pub fn decode_join_game(
         *input = source;
         PlayError::from(error)
     })?;
+    let has_death_location = decode_bool(&mut body).map_err(|error| {
+        *input = source;
+        PlayError::from(error)
+    })?;
+    let (death_dimension_name, death_location) = if has_death_location {
+        let name = decode_string(&mut body, MAX_IDENTIFIER_LENGTH).map_err(|error| {
+            *input = source;
+            PlayError::from(error)
+        })?;
+        let pos = decode_position(&mut body).map_err(|error| {
+            *input = source;
+            PlayError::from(error)
+        })?;
+        (name.to_string(), pos)
+    } else {
+        (String::new(), (0, 0, 0))
+    };
+    let portal_cooldown = decode_var_int(&mut body).map_err(|error| {
+        *input = source;
+        PlayError::from(error)
+    })?;
 
     if !body.is_empty() {
         *input = source;
@@ -827,7 +877,7 @@ pub fn decode_join_game(
             gamemode,
             previous_gamemode,
             dimension_names,
-            registry_codec: registry_codec.to_vec(),
+            registry_codec,
             dimension_type: dimension_type.to_string(),
             dimension_name: dimension_name.to_string(),
             hashed_seed,
@@ -838,6 +888,10 @@ pub fn decode_join_game(
             enable_respawn_screen,
             is_debug,
             is_flat,
+            has_death_location,
+            death_dimension_name,
+            death_location,
+            portal_cooldown,
         },
     )))
 }
@@ -4699,8 +4753,11 @@ pub fn decode_acknowledge_block_change(
 
 /// Encodes a Chunk Data and Update Light packet (clientbound Play `0x24`).
 ///
-/// For the initial implementation, chunk sections, heightmaps, and block
-/// entities are encoded as opaque byte arrays.
+/// Wire layout for protocol 763 (1.20.1):
+/// - Heightmaps: raw NBT (self-delimiting; not length-prefixed)
+/// - Data: Prefixed Array of Byte (section buffer)
+/// - Block entities: Prefixed Array (opaque entries for now)
+/// - Light data: inline (BitSets + Prefixed Arrays); not wrapped in a byte array
 pub fn encode_chunk_data(
     packet: &ChunkData,
     max_frame_length: usize,
@@ -4710,11 +4767,13 @@ pub fn encode_chunk_data(
     encode_i32(packet.chunk_x, &mut body);
     encode_i32(packet.chunk_z, &mut body);
 
-    // Heightmaps (NBT blob)
-    encode_byte_array(&packet.heightmaps, MAX_CHUNK_DATA_SIZE, &mut body)
-        .map_err(PlayError::from)?;
+    // Heightmaps are raw NBT on the wire (self-delimiting; NOT length-prefixed).
+    if packet.heightmaps.len() > MAX_CHUNK_DATA_SIZE {
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
+    body.extend_from_slice(&packet.heightmaps);
 
-    // Chunk sections and biomes (opaque)
+    // Chunk sections and biomes (length-prefixed buffer)
     encode_byte_array(&packet.data, MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
 
     // Block entities
@@ -4728,9 +4787,11 @@ pub fn encode_chunk_data(
         encode_byte_array(be, MAX_CHUNK_DATA_SIZE, &mut body).map_err(PlayError::from)?;
     }
 
-    // Light data (opaque blob containing masks + light arrays)
-    encode_byte_array(&packet.light_data, MAX_CHUNK_DATA_SIZE, &mut body)
-        .map_err(PlayError::from)?;
+    // Light data is inlined after block entities (NOT length-prefixed).
+    if packet.light_data.len() > MAX_CHUNK_DATA_SIZE {
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
+    body.extend_from_slice(&packet.light_data);
 
     encode_frame(CHUNK_DATA_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
     Ok(())
@@ -4771,10 +4832,15 @@ pub fn decode_chunk_data(
         *input = source;
         PlayError::from(e)
     })?;
-    let heightmaps = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+    // Heightmaps are raw NBT (self-delimiting).
+    let heightmaps = read_nbt_compound(&mut body).map_err(|e| {
         *input = source;
         PlayError::from(e)
     })?;
+    if heightmaps.len() > MAX_CHUNK_DATA_SIZE {
+        *input = source;
+        return Err(PlayError::Codec(CodecError::StringTooLong));
+    }
     let data = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
         *input = source;
         PlayError::from(e)
@@ -4801,25 +4867,21 @@ pub fn decode_chunk_data(
         block_entities.push(be.to_vec());
     }
 
-    // Light data (opaque blob containing masks + light arrays)
-    let light = decode_byte_array(&mut body, MAX_CHUNK_DATA_SIZE).map_err(|e| {
+    // Light data consumes the remainder of the packet body (inline, not length-prefixed).
+    if body.len() > MAX_CHUNK_DATA_SIZE {
         *input = source;
-        PlayError::from(e)
-    })?;
-
-    if !body.is_empty() {
-        *input = source;
-        return Err(PlayError::TrailingBytes { count: body.len() });
+        return Err(PlayError::Codec(CodecError::StringTooLong));
     }
+    let light_data = body.to_vec();
 
     Ok(PlayDecodeOutcome::Complete(PlayPacket::ChunkData(
         ChunkData {
             chunk_x,
             chunk_z,
-            heightmaps: heightmaps.to_vec(),
+            heightmaps,
             data: data.to_vec(),
             block_entities,
-            light_data: light.to_vec(),
+            light_data,
         },
     )))
 }
@@ -4882,7 +4944,7 @@ mod tests {
             gamemode: GameMode::Survival,
             previous_gamemode: None,
             dimension_names: vec!["minecraft:overworld".to_string()],
-            registry_codec: Vec::new(),
+            registry_codec: crate::registry_codec::empty_nbt_compound(),
             dimension_type: "minecraft:overworld".to_string(),
             dimension_name: "minecraft:overworld".to_string(),
             hashed_seed: 0,
@@ -4893,6 +4955,10 @@ mod tests {
             enable_respawn_screen: true,
             is_debug: false,
             is_flat: false,
+            has_death_location: false,
+            death_dimension_name: String::new(),
+            death_location: (0, 0, 0),
+            portal_cooldown: 0,
         }
     }
 
@@ -4970,7 +5036,7 @@ mod tests {
         crate::primitives::encode_u8(0, &mut body);
         crate::primitives::encode_i8(-1, &mut body);
         crate::primitives::encode_var_int(0, &mut body);
-        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        body.extend_from_slice(&crate::registry_codec::empty_nbt_compound());
         crate::primitives::encode_string("minecraft:overworld", 32767, &mut body)
             .map_err(PlayError::from)?;
         crate::primitives::encode_string("minecraft:overworld", 32767, &mut body)
@@ -4983,6 +5049,8 @@ mod tests {
         crate::primitives::encode_bool(true, &mut body);
         crate::primitives::encode_bool(false, &mut body);
         crate::primitives::encode_bool(false, &mut body);
+        crate::primitives::encode_bool(false, &mut body);
+        crate::primitives::encode_var_int(0, &mut body);
 
         let mut wire = Vec::new();
         crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
@@ -5023,7 +5091,7 @@ mod tests {
         crate::primitives::encode_var_int(1, &mut body);
         crate::primitives::encode_string("minecraft:overworld", 32767, &mut body)
             .map_err(PlayError::from)?;
-        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        body.extend_from_slice(&packet.registry_codec);
         crate::primitives::encode_string("minecraft:overworld", 32767, &mut body)
             .map_err(PlayError::from)?;
         crate::primitives::encode_string("minecraft:overworld", 32767, &mut body)
@@ -5036,6 +5104,8 @@ mod tests {
         crate::primitives::encode_bool(true, &mut body);
         crate::primitives::encode_bool(false, &mut body);
         crate::primitives::encode_bool(false, &mut body);
+        crate::primitives::encode_bool(false, &mut body);
+        crate::primitives::encode_var_int(0, &mut body);
         body.push(0xff); // trailing byte
 
         let mut wire = Vec::new();
@@ -5409,7 +5479,7 @@ mod tests {
         let packet = ChunkData {
             chunk_x: 0,
             chunk_z: 0,
-            heightmaps: Vec::new(),
+            heightmaps: crate::registry_codec::empty_nbt_compound(),
             data: Vec::new(),
             block_entities: Vec::new(),
             light_data: Vec::new(),
@@ -5433,10 +5503,10 @@ mod tests {
         let packet = ChunkData {
             chunk_x: -10,
             chunk_z: 20,
-            heightmaps: vec![0x0a, 0x00, 0x00],
+            heightmaps: crate::registry_codec::empty_nbt_compound(),
             data: vec![0x01, 0x02, 0x03, 0x04],
             block_entities: vec![vec![0x0a, 0x01], vec![0x0a, 0x02]],
-            light_data: Vec::new(),
+            light_data: vec![0x00], // BitSet length 0 placeholder byte for smoke
         };
         let mut wire = Vec::new();
         encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
@@ -5457,10 +5527,10 @@ mod tests {
         let mut body = Vec::new();
         crate::primitives::encode_i32(0, &mut body);
         crate::primitives::encode_i32(0, &mut body);
-        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        body.extend_from_slice(&crate::registry_codec::empty_nbt_compound());
         crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
         crate::primitives::encode_var_int(0, &mut body);
-        crate::primitives::encode_byte_array(&[], 1048576, &mut body).map_err(PlayError::from)?;
+        // empty light data (remainder)
 
         let mut wire = Vec::new();
         crate::framing::encode_frame(0x05, &body, TEST_MAX_FRAME, &mut wire)
@@ -5477,7 +5547,7 @@ mod tests {
         let packet = ChunkData {
             chunk_x: 0,
             chunk_z: 0,
-            heightmaps: vec![0x0a],
+            heightmaps: crate::registry_codec::empty_nbt_compound(),
             data: vec![0x01],
             block_entities: Vec::new(),
             light_data: Vec::new(),

@@ -533,6 +533,10 @@ impl PlayerSession {
             enable_respawn_screen: true,
             is_debug: false,
             is_flat: true,
+            has_death_location: false,
+            death_dimension_name: String::new(),
+            death_location: (0, 0, 0),
+            portal_cooldown: 0,
         };
         let mut wire = Vec::new();
         encode_join_game(&join_game, self.max_frame_length, &mut wire)?;
