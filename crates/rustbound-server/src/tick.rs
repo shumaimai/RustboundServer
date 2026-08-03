@@ -306,7 +306,7 @@ fn chunk_z_from_world(z: f64) -> i32 {
 
 /// Formats a player chat message as a JSON chat component string.
 ///
-/// In offline mode, we use the System Chat Message packet (0x5D) for all
+/// In offline mode, we use the System Chat Message packet (0x64) for all
 /// chat. The content is a JSON chat component. We produce a simple
 /// `<username> <message>` format with the username in gray and the
 /// message in white, matching the vanilla chat appearance.
