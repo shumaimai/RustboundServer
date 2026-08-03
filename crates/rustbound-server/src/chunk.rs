@@ -1,8 +1,8 @@
-//! Flat/void chunk generator for protocol 763 (1.20.1).
+//! Flat chunk generator for protocol 763 (1.20.1).
 //!
 //! Produces valid Chunk Data payloads for a simple flat world so vanilla
-//! clients can render terrain. The generator creates a void world with a
-//! single stone platform at y=-64 (the bottom of the world).
+//! clients can render terrain. The generator creates a stone plateau from
+//! y=-64 through y=63 so players spawning at y=64 have solid ground.
 //!
 //! The chunk section format follows public protocol documentation:
 //! each section has a block-count (Short), block states (palette + data),
@@ -112,12 +112,17 @@ fn build_light_data() -> Vec<u8> {
     buf
 }
 
-/// Builds a minimal valid heightmaps NBT blob for a void/flat world.
+/// Builds a minimal valid heightmaps NBT blob for a flat world.
 ///
-/// Contains `MOTION_BLOCKING` and `WORLD_SURFACE` heightmaps with all
-/// values set to 0 (indicating the lowest possible height).
+/// Contains `MOTION_BLOCKING` and `WORLD_SURFACE` heightmaps. Values are the
+/// number of blocks above `min_y` (-64) up to and including the top solid
+/// block (y=63 → height 128).
 fn build_heightmaps_nbt() -> Vec<u8> {
     let mut buf = Vec::new();
+
+    // Surface at y=63 → 63 - (-64) + 1 = 128 above world bottom.
+    const SURFACE_HEIGHT: u32 = 128;
+    let packed = pack_heightmap_long(SURFACE_HEIGHT);
 
     // Root TAG_COMPOUND with empty name
     buf.push(TAG_COMPOUND);
@@ -128,7 +133,7 @@ fn build_heightmaps_nbt() -> Vec<u8> {
     write_nbt_string(&mut buf, "MOTION_BLOCKING");
     write_nbt_int(&mut buf, HEIGHTMAP_LONGS as i32);
     for _ in 0..HEIGHTMAP_LONGS {
-        buf.extend_from_slice(&0i64.to_be_bytes());
+        buf.extend_from_slice(&packed.to_be_bytes());
     }
 
     // WORLD_SURFACE heightmap (TAG_LONG_ARRAY)
@@ -136,13 +141,23 @@ fn build_heightmaps_nbt() -> Vec<u8> {
     write_nbt_string(&mut buf, "WORLD_SURFACE");
     write_nbt_int(&mut buf, HEIGHTMAP_LONGS as i32);
     for _ in 0..HEIGHTMAP_LONGS {
-        buf.extend_from_slice(&0i64.to_be_bytes());
+        buf.extend_from_slice(&packed.to_be_bytes());
     }
 
     // End root compound
     buf.push(TAG_END);
 
     buf
+}
+
+/// Packs seven identical 9-bit heightmap samples into one long (1.16+ format).
+fn pack_heightmap_long(value: u32) -> i64 {
+    let v = i64::from(value & 0x1FF);
+    let mut result = 0i64;
+    for i in 0..7 {
+        result |= v << (9 * i);
+    }
+    result
 }
 
 fn write_nbt_string(buf: &mut Vec<u8>, value: &str) {
@@ -179,18 +194,19 @@ fn encode_section(buf: &mut Vec<u8>, block_count: i16, block_state: i32, biome_i
 
 /// Generates the chunk section data for a flat world.
 ///
-/// The flat world has a single layer of stone at the bottom (y=-64)
-/// and air everywhere else. Section 0 (y=-64 to y=-49) contains the
-/// stone layer; all other sections are empty (air).
+/// Solid stone fills sections 0..=7 (world y=-64..=63). Everything above is
+/// air, so players spawning at y=64 stand on the flat surface.
 ///
 /// Section count is NOT encoded: the client derives it from the dimension
 /// height (384 / 16 = 24 for overworld).
 fn build_section_data() -> Vec<u8> {
     let mut buf = Vec::new();
 
+    // Section 7 top is y=63; spawn at y=64 stands on that surface.
+    const TOP_SOLID_SECTION: usize = 7;
+
     for section_idx in 0..NUM_SECTIONS {
-        if section_idx == 0 {
-            // Bottom section: stone at y=-64 (all 4096 blocks are stone)
+        if section_idx <= TOP_SOLID_SECTION {
             encode_section(
                 &mut buf,
                 SECTION_BLOCK_COUNT as i16,
@@ -198,7 +214,6 @@ fn build_section_data() -> Vec<u8> {
                 PLAINS_BIOME_ID,
             );
         } else {
-            // All other sections: air
             encode_section(&mut buf, 0, AIR_BLOCK_STATE, PLAINS_BIOME_ID);
         }
     }

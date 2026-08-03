@@ -66,6 +66,8 @@ pub const FOOD_DRAIN_INTERVAL_TICKS: u64 = 80; // 4 seconds per drain tick
 pub const STARVATION_DAMAGE: f32 = 1.0;
 /// Gamemode Creative (exempt from food drain).
 pub const GAMEMODE_CREATIVE: u8 = 1;
+/// Spectator gamemode wire value.
+pub const GAMEMODE_SPECTATOR: u8 = 3;
 /// Default block hardness for the minimal stub (seconds to break by hand).
 /// Real Minecraft varies per block type; this is a uniform approximation.
 pub const DEFAULT_BLOCK_HARDNESS_TICKS: u64 = 30; // 1.5 seconds at 20 TPS
@@ -641,10 +643,16 @@ fn run_tick_loop(
                         username.clone(),
                         gamemode,
                     );
-                    // Restore position if saved
+                    // Restore position if saved — but never reload into the void.
                     if let Some(ref d) = saved {
-                        player.set_position(d.x, d.y, d.z);
-                        player.set_rotation(d.yaw, d.pitch);
+                        if d.y < VOID_DEATH_Y {
+                            let (sx, sy, sz) = world.spawn_point();
+                            player.set_position(sx, sy, sz);
+                            player.set_rotation(d.yaw, d.pitch);
+                        } else {
+                            player.set_position(d.x, d.y, d.z);
+                            player.set_rotation(d.yaw, d.pitch);
+                        }
                     }
                     let (px, py, pz) = player.position();
                     world.add_player(player);
@@ -1146,12 +1154,16 @@ fn run_tick_loop(
             last_keep_alive_tick = tick_count;
         }
 
-        // Periodic task: check for void death (player Y < VOID_DEATH_Y)
+        // Periodic task: check for void death (player Y < VOID_DEATH_Y).
+        // Creative and Spectator are exempt (matching vanilla void behaviour).
         for (&entity_id, inv) in inventories.iter_mut() {
             if inv.is_dead {
                 continue;
             }
             if let Some(player) = world.get_player(entity_id) {
+                if player.gamemode == GAMEMODE_CREATIVE || player.gamemode == GAMEMODE_SPECTATOR {
+                    continue;
+                }
                 if player.y < VOID_DEATH_Y {
                     inv.kill();
                     clear_break_animation(&mut break_progress, &session_senders, entity_id);
@@ -1405,8 +1417,9 @@ fn build_player_view(world: &World, inventories: &HashMap<i32, PlayerInventory>)
 mod tests {
     use super::{
         DEFAULT_FOOD, DEFAULT_FOOD_SATURATION, DEFAULT_HEALTH, FOOD_DRAIN_INTERVAL_TICKS,
-        KEEP_ALIVE_INTERVAL_TICKS, PlayerChunkState, PlayerInventory, TICK_DURATION, TPS,
-        TickEvent, VOID_DEATH_Y, chunk_x_from_world, chunk_z_from_world, start_tick_loop,
+        GAMEMODE_CREATIVE, KEEP_ALIVE_INTERVAL_TICKS, PlayerChunkState, PlayerInventory,
+        TICK_DURATION, TPS, TickEvent, VOID_DEATH_Y, chunk_x_from_world, chunk_z_from_world,
+        start_tick_loop,
     };
     use crate::session::SessionEvent;
     use rustbound_protocol::primitives::Uuid;
@@ -2619,6 +2632,61 @@ mod tests {
             got_combat_death,
             "should receive CombatDeath event on void death"
         );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_void_does_not_kill_creative() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "CreativeSteve".to_string(),
+            gamemode: GAMEMODE_CREATIVE,
+            view_distance: 10,
+            event_sender: event_tx,
+        })?;
+
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.0,
+            y: VOID_DEATH_Y - 10.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        })?;
+
+        let start = Instant::now();
+        let mut got_death = false;
+        while start.elapsed() < Duration::from_millis(400) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHealth { health, .. }) if health <= 0.0 => {
+                    got_death = true;
+                    break;
+                }
+                Ok(SessionEvent::CombatDeath { .. }) => {
+                    got_death = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(!got_death, "creative players must not be void-killed");
 
         handle.shutdown();
         Ok(())
