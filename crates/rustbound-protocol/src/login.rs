@@ -11,8 +11,9 @@ use std::fmt;
 use crate::framing::{DecodeOutcome, FramingError, decode_frame, encode_frame};
 use crate::primitives::{
     CodecError, MAX_CHAT_COMPONENT_LENGTH, MAX_PUBLIC_KEY_LENGTH, MAX_SERVER_ID_LENGTH,
-    MAX_USERNAME_LENGTH, MAX_VERIFY_TOKEN_LENGTH, Uuid, decode_byte_array, decode_string,
-    decode_uuid, decode_var_int, encode_byte_array, encode_string, encode_uuid, encode_var_int,
+    MAX_USERNAME_LENGTH, MAX_VERIFY_TOKEN_LENGTH, Uuid, decode_bool, decode_byte_array,
+    decode_string, decode_uuid, decode_var_int, encode_bool, encode_byte_array, encode_string,
+    encode_uuid, encode_var_int,
 };
 use crate::state::ProtocolState;
 
@@ -143,11 +144,15 @@ pub enum LoginPacket {
 }
 
 /// Serverbound Login Start packet (Login `0x00`).
+///
+/// Protocol 763 (1.20 / 1.20.1) wire layout after the username is:
+/// `Has Player UUID` (Boolean) then optional `Player UUID`. Vanilla clients
+/// send `true` plus a UUID; offline probes may use a nil UUID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginStart {
     /// The player's username (max 16 UTF-16 units).
     pub username: String,
-    /// The player's UUID.
+    /// The player's UUID (present when the client sets Has Player UUID).
     pub uuid: Uuid,
 }
 
@@ -232,6 +237,8 @@ pub fn encode_login_start(
 ) -> Result<(), LoginError> {
     let mut body = Vec::new();
     encode_string(&packet.username, MAX_USERNAME_LENGTH, &mut body).map_err(LoginError::from)?;
+    // Protocol 763: Has Player UUID + UUID (vanilla always sends both).
+    encode_bool(true, &mut body);
     encode_uuid(packet.uuid, &mut body);
 
     encode_frame(LOGIN_START_PACKET_ID, &body, max_frame_length, output)
@@ -272,10 +279,18 @@ pub fn decode_login_start(
         *input = source;
         LoginError::from(error)
     })?;
-    let uuid = decode_uuid(&mut body).map_err(|error| {
+    let has_uuid = decode_bool(&mut body).map_err(|error| {
         *input = source;
         LoginError::from(error)
     })?;
+    let uuid = if has_uuid {
+        decode_uuid(&mut body).map_err(|error| {
+            *input = source;
+            LoginError::from(error)
+        })?
+    } else {
+        Uuid::new(0, 0)
+    };
 
     if !body.is_empty() {
         *input = source;
@@ -988,6 +1003,7 @@ mod tests {
         let mut body = Vec::new();
         crate::primitives::encode_string(&packet.username, 16, &mut body)
             .map_err(LoginError::from)?;
+        crate::primitives::encode_bool(true, &mut body);
         crate::primitives::encode_uuid(packet.uuid, &mut body);
         body.push(0xff); // trailing byte
 
@@ -998,6 +1014,51 @@ mod tests {
         let mut input = wire.as_slice();
         let result = decode_login_start(&mut input, TEST_MAX_FRAME);
         assert!(matches!(result, Err(LoginError::TrailingBytes { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn login_start_accepts_has_uuid_false() -> Result<(), LoginError> {
+        let mut body = Vec::new();
+        crate::primitives::encode_string("Steve", 16, &mut body).map_err(LoginError::from)?;
+        crate::primitives::encode_bool(false, &mut body);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(LOGIN_START_PACKET_ID, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_start(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginStart(decoded)) => {
+                assert_eq!(decoded.username, "Steve");
+                assert_eq!(decoded.uuid, Uuid::new(0, 0));
+            }
+            _ => panic!("expected LoginStart"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_start_vanilla_has_uuid_true_round_trips() -> Result<(), LoginError> {
+        // Mimic a vanilla 1.20.1 client: username + has_uuid=true + uuid.
+        let uuid = sample_uuid();
+        let mut body = Vec::new();
+        crate::primitives::encode_string("Player", 16, &mut body).map_err(LoginError::from)?;
+        crate::primitives::encode_bool(true, &mut body);
+        crate::primitives::encode_uuid(uuid, &mut body);
+
+        let mut wire = Vec::new();
+        crate::framing::encode_frame(LOGIN_START_PACKET_ID, &body, TEST_MAX_FRAME, &mut wire)
+            .map_err(LoginError::from)?;
+
+        let mut input = wire.as_slice();
+        match decode_login_start(&mut input, TEST_MAX_FRAME)? {
+            super::LoginDecodeOutcome::Complete(LoginPacket::LoginStart(decoded)) => {
+                assert_eq!(decoded.username, "Player");
+                assert_eq!(decoded.uuid, uuid);
+            }
+            _ => panic!("expected LoginStart"),
+        }
         Ok(())
     }
 

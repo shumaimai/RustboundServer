@@ -1920,6 +1920,7 @@ pub fn run_play_loop(
                         // poll for tick events (KeepAlive, etc.)
                         if e.kind() == std::io::ErrorKind::WouldBlock
                             || e.kind() == std::io::ErrorKind::TimedOut
+                            || e.kind() == std::io::ErrorKind::Interrupted
                         {
                             continue;
                         }

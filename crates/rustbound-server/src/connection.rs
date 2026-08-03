@@ -359,11 +359,20 @@ pub fn handle_connection(
             DecodeResult::Incomplete => {
                 // Need more data - read from the stream
                 let mut chunk = [0u8; 4096];
-                let n = stream.read(&mut chunk)?;
-                if n == 0 {
-                    return Err(ConnectionError::Disconnected);
+                match stream.read(&mut chunk) {
+                    Ok(0) => return Err(ConnectionError::Disconnected),
+                    Ok(n) => read_buffer.extend_from_slice(&chunk[..n]),
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut
+                            || e.kind() == std::io::ErrorKind::Interrupted =>
+                    {
+                        // Transient; retry. Windows non-blocking leftovers
+                        // surface as WouldBlock (10035).
+                        continue;
+                    }
+                    Err(e) => return Err(ConnectionError::from(e)),
                 }
-                read_buffer.extend_from_slice(&chunk[..n]);
             }
             DecodeResult::Error(error) => {
                 return Err(error);
