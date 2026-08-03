@@ -103,7 +103,7 @@ pub const SET_RENDER_DISTANCE_PACKET_ID: i32 = 0x4F;
 pub const SET_SIMULATION_DISTANCE_PACKET_ID: i32 = 0x5C;
 
 /// Packet ID for the clientbound Update Tags packet (protocol 763).
-pub const UPDATE_TAGS_PACKET_ID: i32 = 0x68;
+pub const UPDATE_TAGS_PACKET_ID: i32 = 0x6E;
 
 /// Packet ID for the clientbound Update Recipes packet.
 pub const UPDATE_RECIPES_PACKET_ID: i32 = 0x6D;
@@ -121,16 +121,16 @@ pub const BLOCK_UPDATE_PACKET_ID: i32 = 0x0A;
 pub const ACKNOWLEDGE_BLOCK_CHANGE_PACKET_ID: i32 = 0x06;
 
 /// Packet ID for the clientbound Move Entity (Pos) packet.
-pub const MOVE_ENTITY_POS_PACKET_ID: i32 = 0x29;
+pub const MOVE_ENTITY_POS_PACKET_ID: i32 = 0x2B;
 
 /// Packet ID for the clientbound Move Entity (Pos+Rot) packet.
-pub const MOVE_ENTITY_POS_ROT_PACKET_ID: i32 = 0x2A;
+pub const MOVE_ENTITY_POS_ROT_PACKET_ID: i32 = 0x2C;
 
 /// Packet ID for the clientbound Move Entity (Rot) packet.
-pub const MOVE_ENTITY_ROT_PACKET_ID: i32 = 0x2B;
+pub const MOVE_ENTITY_ROT_PACKET_ID: i32 = 0x2D;
 
 /// Packet ID for the clientbound Entity Teleport packet.
-pub const ENTITY_TELEPORT_PACKET_ID: i32 = 0x57;
+pub const ENTITY_TELEPORT_PACKET_ID: i32 = 0x68;
 
 /// Packet ID for the clientbound Set Container Content packet.
 pub const SET_CONTAINER_CONTENT_PACKET_ID: i32 = 0x12;
@@ -145,13 +145,13 @@ pub const SET_HELD_ITEM_SERVERBOUND_PACKET_ID: i32 = 0x28;
 pub const SET_CREATIVE_MODE_SLOT_PACKET_ID: i32 = 0x2B;
 
 /// Packet ID for the clientbound Set Health packet.
-pub const SET_HEALTH_PACKET_ID: i32 = 0x5B;
+pub const SET_HEALTH_PACKET_ID: i32 = 0x57;
 
 /// Packet ID for the clientbound Respawn packet.
-pub const RESPAWN_PACKET_ID: i32 = 0x45;
+pub const RESPAWN_PACKET_ID: i32 = 0x41;
 
-/// Packet ID for the serverbound Client Status packet.
-pub const CLIENT_STATUS_PACKET_ID: i32 = 0x08;
+/// Packet ID for the serverbound Client Status packet (`client_command`).
+pub const CLIENT_STATUS_PACKET_ID: i32 = 0x07;
 
 /// Maximum number of slots in a single container content packet.
 pub const MAX_CONTAINER_SLOTS: usize = 256;
@@ -160,10 +160,10 @@ pub const MAX_CONTAINER_SLOTS: usize = 256;
 pub const MAX_ITEM_NBT_SIZE: usize = 65536;
 
 /// Packet ID for the serverbound Chat Message packet.
-pub const CHAT_MESSAGE_SERVERBOUND_PACKET_ID: i32 = 0x01;
+pub const CHAT_MESSAGE_SERVERBOUND_PACKET_ID: i32 = 0x05;
 
 /// Packet ID for the clientbound System Chat Message packet.
-pub const SYSTEM_CHAT_MESSAGE_PACKET_ID: i32 = 0x5D;
+pub const SYSTEM_CHAT_MESSAGE_PACKET_ID: i32 = 0x64;
 
 /// Maximum length of a chunk data blob.
 pub const MAX_CHUNK_DATA_SIZE: usize = 1048576;
@@ -334,13 +334,13 @@ pub enum PlayPacket {
     BlockUpdate(BlockUpdate),
     /// Clientbound Acknowledge Block Change (Play `0x06`).
     AcknowledgeBlockChange(AcknowledgeBlockChange),
-    /// Clientbound Move Entity (Pos) (Play `0x29`).
+    /// Clientbound Move Entity (Pos) (Play `0x2B`).
     MoveEntityPos(MoveEntityPos),
     /// Clientbound Move Entity (Pos+Rot) (Play `0x2A`).
     MoveEntityPosRot(MoveEntityPosRot),
     /// Clientbound Move Entity (Rot) (Play `0x2B`).
     MoveEntityRot(MoveEntityRot),
-    /// Clientbound Entity Teleport (Play `0x57`).
+    /// Clientbound Entity Teleport (Play `0x68`).
     EntityTeleport(EntityTeleport),
     /// Clientbound Set Container Content (Play `0x12`).
     SetContainerContent(SetContainerContent),
@@ -352,11 +352,11 @@ pub enum PlayPacket {
     SetCreativeModeSlot(SetCreativeModeSlot),
     /// Serverbound Chat Message (Play `0x01`).
     ChatMessageServerbound(ChatMessageServerbound),
-    /// Clientbound System Chat Message (Play `0x5D`).
+    /// Clientbound System Chat Message (Play `0x64`).
     SystemChatMessage(SystemChatMessage),
-    /// Clientbound Set Health (Play `0x5B`).
+    /// Clientbound Set Health (Play `0x57`).
     SetHealth(SetHealth),
-    /// Clientbound Respawn (Play `0x45`).
+    /// Clientbound Respawn (Play `0x41`).
     Respawn(Respawn),
     /// Serverbound Client Status (Play `0x08`).
     ClientStatus(ClientStatus),
@@ -1878,7 +1878,7 @@ pub fn encode_player_abilities(
     Ok(())
 }
 
-/// Encodes an empty Update Tags packet (clientbound Play `0x68`).
+/// Encodes an empty Update Tags packet (clientbound Play `0x6E`).
 ///
 /// Vanilla clients expect tags for `minecraft:block`, `minecraft:item`,
 /// `minecraft:fluid`, `minecraft:entity_type`, and `minecraft:game_event`.
@@ -2665,7 +2665,7 @@ pub struct RemoveEntities {
     pub entity_ids: Vec<i32>,
 }
 
-/// Clientbound Move Entity (Pos) packet (Play `0x29`).
+/// Clientbound Move Entity (Pos) packet (Play `0x2B`).
 ///
 /// Sends a relative position update. The delta values are in 1/4096 of a block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2719,7 +2719,7 @@ pub struct MoveEntityRot {
     pub on_ground: bool,
 }
 
-/// Clientbound Entity Teleport packet (Play `0x57`).
+/// Clientbound Entity Teleport packet (Play `0x68`).
 ///
 /// Sends an absolute position and rotation update. Used when the delta
 /// exceeds the range of a relative move (more than ~8 blocks).
@@ -2852,7 +2852,7 @@ pub struct SetCreativeModeSlot {
     pub item: Slot,
 }
 
-/// Clientbound Set Health packet (Play `0x5B`).
+/// Clientbound Set Health packet (Play `0x57`).
 ///
 /// Sets the player's health, food, and food saturation. Health <= 0
 /// triggers the death screen on the client.
@@ -2866,7 +2866,7 @@ pub struct SetHealth {
     pub food_saturation: f32,
 }
 
-/// Clientbound Respawn packet (Play `0x45`).
+/// Clientbound Respawn packet (Play `0x41`).
 ///
 /// Sent to respawn the player after death or change dimensions.
 /// For a simple death/respawn in the same dimension, most fields can
@@ -2908,7 +2908,7 @@ pub struct ClientStatus {
     pub action: i32,
 }
 
-/// Encodes a Set Health packet (clientbound Play `0x5B`).
+/// Encodes a Set Health packet (clientbound Play `0x57`).
 pub fn encode_set_health(
     packet: &SetHealth,
     max_frame_length: usize,
@@ -2922,7 +2922,7 @@ pub fn encode_set_health(
     Ok(())
 }
 
-/// Decodes a Set Health packet (clientbound Play `0x5B`).
+/// Decodes a Set Health packet (clientbound Play `0x57`).
 pub fn decode_set_health(
     input: &mut &[u8],
     max_frame_length: usize,
@@ -2972,7 +2972,7 @@ pub fn decode_set_health(
     )))
 }
 
-/// Encodes a Respawn packet (clientbound Play `0x45`).
+/// Encodes a Respawn packet (clientbound Play `0x41`).
 pub fn encode_respawn(
     packet: &Respawn,
     max_frame_length: usize,
@@ -3009,7 +3009,7 @@ pub fn encode_respawn(
     Ok(())
 }
 
-/// Decodes a Respawn packet (clientbound Play `0x45`).
+/// Decodes a Respawn packet (clientbound Play `0x41`).
 pub fn decode_respawn(
     input: &mut &[u8],
     max_frame_length: usize,
@@ -3801,7 +3801,7 @@ pub struct ChatMessageServerbound {
     pub message: String,
 }
 
-/// Clientbound System Chat Message (Play `0x5D`).
+/// Clientbound System Chat Message (Play `0x64`).
 ///
 /// Used for system messages and, in offline mode, for player chat
 /// (since signed chat is not applicable without online mode).
@@ -3961,7 +3961,7 @@ pub fn encode_remove_entities(
 // Entity movement packets (protocol 763)
 // ---------------------------------------------------------------------------
 
-/// Encodes a Move Entity (Pos) packet (clientbound Play `0x29`).
+/// Encodes a Move Entity (Pos) packet (clientbound Play `0x2B`).
 pub fn encode_move_entity_pos(
     packet: &MoveEntityPos,
     max_frame_length: usize,
@@ -3978,7 +3978,7 @@ pub fn encode_move_entity_pos(
     Ok(())
 }
 
-/// Decodes a Move Entity (Pos) packet (clientbound Play `0x29`).
+/// Decodes a Move Entity (Pos) packet (clientbound Play `0x2B`).
 pub fn decode_move_entity_pos(
     input: &mut &[u8],
     max_frame_length: usize,
@@ -4203,7 +4203,7 @@ pub fn decode_move_entity_rot(
     )))
 }
 
-/// Encodes an Entity Teleport packet (clientbound Play `0x57`).
+/// Encodes an Entity Teleport packet (clientbound Play `0x68`).
 pub fn encode_entity_teleport(
     packet: &EntityTeleport,
     max_frame_length: usize,
@@ -4222,7 +4222,7 @@ pub fn encode_entity_teleport(
     Ok(())
 }
 
-/// Decodes an Entity Teleport packet (clientbound Play `0x57`).
+/// Decodes an Entity Teleport packet (clientbound Play `0x68`).
 pub fn decode_entity_teleport(
     input: &mut &[u8],
     max_frame_length: usize,
@@ -4296,7 +4296,7 @@ pub fn decode_entity_teleport(
 // Chat packets (protocol 763)
 // ---------------------------------------------------------------------------
 
-/// Encodes a System Chat Message packet (clientbound Play `0x5D`).
+/// Encodes a System Chat Message packet (clientbound Play `0x64`).
 pub fn encode_system_chat_message(
     packet: &SystemChatMessage,
     max_frame_length: usize,

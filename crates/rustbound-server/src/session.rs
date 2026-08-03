@@ -622,7 +622,7 @@ impl PlayerSession {
         rustbound_protocol::play::encode_update_recipes_empty(mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
 
-        // 7. Update Tags (empty registries) — 0x68
+        // 7. Update Tags (empty registries) — 0x6E
         wire.clear();
         rustbound_protocol::play::encode_update_tags_empty(mfl, &mut wire)?;
         self.send_wire(stream, &wire)?;
@@ -1426,7 +1426,7 @@ impl PlayerSession {
     /// - Position only (small delta): Move Entity (Pos) `0x29`
     /// - Rotation only: Move Entity (Rot) `0x2B`
     /// - Both (small delta): Move Entity (Pos+Rot) `0x2A`
-    /// - Large position delta (>8 blocks): Entity Teleport `0x57`
+    /// - Large position delta (>8 blocks): Entity Teleport `0x68`
     ///
     /// The delta values for relative moves are in 1/4096 of a block.
     /// Angles are converted from degrees to byte steps (256 = 360 degrees).
