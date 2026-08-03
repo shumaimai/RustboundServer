@@ -175,6 +175,10 @@ fn run_accept_loop<F>(
 }
 
 fn setup_connection(stream: &TcpStream, connection_timeout: Duration, tcp_nodelay: bool) {
+    // On Windows, sockets accepted from a non-blocking listener inherit
+    // non-blocking mode and then return WSAEWOULDBLOCK (10035) on read.
+    // Force blocking I/O before applying timeouts.
+    let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(connection_timeout));
     let _ = stream.set_write_timeout(Some(connection_timeout));
     if tcp_nodelay {
