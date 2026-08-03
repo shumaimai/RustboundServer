@@ -22,7 +22,7 @@ pub const SECTION_BLOCK_COUNT: usize = 4096;
 /// Block state ID for air.
 const AIR_BLOCK_STATE: i32 = 0;
 
-/// Block state ID for stone (approximate global palette ID).
+/// Block state ID for stone (1.20.1 global palette).
 const STONE_BLOCK_STATE: i32 = 1;
 
 /// Biome ID for plains (matches registry codec fixture).
@@ -171,24 +171,24 @@ fn write_nbt_int(buf: &mut Vec<u8>, value: i32) {
     buf.extend_from_slice(&value.to_be_bytes());
 }
 
-/// Encodes a single chunk section with a single-value block palette.
+/// Encodes a single chunk section with a single-valued palette (BPE = 0).
 ///
-/// When `bits_per_block == 0`, the palette has exactly one entry and the
-/// data array is empty (length 0).
+/// Per the public chunk format (protocol 763 / 1.20.1), a single-valued
+/// palette is `Bits Per Entry = 0`, then a single global-palette `Value`
+/// VarInt (no palette length), then a Data Array Length VarInt that is
+/// always 0. Indirect palettes (BPE 4–8) are the ones that prefix a length.
 fn encode_section(buf: &mut Vec<u8>, block_count: i16, block_state: i32, biome_id: i32) {
-    // Block count (Short)
+    // Block count (Short) — non-air blocks in the section
     encode_i16(block_count, buf);
 
-    // Block states
-    encode_u8(0, buf); // bits per block = 0 (single value palette)
-    encode_var_int(1, buf); // palette length = 1
-    encode_var_int(block_state, buf); // palette entry
+    // Block states (single-valued)
+    encode_u8(0, buf); // bits per block = 0
+    encode_var_int(block_state, buf); // Value (no length prefix)
     encode_var_int(0, buf); // data array length = 0
 
-    // Biomes
-    encode_u8(0, buf); // bits per biome = 0 (single value palette)
-    encode_var_int(1, buf); // palette length = 1
-    encode_var_int(biome_id, buf); // palette entry
+    // Biomes (single-valued)
+    encode_u8(0, buf); // bits per biome = 0
+    encode_var_int(biome_id, buf); // Value (no length prefix)
     encode_var_int(0, buf); // data array length = 0
 }
 
@@ -270,11 +270,36 @@ mod tests {
     #[test]
     fn section_data_has_expected_size() {
         let data = build_section_data();
-        // Each single-value section is: i16 + (u8 + varint*3)*2
-        // block: 2 + 1 + 1 + 1 + 1 = 6; biome: 1 + 1 + 1 + 1 = 4; total 10 bytes
-        // (palette varints for length=1 and value=0/1 and data_len=0 are 1 byte each)
-        assert_eq!(data.len(), NUM_SECTIONS * 10);
+        // Each single-valued section is: i16 + 2 × (u8 + VarInt value + VarInt data_len)
+        // block: 2 + 1 + 1 + 1 = 5; biome: 1 + 1 + 1 = 3; total 8 bytes
+        assert_eq!(data.len(), NUM_SECTIONS * 8);
         assert!(!data.is_empty());
+    }
+
+    #[test]
+    fn single_valued_section_wire_has_no_palette_length() {
+        // Stone section: block_count=4096 (0x10_00 BE), BPE=0, value=1, data_len=0,
+        // biome BPE=0, value=0, data_len=0.
+        let mut stone = Vec::new();
+        encode_section(&mut stone, 4096, STONE_BLOCK_STATE, PLAINS_BIOME_ID);
+        assert_eq!(
+            stone,
+            vec![0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+            "single-valued stone section must omit palette length"
+        );
+
+        let mut air = Vec::new();
+        encode_section(&mut air, 0, AIR_BLOCK_STATE, PLAINS_BIOME_ID);
+        assert_eq!(
+            air,
+            vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            "single-valued air section must omit palette length"
+        );
+
+        let data = build_section_data();
+        assert_eq!(&data[..8], stone.as_slice());
+        assert_eq!(&data[8 * 7..8 * 8], stone.as_slice());
+        assert_eq!(&data[8 * 8..8 * 9], air.as_slice());
     }
 
     #[test]
