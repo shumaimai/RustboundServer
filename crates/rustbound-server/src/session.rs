@@ -516,13 +516,20 @@ impl PlayerSession {
 
     /// Sends the Join Game packet to the client.
     pub fn send_join_game(&self, stream: &mut TcpStream) -> Result<(), SessionError> {
+        let registry_codec = minimal_registry_codec();
+        eprintln!(
+            "sending Join Game to '{}' (entity={}, registry_nbt={} bytes)",
+            self.username,
+            self.entity_id,
+            registry_codec.len()
+        );
         let join_game = JoinGame {
             entity_id: self.entity_id,
             is_hardcore: false,
             gamemode: self.gamemode,
             previous_gamemode: None,
             dimension_names: vec!["minecraft:overworld".to_string()],
-            registry_codec: minimal_registry_codec(),
+            registry_codec,
             dimension_type: "minecraft:overworld".to_string(),
             dimension_name: "minecraft:overworld".to_string(),
             hashed_seed: 0,
@@ -541,6 +548,7 @@ impl PlayerSession {
         let mut wire = Vec::new();
         encode_join_game(&join_game, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
+        eprintln!("Join Game sent to '{}'", self.username);
         Ok(())
     }
 
@@ -1857,16 +1865,31 @@ pub fn run_play_loop(
     let mut session = PlayerSession::new(session_config, entity_id, tick_sender)?;
 
     // Send Join Game
-    session.send_join_game(stream)?;
+    session.send_join_game(stream).map_err(|e| {
+        eprintln!("failed sending Join Game: {e}");
+        e
+    })?;
 
     // Send vanilla join-sequence packets (brand, abilities, spawn pos, etc.)
-    session.send_join_sequence(stream)?;
+    session.send_join_sequence(stream).map_err(|e| {
+        eprintln!("failed sending join sequence: {e}");
+        e
+    })?;
+    eprintln!("join sequence complete for '{}'", session_config.username);
 
     // Send initial chunk columns (radius 2 for bootstrapping)
-    session.send_initial_chunks(stream, 2)?;
+    session.send_initial_chunks(stream, 2).map_err(|e| {
+        eprintln!("failed sending initial chunks: {e}");
+        e
+    })?;
+    eprintln!("initial chunks sent for '{}'", session_config.username);
 
     // Send Synchronize Player Position
-    session.send_synchronize_position(stream)?;
+    session.send_synchronize_position(stream).map_err(|e| {
+        eprintln!("failed sending sync position: {e}");
+        e
+    })?;
+    eprintln!("play handshake finished for '{}'", session_config.username);
 
     // Main play loop
     let mut read_buffer = Vec::with_capacity(4096);

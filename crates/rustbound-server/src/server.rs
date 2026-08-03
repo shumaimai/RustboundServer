@@ -98,8 +98,10 @@ impl Server {
         let listener = start_listener(listener_config, move |stream, addr| {
             let conn_config = conn_config.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_connection(stream, &conn_config) {
-                    eprintln!("connection from {addr} ended with error: {e}");
+                eprintln!("connection from {addr} accepted");
+                match handle_connection(stream, &conn_config) {
+                    Ok(()) => eprintln!("connection from {addr} closed"),
+                    Err(e) => eprintln!("connection from {addr} ended with error: {e}"),
                 }
             });
         })?;

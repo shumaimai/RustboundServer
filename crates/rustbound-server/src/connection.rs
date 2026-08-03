@@ -303,11 +303,15 @@ pub fn handle_connection(
                                         crate::offline_uuid::offline_uuid_from_username(&username);
 
                                     // Transition to Play - enter the play loop
+                                    eprintln!(
+                                        "login ok for '{username}', entering play (compression={})",
+                                        config.compression_threshold
+                                    );
                                     match run_play_loop(
                                         &mut stream,
                                         &SessionConfig {
                                             uuid,
-                                            username,
+                                            username: username.clone(),
                                             gamemode: config.default_gamemode,
                                             max_frame_length: config.max_frame_length,
                                             read_timeout: config.play_read_timeout,
@@ -320,9 +324,22 @@ pub fn handle_connection(
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
                                     ) {
-                                        Ok(()) => return Ok(()),
-                                        Err(SessionError::Disconnected) => return Ok(()),
-                                        Err(e) => return Err(ConnectionError::from(e)),
+                                        Ok(()) => {
+                                            eprintln!("play loop ended cleanly for '{username}'");
+                                            return Ok(());
+                                        }
+                                        Err(SessionError::Disconnected) => {
+                                            // Client closed the TCP connection — often because it
+                                            // rejected a clientbound packet while decoding (e.g. NBT).
+                                            eprintln!(
+                                                "play loop: client '{username}' disconnected remotely"
+                                            );
+                                            return Ok(());
+                                        }
+                                        Err(e) => {
+                                            eprintln!("play loop error for '{username}': {e}");
+                                            return Err(ConnectionError::from(e));
+                                        }
                                     }
                                 }
                                 LoginStepResult::Continue { outgoing, .. } => {

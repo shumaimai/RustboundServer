@@ -37,9 +37,12 @@ const TAG_COMPOUND: u8 = 10;
 /// NBT tag type for TAG_END.
 const TAG_END: u8 = 0;
 
-/// Number of longs in a 16x16 heightmap with 9-bit entries.
-/// 256 entries * 9 bits = 2304 bits / 64 = 36 longs.
-const HEIGHTMAP_LONGS: usize = 36;
+/// Number of longs in a 16×16 heightmap with 9-bit entries for height 384.
+///
+/// Bits per entry = ceil(log2(world_height + 1)) = ceil(log2(385)) = 9.
+/// Since 1.16, values do not span longs: each long holds floor(64/9)=7 entries,
+/// so 256 entries require ceil(256/7) = 37 longs.
+const HEIGHTMAP_LONGS: usize = 37;
 
 /// Number of light sections in a 1.20.1 world.
 /// The world is 384 blocks tall (-64 to 319), which is 24 sections.
