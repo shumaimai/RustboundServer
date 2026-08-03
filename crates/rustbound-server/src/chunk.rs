@@ -37,9 +37,12 @@ const TAG_COMPOUND: u8 = 10;
 /// NBT tag type for TAG_END.
 const TAG_END: u8 = 0;
 
-/// Number of longs in a 16x16 heightmap with 9-bit entries.
-/// 256 entries * 9 bits = 2304 bits / 64 = 36 longs.
-const HEIGHTMAP_LONGS: usize = 36;
+/// Number of longs in a 16×16 heightmap with 9-bit entries for height 384.
+///
+/// Bits per entry = ceil(log2(world_height + 1)) = ceil(log2(385)) = 9.
+/// Since 1.16, values do not span longs: each long holds floor(64/9)=7 entries,
+/// so 256 entries require ceil(256/7) = 37 longs.
+const HEIGHTMAP_LONGS: usize = 37;
 
 /// Number of light sections in a 1.20.1 world.
 /// The world is 384 blocks tall (-64 to 319), which is 24 sections.
@@ -64,13 +67,15 @@ fn encode_bitset(buf: &mut Vec<u8>, longs: &[i64]) {
 /// For a flat world with no obstructions, all sections have full skylight
 /// (level 15). Block light is zero everywhere (no light sources).
 ///
-/// The light data format (protocol 763) is:
+/// The light data format (protocol 763 / 1.20+) is:
 /// 1. SkyLightMask (BitSet)
 /// 2. BlockLightMask (BitSet)
 /// 3. EmptySkyLightMask (BitSet)
 /// 4. EmptyBlockLightMask (BitSet)
-/// 5. SkyLight arrays (VarInt count + each 2048 bytes)
-/// 6. BlockLight arrays (VarInt count + each 2048 bytes)
+/// 5. SkyLight arrays (VarInt count + each Prefixed Array of 2048 bytes)
+/// 6. BlockLight arrays (VarInt count + each Prefixed Array of 2048 bytes)
+///
+/// Note: Trust Edges was removed in 1.20; do not prefix a bool here.
 ///
 /// We set SkyLightMask to cover all 26 light sections (bits 0..25 = 0x3FFFFFF),
 /// provide 26 full skylight arrays (all 0xFF = level 15), and leave
@@ -93,10 +98,10 @@ fn build_light_data() -> Vec<u8> {
     // This tells the client block light = 0 for all sections
     encode_bitset(&mut buf, &[sky_mask]);
 
-    // SkyLight arrays: 26 arrays, each 2048 bytes of 0xFF (full skylight)
+    // SkyLight arrays: 26 arrays, each a Prefixed Array of 2048 bytes of 0xFF
     encode_var_int(NUM_LIGHT_SECTIONS as i32, &mut buf);
     for _ in 0..NUM_LIGHT_SECTIONS {
-        // Each light array is a byte array of 2048 bytes
+        encode_var_int(LIGHT_ARRAY_SIZE as i32, &mut buf);
         // 0xFF = every nibble is 15 (full skylight)
         buf.extend_from_slice(&[0xFF; LIGHT_ARRAY_SIZE]);
     }
@@ -177,11 +182,11 @@ fn encode_section(buf: &mut Vec<u8>, block_count: i16, block_state: i32, biome_i
 /// The flat world has a single layer of stone at the bottom (y=-64)
 /// and air everywhere else. Section 0 (y=-64 to y=-49) contains the
 /// stone layer; all other sections are empty (air).
+///
+/// Section count is NOT encoded: the client derives it from the dimension
+/// height (384 / 16 = 24 for overworld).
 fn build_section_data() -> Vec<u8> {
     let mut buf = Vec::new();
-
-    // Number of sections (VarInt)
-    encode_var_int(NUM_SECTIONS as i32, &mut buf);
 
     for section_idx in 0..NUM_SECTIONS {
         if section_idx == 0 {
@@ -248,13 +253,13 @@ mod tests {
     }
 
     #[test]
-    fn section_data_has_correct_section_count() -> Result<(), Box<dyn std::error::Error>> {
+    fn section_data_has_expected_size() {
         let data = build_section_data();
-        // First bytes should be a VarInt encoding 24
-        let mut input = data.as_slice();
-        let count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
-        assert_eq!(count, NUM_SECTIONS as i32);
-        Ok(())
+        // Each single-value section is: i16 + (u8 + varint*3)*2
+        // block: 2 + 1 + 1 + 1 + 1 = 6; biome: 1 + 1 + 1 + 1 = 4; total 10 bytes
+        // (palette varints for length=1 and value=0/1 and data_len=0 are 1 byte each)
+        assert_eq!(data.len(), NUM_SECTIONS * 10);
+        assert!(!data.is_empty());
     }
 
     #[test]
@@ -307,14 +312,15 @@ mod tests {
         assert_eq!(empty_block_count, 1, "empty block mask should have 1 long");
         let _empty_block = rustbound_protocol::primitives::decode_i64(&mut input)?;
 
-        // SkyLight arrays: 26 arrays of 2048 bytes each
+        // SkyLight arrays: 26 Prefixed Arrays of 2048 bytes each
         let sky_array_count = rustbound_protocol::primitives::decode_var_int(&mut input)?;
         assert_eq!(
             sky_array_count, NUM_LIGHT_SECTIONS as i32,
             "should have {NUM_LIGHT_SECTIONS} sky light arrays"
         );
         for _ in 0..NUM_LIGHT_SECTIONS {
-            // Each array is 2048 bytes of 0xFF
+            let array_len = rustbound_protocol::primitives::decode_var_int(&mut input)?;
+            assert_eq!(array_len, LIGHT_ARRAY_SIZE as i32);
             let mut array = [0u8; LIGHT_ARRAY_SIZE];
             input.read_exact(&mut array)?;
             assert!(array.iter().all(|&b| b == 0xFF), "skylight should be 0xFF");

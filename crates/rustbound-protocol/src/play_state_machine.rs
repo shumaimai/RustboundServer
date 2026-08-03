@@ -160,6 +160,10 @@ impl PlayStateMachine {
             enable_respawn_screen: true,
             is_debug: false,
             is_flat: false,
+            has_death_location: false,
+            death_dimension_name: String::new(),
+            death_location: (0, 0, 0),
+            portal_cooldown: 0,
         };
         let mut join_wire = Vec::new();
         encode_join_game(&join_game, config.max_frame_length, &mut join_wire)?;
