@@ -2584,14 +2584,16 @@ pub struct PlayerInfoActions(pub u8);
 impl PlayerInfoActions {
     /// Add player action (bit 0).
     pub const ADD_PLAYER: u8 = 0x01;
-    /// Update gamemode action (bit 1).
-    pub const UPDATE_GAMEMODE: u8 = 0x02;
-    /// Update listed action (bit 2).
-    pub const UPDATE_LISTED: u8 = 0x04;
-    /// Update latency action (bit 3).
-    pub const UPDATE_LATENCY: u8 = 0x08;
-    /// Update display name action (bit 4).
-    pub const UPDATE_DISPLAY_NAME: u8 = 0x10;
+    /// Initialize chat session action (bit 1).
+    pub const INITIALIZE_CHAT: u8 = 0x02;
+    /// Update gamemode action (bit 2).
+    pub const UPDATE_GAMEMODE: u8 = 0x04;
+    /// Update listed action (bit 3).
+    pub const UPDATE_LISTED: u8 = 0x08;
+    /// Update latency action (bit 4).
+    pub const UPDATE_LATENCY: u8 = 0x10;
+    /// Update display name action (bit 5).
+    pub const UPDATE_DISPLAY_NAME: u8 = 0x20;
 
     /// Creates action flags with the given bits set.
     pub const fn new(bits: u8) -> Self {
@@ -3857,6 +3859,11 @@ pub fn encode_player_info_update(
                 }
             }
         }
+        // Initialize Chat (optional session). Offline servers omit the bit; if set,
+        // write "not present" rather than a signed chat session.
+        if packet.actions.has(PlayerInfoActions::INITIALIZE_CHAT) {
+            encode_bool(false, &mut body);
+        }
         // Update Gamemode
         if packet.actions.has(PlayerInfoActions::UPDATE_GAMEMODE) {
             encode_var_int(entry.gamemode, &mut body);
@@ -4895,7 +4902,8 @@ mod tests {
         GameMode, JOIN_GAME_PACKET_ID, JoinGame, KEEP_ALIVE_CLIENTBOUND_PACKET_ID, KeepAlive,
         MainHand, MoveEntityPos, MoveEntityPosRot, MoveEntityRot, PlayDecodeOutcome, PlayError,
         PlayPacket, PlayerAbilities, PlayerDigging, PlayerDiggingAction, PlayerInfoActions,
-        PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate, PluginMessageClientbound,
+        PLAYER_INFO_UPDATE_PACKET_ID, PlayerInfoEntry, PlayerInfoRemove, PlayerInfoUpdate,
+        PluginMessageClientbound,
         RemoveEntities, Respawn, SET_CREATIVE_MODE_SLOT_PACKET_ID,
         SET_HELD_ITEM_SERVERBOUND_PACKET_ID, SYSTEM_CHAT_MESSAGE_PACKET_ID, SetBlockDestroyStage,
         SetCenterChunk, SetContainerContent, SetContainerSlot, SetDefaultSpawnPosition, SetHealth,
@@ -6142,6 +6150,60 @@ mod tests {
         assert!(actions.has(PlayerInfoActions::ADD_PLAYER));
         assert!(actions.has(PlayerInfoActions::UPDATE_LATENCY));
         assert!(!actions.has(PlayerInfoActions::UPDATE_GAMEMODE));
+        assert!(!actions.has(PlayerInfoActions::INITIALIZE_CHAT));
+    }
+
+    #[test]
+    fn player_info_action_bits_match_protocol_763() {
+        // Bit order must match 1.19.3+/1.20 Player Info Update (wiki.vg / Prismarine).
+        // A shifted mask historically set initialize_chat by accident and made vanilla
+        // try to read an 8-byte chat-session field from a short packet.
+        assert_eq!(PlayerInfoActions::ADD_PLAYER, 0x01);
+        assert_eq!(PlayerInfoActions::INITIALIZE_CHAT, 0x02);
+        assert_eq!(PlayerInfoActions::UPDATE_GAMEMODE, 0x04);
+        assert_eq!(PlayerInfoActions::UPDATE_LISTED, 0x08);
+        assert_eq!(PlayerInfoActions::UPDATE_LATENCY, 0x10);
+        assert_eq!(PlayerInfoActions::UPDATE_DISPLAY_NAME, 0x20);
+
+        let join_mask = PlayerInfoActions::ADD_PLAYER
+            | PlayerInfoActions::UPDATE_GAMEMODE
+            | PlayerInfoActions::UPDATE_LISTED
+            | PlayerInfoActions::UPDATE_LATENCY;
+        assert_eq!(join_mask, 0x1D);
+        assert_eq!(join_mask & PlayerInfoActions::INITIALIZE_CHAT, 0);
+    }
+
+    #[test]
+    fn player_info_update_join_mask_round_trips() -> Result<(), PlayError> {
+        let packet = PlayerInfoUpdate {
+            actions: PlayerInfoActions::new(
+                PlayerInfoActions::ADD_PLAYER
+                    | PlayerInfoActions::UPDATE_GAMEMODE
+                    | PlayerInfoActions::UPDATE_LISTED
+                    | PlayerInfoActions::UPDATE_LATENCY,
+            ),
+            entries: vec![PlayerInfoEntry {
+                uuid: crate::primitives::Uuid::new(0, 1),
+                name: "Tester".to_string(),
+                properties: vec![],
+                gamemode: 0,
+                listed: true,
+                latency: 0,
+                display_name: None,
+            }],
+        };
+        let mut wire = Vec::new();
+        encode_player_info_update(&packet, TEST_MAX_FRAME, &mut wire)?;
+        // Body after frame header must start with action mask 0x1D (not 0x0F).
+        let mut input = wire.as_slice();
+        match crate::framing::decode_frame(&mut input, TEST_MAX_FRAME).map_err(PlayError::from)? {
+            crate::framing::DecodeOutcome::Complete(frame) => {
+                assert_eq!(frame.packet_id, PLAYER_INFO_UPDATE_PACKET_ID);
+                assert_eq!(frame.payload[0], 0x1D);
+            }
+            crate::framing::DecodeOutcome::Incomplete => panic!("expected complete frame"),
+        }
+        Ok(())
     }
 
     // --- Block interaction packets ---
