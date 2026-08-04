@@ -1,52 +1,47 @@
 # Rustbound
 
-Rustbound is a clean-room, pure Rust server targeting Minecraft Java Edition **1.20.1** (protocol **763**). It is built only from public documentation and black-box observation; no Minecraft, Forge, mapping, decompiled, or other reference artifacts are incorporated.
+Clean-room Minecraft Java Edition **1.20.1** (protocol **763**) server written in Rust.
 
-This project is not affiliated with, endorsed by, or sponsored by Mojang Studios, Microsoft, or the Forge project. Minecraft and related names and marks belong to their respective owners.
+Built from public documentation and black-box observation only. Minecraft, Forge, mappings, decompiled output, and other reference artifacts are never incorporated or redistributed.
 
-## Product goal: Hakoniwa (箱庭)
+This project is not affiliated with Mojang Studios, Microsoft, or the Forge project. Minecraft and related marks belong to their respective owners.
 
-**Complete a tiny, fixed-map Minecraft experience — then keep the binary extreme-small.**
+## Status: complete (Hakoniwa)
 
-We do **not** chase full vanilla worldgen or Forge mods. Play happens inside size presets (`tiny` / `small` / `medium`) with Overworld → Nether → End datasets added as packs. Details: [docs/hakoniwa.md](docs/hakoniwa.md).
+The product scope is **Hakoniwa (箱庭)**: a fixed-size garden, not infinite vanilla generation and not Forge compatibility.
 
-## Status
+| Capability | Status |
+|------------|--------|
+| Offline join, Play session, 20 TPS tick | Complete |
+| Fixed gardens (`tiny` / `small` / `medium`) with world border | Complete |
+| Block collision, dig / place | Complete |
+| Map packs (overworld / nether / end) | Complete |
+| Dimension transfer (portal pads, `/dim`) | Complete |
+| Simple mobs | Complete |
+| Static water / lava | Complete |
+| Chests (minimal containers) | Complete |
+| Size-optimized `dist` binary | Complete |
+| Online mode | Optional ([#60](https://github.com/shumaimai/RustboundServer/issues/60)) |
+| Forge / Bedrock / infinite terrain | Out of scope |
 
-**Hakoniwa Phase H6** — fixed gardens with dimensions, mobs, fluids, and chests.
+Specification: [docs/hakoniwa.md](docs/hakoniwa.md). Engineering history: [PROGRESS.md](PROGRESS.md).
 
-| Layer | Status |
-|-------|--------|
-| Protocol + Login/Play + sessions/tick | Working |
-| Flat plateau chunks + dig/place | Working |
-| Hakoniwa size + world border clamp | **Done (H0)** |
-| Block collision | **Done (H1)** |
-| Map packs / 3 sizes of overworld gardens | **Done (H2)** |
-| Nether / End (portals + `/dim`) | **Done (H3)** |
-| Simple mobs (wander + light hostility) | **Done (H4)** |
-| Static liquids (swim damp + lava damage) | **Done (H5)** |
-| Containers + bundled packs + size polish | **Done (H6)** |
-| Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) (optional) |
-| Forge jars / JVM | **Out of scope** |
-| Thin Rust Mod API | Façade + ModHost wired |
-
-See [PROGRESS.md](PROGRESS.md) and [docs/hakoniwa.md](docs/hakoniwa.md).
-
-## Try it (offline)
+## Run (offline)
 
 ```console
 cp server.properties.example server.properties
 cargo run -p rustbound-server --release -- --config server.properties
 ```
 
-Connect a **1.20.1** offline client to `localhost:25565`. Default example is **Creative** with `hakoniwa-size=tiny`.
+Connect a **1.20.1** offline client to `localhost:25565`. Example config defaults to Creative and `hakoniwa-size=tiny`.
 
-Smallest distribution binary:
+Distribution build:
 
 ```console
 cargo build -p rustbound-server --profile dist
 ```
 
-Automated smoke:
+Smoke checks:
 
 ```console
 ./scripts/smoke_offline_join.sh
@@ -57,9 +52,9 @@ cargo test -p rustbound-server --lib server_offline_playability_smoke
 
 ```
 crates/
-  rustbound-protocol/     # Wire codecs + Login/Play state machines
-  rustbound-server/       # Listener, connection, session, tick, world, hakoniwa
-  rustbound-conformance/  # Black-box probes + Status/Play diff helpers
+  rustbound-protocol/     # Wire codecs, Login / Play state machines
+  rustbound-server/       # Listener, session, tick, world, hakoniwa
+  rustbound-conformance/  # Black-box probes and differential helpers
 ```
 
 ## Build and test
@@ -71,28 +66,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-## Architecture notes
+## Design constraints
 
-- One authoritative tick thread (20 TPS); connection threads talk via `mpsc`.
+- Single authoritative tick thread (20 TPS); sessions communicate via channels.
 - Prefer existing `LoginStateMachine` / `PlayStateMachine`.
-- Forge may be a local oracle only (never commit its artifacts).
-- `unsafe` only in isolated, documented, audited modules (`forbid` today).
-
-## Roadmap
-
-| Phase | Focus | Status |
-|-------|--------|--------|
-| M1–M4 + A–I | Foundations → offline play stubs | **Done** |
-| **J** | Offline join verification | Done / ongoing polish |
-| **H0–H6** | Hakoniwa garden completion + miniaturization | **H6 done** |
-| Later | Online mode (#60), richer Mod API | Optional |
-
-**Not a goal:** drop-in Java Forge mod compatibility, Bedrock/統合版 protocol, or infinite vanilla terrain.
-
-## Contributing
-
-Contributors must read and follow [AGENTS.md](AGENTS.md).
+- Forge may be used locally as an oracle only; never commit its artifacts.
+- `unsafe` is forbidden at the workspace level unless isolated and audited.
+- Contributors must follow [AGENTS.md](AGENTS.md).
 
 ## License
 
-Licensed under either the MIT License or the Apache License, Version 2.0, at your option.
+MIT OR Apache-2.0, at your option.
