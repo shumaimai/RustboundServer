@@ -144,6 +144,18 @@ pub const SET_CONTAINER_CONTENT_PACKET_ID: i32 = 0x12;
 /// Packet ID for the clientbound Set Container Slot packet.
 pub const SET_CONTAINER_SLOT_PACKET_ID: i32 = 0x14;
 
+/// Packet ID for the clientbound Open Screen packet.
+pub const OPEN_SCREEN_PACKET_ID: i32 = 0x30;
+
+/// Packet ID for the clientbound Close Container packet.
+pub const CLOSE_CONTAINER_CLIENTBOUND_PACKET_ID: i32 = 0x11;
+
+/// Packet ID for the serverbound Click Container packet.
+pub const CLICK_CONTAINER_PACKET_ID: i32 = 0x0B;
+
+/// Packet ID for the serverbound Close Container packet.
+pub const CLOSE_CONTAINER_SERVERBOUND_PACKET_ID: i32 = 0x0C;
+
 /// Packet ID for the serverbound Set Held Item (Carried Item) packet.
 pub const SET_HELD_ITEM_SERVERBOUND_PACKET_ID: i32 = 0x28;
 
@@ -356,6 +368,14 @@ pub enum PlayPacket {
     SetContainerContent(SetContainerContent),
     /// Clientbound Set Container Slot (Play `0x14`).
     SetContainerSlot(SetContainerSlot),
+    /// Clientbound Open Screen (Play `0x30`).
+    OpenScreen(OpenScreen),
+    /// Clientbound Close Container (Play `0x11`).
+    CloseContainerClientbound(CloseContainer),
+    /// Serverbound Click Container (Play `0x0B`).
+    ClickContainer(ClickContainer),
+    /// Serverbound Close Container (Play `0x0C`).
+    CloseContainerServerbound(CloseContainer),
     /// Serverbound Set Held Item (Play `0x28`).
     SetHeldItemServerbound(SetHeldItemServerbound),
     /// Serverbound Set Creative Mode Slot (Play `0x2B`).
@@ -2890,6 +2910,54 @@ pub struct SetContainerSlot {
     pub item: Slot,
 }
 
+/// Clientbound Open Screen packet (Play `0x30`).
+///
+/// Opens a container GUI on the client (chest, furnace, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenScreen {
+    /// Window ID (must be non-zero; 0 is the player inventory).
+    pub window_id: i32,
+    /// Menu type registry ID (`generic_9x3` = 2 for a single chest).
+    pub window_type: i32,
+    /// Window title as a JSON chat component string.
+    pub title: String,
+}
+
+/// Close Container packet (clientbound `0x11` / serverbound `0x0C`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseContainer {
+    /// The window ID being closed.
+    pub window_id: u8,
+}
+
+/// One slot change reported inside a Click Container packet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClickContainerChangedSlot {
+    /// Slot index within the open window.
+    pub slot: i16,
+    /// New item in that slot after the click.
+    pub item: Slot,
+}
+
+/// Serverbound Click Container packet (Play `0x0B`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClickContainer {
+    /// Window ID from Open Screen.
+    pub window_id: u8,
+    /// Client's last known state ID.
+    pub state_id: i32,
+    /// Clicked slot (-999 = outside window / drop).
+    pub slot: i16,
+    /// Mouse button (0 = left, 1 = right, 2 = middle, …).
+    pub button: i8,
+    /// Click mode (0 = normal, 1 = shift, 2 = number key, …).
+    pub mode: i32,
+    /// Slots the client believes changed.
+    pub changed_slots: Vec<ClickContainerChangedSlot>,
+    /// Item on the cursor after the click.
+    pub cursor: Slot,
+}
+
 /// Serverbound Set Held Item packet (Play `0x28`).
 ///
 /// Sent when the player changes their hotbar slot selection.
@@ -3766,6 +3834,257 @@ pub fn decode_set_container_slot(
             state_id,
             slot,
             item,
+        },
+    )))
+}
+
+/// Encodes an Open Screen packet (clientbound Play `0x30`).
+pub fn encode_open_screen(
+    packet: &OpenScreen,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.window_id, &mut body);
+    encode_var_int(packet.window_type, &mut body);
+    encode_string(&packet.title, MAX_CHAT_COMPONENT_LENGTH, &mut body).map_err(PlayError::Codec)?;
+    encode_frame(OPEN_SCREEN_PACKET_ID, &body, max_frame_length, output).map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Open Screen packet (clientbound Play `0x30`).
+pub fn decode_open_screen(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != OPEN_SCREEN_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: OPEN_SCREEN_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let window_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let window_type = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let title = decode_string(&mut body, MAX_CHAT_COMPONENT_LENGTH).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::OpenScreen(
+        OpenScreen {
+            window_id,
+            window_type,
+            title: title.to_string(),
+        },
+    )))
+}
+
+/// Encodes a Close Container packet (clientbound Play `0x11`).
+pub fn encode_close_container_clientbound(
+    packet: &CloseContainer,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.window_id, &mut body);
+    encode_frame(
+        CLOSE_CONTAINER_CLIENTBOUND_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Encodes a Close Container packet (serverbound Play `0x0C`).
+pub fn encode_close_container_serverbound(
+    packet: &CloseContainer,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.window_id, &mut body);
+    encode_frame(
+        CLOSE_CONTAINER_SERVERBOUND_PACKET_ID,
+        &body,
+        max_frame_length,
+        output,
+    )
+    .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Close Container packet (serverbound Play `0x0C`).
+pub fn decode_close_container_serverbound(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != CLOSE_CONTAINER_SERVERBOUND_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CLOSE_CONTAINER_SERVERBOUND_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let window_id = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(
+        PlayPacket::CloseContainerServerbound(CloseContainer { window_id }),
+    ))
+}
+
+/// Encodes a Click Container packet (serverbound Play `0x0B`).
+pub fn encode_click_container(
+    packet: &ClickContainer,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_u8(packet.window_id, &mut body);
+    encode_var_int(packet.state_id, &mut body);
+    encode_i16(packet.slot, &mut body);
+    encode_i8(packet.button, &mut body);
+    encode_var_int(packet.mode, &mut body);
+    let count = i32::try_from(packet.changed_slots.len()).unwrap_or(i32::MAX);
+    encode_var_int(count, &mut body);
+    for change in &packet.changed_slots {
+        encode_i16(change.slot, &mut body);
+        encode_slot(&change.item, &mut body);
+    }
+    encode_slot(&packet.cursor, &mut body);
+    encode_frame(CLICK_CONTAINER_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes a Click Container packet (serverbound Play `0x0B`).
+pub fn decode_click_container(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != CLICK_CONTAINER_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: CLICK_CONTAINER_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let window_id = decode_u8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let state_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let slot = decode_i16(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let button = decode_i8(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let mode = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let change_count = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if change_count < 0 || change_count as usize > MAX_CONTAINER_SLOTS {
+        *input = source;
+        return Err(PlayError::Codec(CodecError::InvalidBoolean));
+    }
+    let mut changed_slots = Vec::with_capacity(change_count as usize);
+    for _ in 0..change_count {
+        let change_slot = decode_i16(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        let item = decode_slot(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        changed_slots.push(ClickContainerChangedSlot {
+            slot: change_slot,
+            item,
+        });
+    }
+    let cursor = decode_slot(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::ClickContainer(
+        ClickContainer {
+            window_id,
+            state_id,
+            slot,
+            button,
+            mode,
+            changed_slots,
+            cursor,
         },
     )))
 }
@@ -5060,17 +5379,19 @@ mod tests {
         PlayerDiggingAction, PlayerInfoActions, PlayerInfoEntry, PlayerInfoRemove,
         PlayerInfoUpdate, PluginMessageClientbound, RemoveEntities, Respawn,
         SET_CREATIVE_MODE_SLOT_PACKET_ID, SET_HELD_ITEM_SERVERBOUND_PACKET_ID,
-        SYSTEM_CHAT_MESSAGE_PACKET_ID, SetBlockDestroyStage, SetCenterChunk, SetContainerContent,
-        SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetPlayerPosition,
+        SYSTEM_CHAT_MESSAGE_PACKET_ID, ClickContainer, ClickContainerChangedSlot, CloseContainer,
+        OpenScreen, SetBlockDestroyStage, SetCenterChunk, SetContainerContent, SetContainerSlot,
+        SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetPlayerPosition,
         SetPlayerPositionAndRotation, SetPlayerRotation, SetRenderDistance, SetSimulationDistance,
         Slot, SpawnEntity, SpawnPlayer, SynchronizePlayerPosition, SystemChatMessage,
         UPDATE_RECIPES_PACKET_ID, UPDATE_TAGS_PACKET_ID, UnloadChunk, UseItemOn,
         decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
-        decode_chat_message_serverbound, decode_chunk_data, decode_client_information,
-        decode_client_status, decode_combat_death, decode_confirm_teleportation,
-        decode_disconnect_play, decode_entity_event, decode_entity_teleport, decode_game_event,
-        decode_join_game, decode_keep_alive_clientbound, decode_keep_alive_serverbound,
-        decode_move_entity_pos, decode_move_entity_pos_rot, decode_move_entity_rot,
+        decode_chat_message_serverbound, decode_chunk_data, decode_click_container,
+        decode_client_information, decode_client_status, decode_close_container_serverbound,
+        decode_combat_death, decode_confirm_teleportation, decode_disconnect_play,
+        decode_entity_event, decode_entity_teleport, decode_game_event, decode_join_game,
+        decode_keep_alive_clientbound, decode_keep_alive_serverbound, decode_move_entity_pos,
+        decode_move_entity_pos_rot, decode_move_entity_rot, decode_open_screen,
         decode_player_abilities, decode_player_digging, decode_plugin_message_clientbound,
         decode_respawn, decode_set_block_destroy_stage, decode_set_center_chunk,
         decode_set_container_content, decode_set_container_slot, decode_set_creative_mode_slot,
@@ -5080,11 +5401,12 @@ mod tests {
         decode_set_render_distance, decode_set_simulation_distance, decode_slot,
         decode_synchronize_player_position, decode_unload_chunk, decode_use_item_on,
         encode_acknowledge_block_change, encode_block_update, encode_change_difficulty,
-        encode_chunk_data, encode_client_information, encode_combat_death,
-        encode_confirm_teleportation, encode_disconnect_play, encode_entity_event,
+        encode_chunk_data, encode_click_container, encode_client_information, encode_combat_death,
+        encode_confirm_teleportation, encode_close_container_clientbound,
+        encode_close_container_serverbound, encode_disconnect_play, encode_entity_event,
         encode_entity_teleport, encode_game_event, encode_join_game, encode_keep_alive_clientbound,
         encode_keep_alive_serverbound, encode_move_entity_pos, encode_move_entity_pos_rot,
-        encode_move_entity_rot, encode_player_abilities, encode_player_digging,
+        encode_move_entity_rot, encode_open_screen, encode_player_abilities, encode_player_digging,
         encode_player_info_remove, encode_player_info_update, encode_plugin_message_clientbound,
         encode_remove_entities, encode_respawn, encode_set_block_destroy_stage,
         encode_set_center_chunk, encode_set_container_content, encode_set_container_slot,
@@ -6785,6 +7107,84 @@ mod tests {
             }
             other => panic!("expected SetContainerSlot, got {other:?}"),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn open_screen_roundtrip() -> Result<(), PlayError> {
+        let packet = OpenScreen {
+            window_id: 1,
+            window_type: 2,
+            title: "{\"text\":\"Chest\"}".to_string(),
+        };
+        let mut wire = Vec::new();
+        encode_open_screen(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_open_screen(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::OpenScreen(decoded)) => {
+                assert_eq!(decoded.window_id, 1);
+                assert_eq!(decoded.window_type, 2);
+                assert_eq!(decoded.title, "{\"text\":\"Chest\"}");
+            }
+            other => panic!("expected OpenScreen, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn click_container_roundtrip() -> Result<(), PlayError> {
+        let packet = ClickContainer {
+            window_id: 1,
+            state_id: 7,
+            slot: 0,
+            button: 0,
+            mode: 0,
+            changed_slots: vec![ClickContainerChangedSlot {
+                slot: 0,
+                item: Slot::item(1, 1),
+            }],
+            cursor: Slot::empty(),
+        };
+        let mut wire = Vec::new();
+        encode_click_container(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_click_container(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::ClickContainer(decoded)) => {
+                assert_eq!(decoded.window_id, 1);
+                assert_eq!(decoded.state_id, 7);
+                assert_eq!(decoded.slot, 0);
+                assert_eq!(decoded.changed_slots.len(), 1);
+                assert!(!decoded.cursor.present);
+            }
+            other => panic!("expected ClickContainer, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn close_container_serverbound_roundtrip() -> Result<(), PlayError> {
+        let packet = CloseContainer { window_id: 1 };
+        let mut wire = Vec::new();
+        encode_close_container_serverbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+        let mut input = wire.as_slice();
+        match decode_close_container_serverbound(&mut input, TEST_MAX_FRAME)? {
+            PlayDecodeOutcome::Complete(PlayPacket::CloseContainerServerbound(decoded)) => {
+                assert_eq!(decoded.window_id, 1);
+            }
+            other => panic!("expected CloseContainerServerbound, got {other:?}"),
+        }
+        assert!(input.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn close_container_clientbound_encodes() -> Result<(), PlayError> {
+        let packet = CloseContainer { window_id: 2 };
+        let mut wire = Vec::new();
+        encode_close_container_clientbound(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
         Ok(())
     }
 

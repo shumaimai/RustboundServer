@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod collision;
 pub mod config;
 pub mod connection;
+pub mod container;
 pub mod dimension;
 pub mod fluid;
 pub mod hakoniwa;

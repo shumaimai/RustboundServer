@@ -461,6 +461,118 @@ pub enum TickMessage {
         /// 0 = interact, 1 = attack, 2 = interact at.
         action: i32,
     },
+    /// A player clicked a slot in an open container window.
+    ClickContainer {
+        /// The clicking player.
+        entity_id: i32,
+        /// Window ID from Open Screen.
+        window_id: u8,
+        /// Client state ID (informational).
+        state_id: i32,
+        /// Slots the client reports as changed.
+        changed_slots: Vec<rustbound_protocol::play::ClickContainerChangedSlot>,
+        /// Cursor item after the click.
+        cursor: rustbound_protocol::play::Slot,
+    },
+    /// A player closed a container window.
+    CloseContainer {
+        /// The player.
+        entity_id: i32,
+        /// Window ID being closed.
+        window_id: u8,
+    },
+}
+
+/// Per-player open container (H6 chest windows).
+#[derive(Debug, Clone)]
+struct OpenContainer {
+    /// Non-zero window ID sent in Open Screen.
+    window_id: u8,
+    /// Block position of the chest.
+    position: (i32, i32, i32),
+    /// Dimension of the chest.
+    dimension: crate::hakoniwa::DimensionId,
+    /// Item on the mouse cursor while the window is open.
+    carried: rustbound_protocol::play::Slot,
+}
+
+fn face_offset(face: i32, position: (i32, i32, i32)) -> (i32, i32, i32) {
+    match face {
+        0 => (position.0, position.1 - 1, position.2),
+        1 => (position.0, position.1 + 1, position.2),
+        2 => (position.0, position.1, position.2 - 1),
+        3 => (position.0, position.1, position.2 + 1),
+        4 => (position.0 - 1, position.1, position.2),
+        5 => (position.0 + 1, position.1, position.2),
+        _ => position,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_chest_for_player(
+    entity_id: i32,
+    dim: crate::hakoniwa::DimensionId,
+    position: (i32, i32, i32),
+    containers: &mut crate::container::ContainerStore,
+    open_windows: &mut HashMap<i32, OpenContainer>,
+    next_window_id: &mut u8,
+    inventories: &mut HashMap<i32, PlayerInventory>,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+) {
+    let Some(inv) = inventories.get_mut(&entity_id) else {
+        return;
+    };
+    let Some(sender) = session_senders.get(&entity_id) else {
+        return;
+    };
+    // Allocate next non-zero window id.
+    *next_window_id = next_window_id.wrapping_add(1);
+    if *next_window_id == 0 {
+        *next_window_id = 1;
+    }
+    let window_id = *next_window_id;
+    let pos_key = (dim, position.0, position.1, position.2);
+    let chest = containers.chest_mut(pos_key, true).clone();
+    let slots = crate::container::build_chest_window_slots(&chest, &inv.slots);
+    inv.state_id += 1;
+    let state_id = inv.state_id;
+    open_windows.insert(
+        entity_id,
+        OpenContainer {
+            window_id,
+            position,
+            dimension: dim,
+            carried: rustbound_protocol::play::Slot::empty(),
+        },
+    );
+    let _ = sender.send(SessionEvent::OpenScreen {
+        window_id: i32::from(window_id),
+        window_type: crate::container::MENU_TYPE_GENERIC_9X3,
+        title: crate::container::CHEST_TITLE.to_string(),
+    });
+    let _ = sender.send(SessionEvent::SetContainerContent {
+        window_id,
+        state_id,
+        slots,
+        carried_item: rustbound_protocol::play::Slot::empty(),
+    });
+}
+
+fn close_open_window(
+    entity_id: i32,
+    open_windows: &mut HashMap<i32, OpenContainer>,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    notify_client: bool,
+) {
+    if let Some(open) = open_windows.remove(&entity_id) {
+        if notify_client {
+            if let Some(sender) = session_senders.get(&entity_id) {
+                let _ = sender.send(SessionEvent::CloseContainer {
+                    window_id: open.window_id,
+                });
+            }
+        }
+    }
 }
 
 /// A message sent from the tick loop to the server.
@@ -717,6 +829,7 @@ fn transfer_player_dimension(
     world: &mut World,
     session_senders: &HashMap<i32, Sender<SessionEvent>>,
     chunk_states: &mut HashMap<i32, PlayerChunkState>,
+    open_windows: &mut HashMap<i32, OpenContainer>,
     mobs: &[crate::mob::Mob],
     entity_id: i32,
     dest: crate::hakoniwa::DimensionId,
@@ -730,6 +843,7 @@ fn transfer_player_dimension(
     if player.dimension == dest {
         return;
     }
+    close_open_window(entity_id, open_windows, session_senders, true);
     let gamemode = player.gamemode;
     let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
     let name = dest.protocol_name().to_string();
@@ -822,6 +936,17 @@ fn run_tick_loop(
             world.load_pack_blocks_for(dim, pack.blocks.clone());
         }
     }
+    let mut containers = crate::container::load_chests(&level_name);
+    // Seed starter loot for any chest blocks present in packs / overrides.
+    for dim in crate::hakoniwa::DimensionId::all() {
+        if let Some(pack) = packs.get(&dim) {
+            for (&(x, y, z), &state) in &pack.blocks {
+                if crate::container::is_chest(state) {
+                    containers.ensure_seeded((dim, x, y, z));
+                }
+            }
+        }
+    }
     let garden = world.garden().clone();
     let garden_chunk_radius = garden.size.chunk_radius();
     // Autosave interval in ticks (20 TPS). 0 means disabled.
@@ -833,6 +958,8 @@ fn run_tick_loop(
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
     let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
     let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
+    let mut open_windows: HashMap<i32, OpenContainer> = HashMap::new();
+    let mut next_window_id: u8 = 0;
     let mut next_mob_id: i32 = 10_000;
     let mut mobs = crate::mob::initial_garden_mobs(&mut next_mob_id);
     let mut mob_rng: u32 = 0xC0FF_EE01;
@@ -854,6 +981,9 @@ fn run_tick_loop(
                 TickMessage::Shutdown => {
                     // Save block overrides to disk before shutting down
                     save_all_overrides(&level_name, &world);
+                    if let Err(e) = crate::container::save_chests(&level_name, &containers) {
+                        eprintln!("error: failed to save chests: {}", e);
+                    }
                     // Merge online players into the cache, then write everyone
                     // (including players who already left this session).
                     merge_online_into_saved(&world, &inventories, &mut saved_players);
@@ -1025,6 +1155,7 @@ fn run_tick_loop(
                     }
                     // Get the player's UUID before removing
                     let uuid = world.get_player(entity_id).map(|p| p.uuid);
+                    open_windows.remove(&entity_id);
                     world.remove_player(entity_id);
                     session_senders.remove(&entity_id);
                     chunk_states.remove(&entity_id);
@@ -1155,6 +1286,7 @@ fn run_tick_loop(
                                 &mut world,
                                 &session_senders,
                                 &mut chunk_states,
+                                &mut open_windows,
                                 &mobs,
                                 entity_id,
                                 dest,
@@ -1170,6 +1302,20 @@ fn run_tick_loop(
                     let dim = entity_id
                         .and_then(|eid| world.get_player(eid).map(|p| p.dimension))
                         .unwrap_or(crate::hakoniwa::DimensionId::Overworld);
+                    if block_state == 0 {
+                        containers.remove((dim, position.0, position.1, position.2));
+                        // Close any players looking at this chest.
+                        let viewers: Vec<i32> = open_windows
+                            .iter()
+                            .filter(|(_, w)| w.dimension == dim && w.position == position)
+                            .map(|(&eid, _)| eid)
+                            .collect();
+                        for eid in viewers {
+                            close_open_window(eid, &mut open_windows, &session_senders, true);
+                        }
+                    } else if crate::container::is_chest(block_state) {
+                        containers.ensure_seeded((dim, position.0, position.1, position.2));
+                    }
                     world.set_block(dim, position.0, position.1, position.2, block_state);
                     broadcast_block_update(&world, &session_senders, dim, position, block_state);
                 }
@@ -1182,43 +1328,48 @@ fn run_tick_loop(
                         .get_player(entity_id)
                         .map(|p| p.dimension)
                         .unwrap_or(crate::hakoniwa::DimensionId::Overworld);
-                    // Look up the held hotbar item and place the corresponding block.
-                    if let Some(inv) = inventories.get(&entity_id) {
+                    let clicked = world.get_block(dim, position.0, position.1, position.2);
+                    let gamemode = world.get_player(entity_id).map(|p| p.gamemode).unwrap_or(0);
+                    let holding_block = inventories.get(&entity_id).and_then(|inv| {
                         let held_idx = inv.held_slot as usize;
-                        if let Some(slot) = inv.slots.get(held_idx) {
+                        inv.slots.get(held_idx).and_then(|slot| {
                             if slot.present {
-                                // Use the registry to map item ID to block state
-                                if let Some(block_state) =
-                                    crate::registry::item_to_block_state(slot.item_id)
-                                {
-                                    if block_state != 0 {
-                                        // Not air — place the block
-                                        let target = match face {
-                                            0 => (position.0, position.1 - 1, position.2),
-                                            1 => (position.0, position.1 + 1, position.2),
-                                            2 => (position.0, position.1, position.2 - 1),
-                                            3 => (position.0, position.1, position.2 + 1),
-                                            4 => (position.0 - 1, position.1, position.2),
-                                            5 => (position.0 + 1, position.1, position.2),
-                                            _ => position,
-                                        };
-                                        world.set_block(
-                                            dim,
-                                            target.0,
-                                            target.1,
-                                            target.2,
-                                            block_state,
-                                        );
-                                        broadcast_block_update(
-                                            &world,
-                                            &session_senders,
-                                            dim,
-                                            target,
-                                            block_state,
-                                        );
-                                    }
-                                }
+                                crate::registry::item_to_block_state(slot.item_id)
+                                    .filter(|&s| s != 0)
+                            } else {
+                                None
                             }
+                        })
+                    });
+
+                    // Prefer opening chests unless Creative is holding a block to place.
+                    if crate::container::is_chest(clicked)
+                        && !(gamemode == GAMEMODE_CREATIVE && holding_block.is_some())
+                    {
+                        open_chest_for_player(
+                            entity_id,
+                            dim,
+                            position,
+                            &mut containers,
+                            &mut open_windows,
+                            &mut next_window_id,
+                            &mut inventories,
+                            &session_senders,
+                        );
+                    } else if gamemode == GAMEMODE_CREATIVE {
+                        if let Some(block_state) = holding_block {
+                            let target = face_offset(face, position);
+                            world.set_block(dim, target.0, target.1, target.2, block_state);
+                            if crate::container::is_chest(block_state) {
+                                containers.ensure_seeded((dim, target.0, target.1, target.2));
+                            }
+                            broadcast_block_update(
+                                &world,
+                                &session_senders,
+                                dim,
+                                target,
+                                block_state,
+                            );
                         }
                     }
                 }
@@ -1342,6 +1493,7 @@ fn run_tick_loop(
                             &mut world,
                             &session_senders,
                             &mut chunk_states,
+                            &mut open_windows,
                             &mobs,
                             entity_id,
                             dest,
@@ -1489,6 +1641,49 @@ fn run_tick_loop(
                                 });
                             }
                         }
+                    }
+                }
+                TickMessage::ClickContainer {
+                    entity_id,
+                    window_id,
+                    state_id: _,
+                    changed_slots,
+                    cursor,
+                } => {
+                    let Some(open) = open_windows.get(&entity_id).cloned() else {
+                        continue;
+                    };
+                    if open.window_id != window_id {
+                        continue;
+                    }
+                    let Some(inv) = inventories.get_mut(&entity_id) else {
+                        continue;
+                    };
+                    let pos_key = (open.dimension, open.position.0, open.position.1, open.position.2);
+                    let chest = containers.chest_mut(pos_key, true);
+                    for change in &changed_slots {
+                        crate::container::apply_window_slot(
+                            chest,
+                            &mut inv.slots,
+                            change.slot,
+                            change.item.clone(),
+                        );
+                    }
+                    inv.state_id += 1;
+                    if let Some(open_mut) = open_windows.get_mut(&entity_id) {
+                        open_mut.carried = cursor;
+                    }
+                }
+                TickMessage::CloseContainer {
+                    entity_id,
+                    window_id,
+                } => {
+                    if open_windows
+                        .get(&entity_id)
+                        .is_some_and(|w| w.window_id == window_id)
+                    {
+                        // Client already closed the GUI; don't echo Close Container.
+                        close_open_window(entity_id, &mut open_windows, &session_senders, false);
                     }
                 }
             }
@@ -1752,6 +1947,15 @@ fn run_tick_loop(
                 .get_player(entity_id)
                 .map(|p| p.dimension)
                 .unwrap_or_default();
+            containers.remove((dim, position.0, position.1, position.2));
+            let viewers: Vec<i32> = open_windows
+                .iter()
+                .filter(|(_, w)| w.dimension == dim && w.position == position)
+                .map(|(&eid, _)| eid)
+                .collect();
+            for eid in viewers {
+                close_open_window(eid, &mut open_windows, &session_senders, true);
+            }
             world.set_block(dim, position.0, position.1, position.2, 0);
             broadcast_block_update(&world, &session_senders, dim, position, 0);
         }
@@ -1760,6 +1964,9 @@ fn run_tick_loop(
         if autosave_interval_ticks > 0 && tick_count - last_autosave_tick >= autosave_interval_ticks
         {
             save_all_overrides(&level_name, &world);
+            if let Err(e) = crate::container::save_chests(&level_name, &containers) {
+                eprintln!("error: autosave failed for chests: {}", e);
+            }
             merge_online_into_saved(&world, &inventories, &mut saved_players);
             if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
                 eprintln!("error: autosave failed for player data: {}", e);
@@ -3434,6 +3641,92 @@ mod tests {
             }
         }
         assert!(saw_damage, "standing in lava should reduce health");
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_opens_chest_and_applies_clicks() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0,
+            view_distance: 2,
+            event_sender: event_tx,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Built-in pack places a chest at (0,64,4). Right-click it.
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 4),
+            face: 1,
+        })?;
+
+        let start = Instant::now();
+        let mut opened = false;
+        let mut got_content = false;
+        let mut window_id = 0u8;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::OpenScreen {
+                    window_id: wid,
+                    window_type,
+                    ..
+                }) => {
+                    assert_eq!(window_type, crate::container::MENU_TYPE_GENERIC_9X3);
+                    window_id = wid as u8;
+                    opened = true;
+                }
+                Ok(SessionEvent::SetContainerContent {
+                    window_id: wid,
+                    slots,
+                    ..
+                }) if wid != 0 => {
+                    assert_eq!(wid, window_id);
+                    assert_eq!(slots.len(), crate::container::CHEST_WINDOW_SLOT_COUNT);
+                    assert!(slots[0].present, "starter loot in slot 0");
+                    got_content = true;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+            if opened && got_content {
+                break;
+            }
+        }
+        assert!(opened, "should Open Screen for chest");
+        assert!(got_content, "should send chest window content");
+
+        // Move dirt from chest slot 0 onto the cursor / clear slot (client-authoritative).
+        handle.send(super::TickMessage::ClickContainer {
+            entity_id: 1,
+            window_id,
+            state_id: 1,
+            changed_slots: vec![rustbound_protocol::play::ClickContainerChangedSlot {
+                slot: 0,
+                item: rustbound_protocol::play::Slot::empty(),
+            }],
+            cursor: rustbound_protocol::play::Slot::item(10, 16),
+        })?;
+        handle.send(super::TickMessage::CloseContainer {
+            entity_id: 1,
+            window_id,
+        })?;
+        std::thread::sleep(Duration::from_millis(80));
+
         handle.shutdown();
         Ok(())
     }

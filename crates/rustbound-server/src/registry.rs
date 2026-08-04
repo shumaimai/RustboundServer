@@ -174,6 +174,12 @@ pub const REGISTRY: &[BlockItemEntry] = &[
         block_state_id: 96,
         name: "lava",
     },
+    // Chest uses the real 1.20.1 global palette default state so clients render it.
+    BlockItemEntry {
+        item_id: 277,
+        block_state_id: 2955,
+        name: "chest",
+    },
 ];
 
 /// Looks up the block state ID for a given item ID.

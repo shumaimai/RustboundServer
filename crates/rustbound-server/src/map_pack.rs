@@ -286,6 +286,7 @@ const END_STONE: i32 = 121;
 const SOUL_SAND: i32 = 88;
 const WATER: i32 = crate::fluid::WATER_BLOCK_STATE;
 const LAVA: i32 = crate::fluid::LAVA_BLOCK_STATE;
+const CHEST: i32 = crate::container::CHEST_BLOCK_STATE;
 
 /// Digs a shallow static water pond (source blocks, no flow).
 fn water_pond(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {
@@ -376,6 +377,8 @@ pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
     portal_pad(&mut blocks, 6, 0, END_STONE, END_STONE);
     // H5: static water pond south of spawn (swim / damp fall).
     water_pond(&mut blocks, 0, -12, 3);
+    // H6: starter chest north of spawn.
+    put(&mut blocks, 0, 64, 4, CHEST);
 
     MapPack {
         garden,
@@ -445,26 +448,35 @@ pub fn pack_path_for(
     PathBuf::from(level_name).join("packs").join(name)
 }
 
-/// Resolves packs for every dimension (file override or builtin).
+/// Resolves packs for every dimension (file override, bundled data, or builtin).
 pub fn resolve_all_packs(
     level_name: &str,
     size: MapSize,
 ) -> HashMap<crate::hakoniwa::DimensionId, MapPack> {
     let mut out = HashMap::new();
     for dim in crate::hakoniwa::DimensionId::all() {
-        let path = pack_path_for(level_name, size, dim);
-        let pack = match load_pack_file(&path) {
-            Ok(mut pack) => {
-                pack.garden = GardenSpec::from_size(size);
-                pack.id = format!("file:{}:{}", size.as_str(), dim.as_str());
-                eprintln!("hakoniwa: loaded {} from {}", pack.id, path.display());
-                pack
+        let file_name = match dim {
+            crate::hakoniwa::DimensionId::Overworld => format!("{}.rbpk", size.as_str()),
+            other => format!("{}-{}.rbpk", size.as_str(), other.as_str()),
+        };
+        let pack = if let Some(path) = crate::container::resolve_pack_file(level_name, &file_name) {
+            match load_pack_file(&path) {
+                Ok(mut pack) => {
+                    pack.garden = GardenSpec::from_size(size);
+                    pack.id = format!("file:{}:{}", size.as_str(), dim.as_str());
+                    eprintln!("hakoniwa: loaded {} from {}", pack.id, path.display());
+                    pack
+                }
+                Err(_) => {
+                    let pack = builtin_pack(size, dim);
+                    eprintln!("hakoniwa: using built-in map pack '{}'", pack.id);
+                    pack
+                }
             }
-            Err(_) => {
-                let pack = builtin_pack(size, dim);
-                eprintln!("hakoniwa: using built-in map pack '{}'", pack.id);
-                pack
-            }
+        } else {
+            let pack = builtin_pack(size, dim);
+            eprintln!("hakoniwa: using built-in map pack '{}'", pack.id);
+            pack
         };
         out.insert(dim, pack);
     }
@@ -513,6 +525,7 @@ mod tests {
     fn overworld_has_water_pond_and_nether_has_lava() {
         let ow = builtin_overworld_pack(MapSize::Tiny);
         assert_eq!(ow.blocks.get(&(0, 63, -12)), Some(&WATER));
+        assert_eq!(ow.blocks.get(&(0, 64, 4)), Some(&CHEST));
         let n = builtin_nether_pack(MapSize::Tiny);
         assert_eq!(n.blocks.get(&(10, 63, 0)), Some(&LAVA));
     }
