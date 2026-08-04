@@ -98,11 +98,13 @@ fn block_range(min: f64, max: f64) -> std::ops::RangeInclusive<i32> {
     start..=end.max(start)
 }
 
-fn aabb_hits_solid(world: &World, box_: Aabb) -> bool {
+fn aabb_hits_solid(world: &World, dimension: crate::hakoniwa::DimensionId, box_: Aabb) -> bool {
     for by in block_range(box_.min_y, box_.max_y) {
         for bx in block_range(box_.min_x, box_.max_x) {
             for bz in block_range(box_.min_z, box_.max_z) {
-                if is_solid(world.get_block(bx, by, bz)) && box_.overlaps_block(bx, by, bz) {
+                if is_solid(world.get_block(dimension, bx, by, bz))
+                    && box_.overlaps_block(bx, by, bz)
+                {
                     return true;
                 }
             }
@@ -111,7 +113,13 @@ fn aabb_hits_solid(world: &World, box_: Aabb) -> bool {
     false
 }
 
-fn standing_on_ground(world: &World, x: f64, y: f64, z: f64) -> bool {
+fn standing_on_ground(
+    world: &World,
+    dimension: crate::hakoniwa::DimensionId,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> bool {
     // Probe a few centimeters below the feet so seating on a block top
     // (y ≈ N + eps) still sees block N-1 / the solid beneath.
     let probe_y = y - 0.05;
@@ -119,7 +127,7 @@ fn standing_on_ground(world: &World, x: f64, y: f64, z: f64) -> bool {
     let half = PLAYER_HALF_WIDTH;
     for bx in block_range(x - half, x + half) {
         for bz in block_range(z - half, z + half) {
-            if is_solid(world.get_block(bx, by, bz)) {
+            if is_solid(world.get_block(dimension, bx, by, bz)) {
                 return true;
             }
         }
@@ -133,6 +141,7 @@ fn standing_on_ground(world: &World, x: f64, y: f64, z: f64) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_movement(
     world: &World,
+    dimension: crate::hakoniwa::DimensionId,
     old_x: f64,
     old_y: f64,
     old_z: f64,
@@ -162,7 +171,7 @@ pub fn resolve_movement(
     // X axis
     if (x - old_x).abs() > f64::EPSILON {
         let try_box = Aabb::from_feet(x, old_y, old_z);
-        if aabb_hits_solid(world, try_box) {
+        if aabb_hits_solid(world, dimension, try_box) {
             x = old_x;
         }
     }
@@ -170,7 +179,7 @@ pub fn resolve_movement(
     // Z axis
     if (z - old_z).abs() > f64::EPSILON {
         let try_box = Aabb::from_feet(x, old_y, z);
-        if aabb_hits_solid(world, try_box) {
+        if aabb_hits_solid(world, dimension, try_box) {
             z = old_z;
         }
     }
@@ -178,10 +187,10 @@ pub fn resolve_movement(
     // Y axis
     if (y - old_y).abs() > f64::EPSILON {
         let try_box = Aabb::from_feet(x, y, z);
-        if aabb_hits_solid(world, try_box) {
+        if aabb_hits_solid(world, dimension, try_box) {
             if y < old_y {
                 // Falling: sit on the highest solid top below the old feet.
-                y = snap_to_ground(world, x, old_y, z);
+                y = snap_to_ground(world, dimension, x, old_y, z);
             } else {
                 // Rising into ceiling
                 y = old_y;
@@ -190,11 +199,11 @@ pub fn resolve_movement(
     }
 
     // If still intersecting (started inside a block), push up onto surface.
-    if aabb_hits_solid(world, Aabb::from_feet(x, y, z)) {
-        y = snap_to_ground(world, x, y + PLAYER_HEIGHT, z);
+    if aabb_hits_solid(world, dimension, Aabb::from_feet(x, y, z)) {
+        y = snap_to_ground(world, dimension, x, y + PLAYER_HEIGHT, z);
     }
 
-    let on_ground = standing_on_ground(world, x, y, z);
+    let on_ground = standing_on_ground(world, dimension, x, y, z);
     let corrected = (x - new_x).abs() > f64::EPSILON
         || (y - new_y).abs() > f64::EPSILON
         || (z - new_z).abs() > f64::EPSILON;
@@ -208,17 +217,23 @@ pub fn resolve_movement(
     }
 }
 
-fn snap_to_ground(world: &World, x: f64, from_y: f64, z: f64) -> f64 {
+fn snap_to_ground(
+    world: &World,
+    dimension: crate::hakoniwa::DimensionId,
+    x: f64,
+    from_y: f64,
+    z: f64,
+) -> f64 {
     // Search downward from from_y for a solid top within MAX_FALL.
     let start = floor_i(from_y);
     let min_y = start - (MAX_FALL as i32);
     for by in (min_y..=start).rev() {
         for bx in block_range(x - PLAYER_HALF_WIDTH, x + PLAYER_HALF_WIDTH) {
             for bz in block_range(z - PLAYER_HALF_WIDTH, z + PLAYER_HALF_WIDTH) {
-                if is_solid(world.get_block(bx, by, bz)) {
+                if is_solid(world.get_block(dimension, bx, by, bz)) {
                     let top = f64::from(by) + 1.0;
                     let candidate = top + SURFACE_EPS;
-                    if !aabb_hits_solid(world, Aabb::from_feet(x, candidate, z)) {
+                    if !aabb_hits_solid(world, dimension, Aabb::from_feet(x, candidate, z)) {
                         return candidate;
                     }
                 }
@@ -242,7 +257,17 @@ mod tests {
     #[test]
     fn standing_on_plateau_is_on_ground() {
         let world = World::new();
-        let r = resolve_movement(&world, 0.5, 64.0, 0.5, 0.5, 64.0, 0.5, 0);
+        let r = resolve_movement(
+            &world,
+            crate::hakoniwa::DimensionId::Overworld,
+            0.5,
+            64.0,
+            0.5,
+            0.5,
+            64.0,
+            0.5,
+            0,
+        );
         assert!(r.on_ground);
         assert!(!r.corrected);
         assert!((r.y - 64.0).abs() < 0.01);
@@ -251,7 +276,17 @@ mod tests {
     #[test]
     fn falling_onto_plateau_snaps_to_surface() {
         let world = World::new();
-        let r = resolve_movement(&world, 0.5, 70.0, 0.5, 0.5, 50.0, 0.5, 0);
+        let r = resolve_movement(
+            &world,
+            crate::hakoniwa::DimensionId::Overworld,
+            0.5,
+            70.0,
+            0.5,
+            0.5,
+            50.0,
+            0.5,
+            0,
+        );
         assert!(r.corrected);
         assert!(r.on_ground);
         assert!(r.y > f64::from(FLAT_STONE_MAX_Y));
@@ -262,9 +297,31 @@ mod tests {
     fn cannot_walk_into_solid_wall() {
         let mut world = World::new();
         // Pillar at x=2, z=0 from y=64..66
-        world.set_block(2, 64, 0, STONE_BLOCK_STATE);
-        world.set_block(2, 65, 0, STONE_BLOCK_STATE);
-        let r = resolve_movement(&world, 0.5, 64.0, 0.5, 2.0, 64.0, 0.5, 0);
+        world.set_block(
+            crate::hakoniwa::DimensionId::Overworld,
+            2,
+            64,
+            0,
+            STONE_BLOCK_STATE,
+        );
+        world.set_block(
+            crate::hakoniwa::DimensionId::Overworld,
+            2,
+            65,
+            0,
+            STONE_BLOCK_STATE,
+        );
+        let r = resolve_movement(
+            &world,
+            crate::hakoniwa::DimensionId::Overworld,
+            0.5,
+            64.0,
+            0.5,
+            2.0,
+            64.0,
+            0.5,
+            0,
+        );
         assert!(r.corrected);
         assert!(r.x < 1.7, "should not enter the pillar, got x={}", r.x);
     }
@@ -272,7 +329,17 @@ mod tests {
     #[test]
     fn spectator_ignores_collision() {
         let world = World::new();
-        let r = resolve_movement(&world, 0.5, 64.0, 0.5, 0.5, 40.0, 0.5, GAMEMODE_SPECTATOR);
+        let r = resolve_movement(
+            &world,
+            crate::hakoniwa::DimensionId::Overworld,
+            0.5,
+            64.0,
+            0.5,
+            0.5,
+            40.0,
+            0.5,
+            GAMEMODE_SPECTATOR,
+        );
         assert!(!r.corrected);
         assert!((r.y - 40.0).abs() < f64::EPSILON);
     }
@@ -284,11 +351,27 @@ mod tests {
         for x in 0..2 {
             for z in 0..2 {
                 for y in 60..=63 {
-                    world.set_block(x, y, z, AIR_BLOCK_STATE);
+                    world.set_block(
+                        crate::hakoniwa::DimensionId::Overworld,
+                        x,
+                        y,
+                        z,
+                        AIR_BLOCK_STATE,
+                    );
                 }
             }
         }
-        let r = resolve_movement(&world, 0.5, 64.0, 0.5, 0.5, 61.0, 0.5, 0);
+        let r = resolve_movement(
+            &world,
+            crate::hakoniwa::DimensionId::Overworld,
+            0.5,
+            64.0,
+            0.5,
+            0.5,
+            61.0,
+            0.5,
+            0,
+        );
         // Should fall into the hole (below 64)
         assert!(r.y < 63.5, "should enter dug hole, y={}", r.y);
     }

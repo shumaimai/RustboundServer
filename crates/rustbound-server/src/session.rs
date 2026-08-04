@@ -366,6 +366,8 @@ pub struct SessionConfig {
     pub max_players: i32,
     /// Keep Alive timeout: clients that don't respond within this duration are kicked.
     pub keep_alive_timeout: Duration,
+    /// Enabled hakoniwa dimensions (Join Game list).
+    pub enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 /// A player session in the Play state.
@@ -415,6 +417,10 @@ pub struct PlayerSession {
     last_keep_alive_sent: Option<std::time::Instant>,
     /// The instant the client last responded to a KeepAlive.
     last_keep_alive_response: std::time::Instant,
+    /// Current dimension (drives Chunk Data terrain fill).
+    dimension: crate::hakoniwa::DimensionId,
+    /// Enabled dimensions advertised in Join Game.
+    enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 impl PlayerSession {
@@ -467,6 +473,8 @@ impl PlayerSession {
             last_keep_alive_payload: 0,
             last_keep_alive_sent: None,
             last_keep_alive_response: std::time::Instant::now(),
+            dimension: crate::hakoniwa::DimensionId::Overworld,
+            enabled_dimensions: config.enabled_dimensions,
         })
     }
 
@@ -532,15 +540,16 @@ impl PlayerSession {
             self.entity_id,
             registry_codec.len()
         );
+        let dim = self.dimension.protocol_name().to_string();
         let join_game = JoinGame {
             entity_id: self.entity_id,
             is_hardcore: false,
             gamemode: self.gamemode,
             previous_gamemode: None,
-            dimension_names: vec!["minecraft:overworld".to_string()],
+            dimension_names: self.enabled_dimensions.protocol_names(),
             registry_codec,
-            dimension_type: "minecraft:overworld".to_string(),
-            dimension_name: "minecraft:overworld".to_string(),
+            dimension_type: dim.clone(),
+            dimension_name: dim,
             hashed_seed: 0,
             max_players: self.max_players,
             view_distance: self.view_distance,
@@ -704,7 +713,7 @@ impl PlayerSession {
         let positions = crate::world::World::desired_chunks(0, 0, radius);
 
         for pos in positions {
-            let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z);
+            let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z, self.dimension);
             let mut wire = Vec::new();
             encode_chunk_data(&chunk_data, mfl, &mut wire)?;
             self.send_wire(stream, &wire)?;
@@ -720,7 +729,7 @@ impl PlayerSession {
         chunk_x: i32,
         chunk_z: i32,
     ) -> Result<(), SessionError> {
-        let chunk_data = crate::chunk::build_chunk_data_packet(chunk_x, chunk_z);
+        let chunk_data = crate::chunk::build_chunk_data_packet(chunk_x, chunk_z, self.dimension);
         let mut wire = Vec::new();
         encode_chunk_data(&chunk_data, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
@@ -1073,6 +1082,10 @@ impl PlayerSession {
                     y,
                     z,
                 } => {
+                    if let Some(dim) = crate::hakoniwa::DimensionId::parse_protocol(&dimension_name)
+                    {
+                        self.dimension = dim;
+                    }
                     self.send_respawn(
                         stream,
                         &dimension_type,
@@ -1227,6 +1240,7 @@ impl PlayerSession {
                 {
                     // Set block to air (state 0)
                     let _ = self.tick_sender.send(TickMessage::SetBlock {
+                        entity_id: Some(self.entity_id),
                         position: dig.position,
                         block_state: 0,
                     });
@@ -2053,6 +2067,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -2093,6 +2108,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2232,6 +2248,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2249,9 +2266,10 @@ mod tests {
         // Should return ACK sequence
         assert_eq!(ack, Some(7));
 
-        // Should receive SetBlock with block_state=0 (air)
+        // Should receive SetBlock with block_state=0 (air) in the digger's dimension.
         match rx.recv()? {
             TickMessage::SetBlock {
+                entity_id: Some(1),
                 position,
                 block_state,
             } => {
@@ -2279,6 +2297,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2332,6 +2351,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2379,6 +2399,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2423,6 +2444,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 1, tx)?;
         assert!(!session.is_keep_alive_timed_out());
@@ -2443,6 +2465,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_millis(1),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2474,6 +2497,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2506,6 +2530,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_millis(1),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 

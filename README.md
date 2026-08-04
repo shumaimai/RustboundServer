@@ -12,7 +12,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 
 ## Status
 
-**Hakoniwa Phase H0** on the path to a finished garden. Offline join + flat plateau work; garden border + size config ship in H0.
+**Hakoniwa Phase H3** — fixed gardens with Overworld / Nether / End switching.
 
 | Layer | Status |
 |-------|--------|
@@ -21,7 +21,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 | Hakoniwa size + world border clamp | **Done (H0)** |
 | Block collision | **Done (H1)** |
 | Map packs / 3 sizes of overworld gardens | **Done (H2)** |
-| Nether / End | H3 |
+| Nether / End (portals + `/dim`) | **Done (H3)** |
 | Simple mobs | H4 |
 | Static liquids | H5 |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) (optional) |

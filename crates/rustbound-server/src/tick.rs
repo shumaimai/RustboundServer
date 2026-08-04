@@ -381,8 +381,11 @@ pub enum TickMessage {
         /// Whether the player is on the ground.
         on_ground: bool,
     },
-    /// A block was changed by a player (dig/place).
+    /// A block was changed by a player (dig/place) or the mod facade.
     SetBlock {
+        /// When set, the block is written in that player's current dimension.
+        /// When `None`, the overworld is used (mod API / legacy).
+        entity_id: Option<i32>,
         /// The block position.
         position: (i32, i32, i32),
         /// The new block state ID (0 = air).
@@ -589,12 +592,171 @@ pub fn start_tick_loop(
 }
 
 /// Sends LoadChunk plus any pack/dig block deltas the client must apply.
-fn send_chunk_to_session(sender: &Sender<SessionEvent>, world: &World, chunk_x: i32, chunk_z: i32) {
+fn send_chunk_to_session(
+    sender: &Sender<SessionEvent>,
+    world: &World,
+    dimension: crate::hakoniwa::DimensionId,
+    chunk_x: i32,
+    chunk_z: i32,
+) {
     let _ = sender.send(SessionEvent::LoadChunk { chunk_x, chunk_z });
-    let deltas = world.get_client_block_deltas_for_chunk(chunk_x, chunk_z);
+    let deltas = world.get_client_block_deltas_for_chunk(dimension, chunk_x, chunk_z);
     if !deltas.is_empty() {
         let _ = sender.send(SessionEvent::ChunkBlockOverrides { overrides: deltas });
     }
+}
+
+/// Broadcasts a block update to sessions whose players share `dimension`.
+fn broadcast_block_update(
+    world: &World,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    dimension: crate::hakoniwa::DimensionId,
+    position: (i32, i32, i32),
+    block_state: i32,
+) {
+    for (&eid, sender) in session_senders {
+        if world.get_player(eid).map(|p| p.dimension) == Some(dimension) {
+            let _ = sender.send(SessionEvent::BlockUpdate {
+                position,
+                block_state,
+            });
+        }
+    }
+}
+
+/// Saves dig/place overrides for every dimension.
+fn save_all_overrides(level_name: &str, world: &World) {
+    for dim in crate::hakoniwa::DimensionId::all() {
+        if let Err(e) =
+            crate::persist::save_overrides_for(level_name, dim, world.block_overrides_for(dim))
+        {
+            eprintln!(
+                "error: failed to save {} block overrides: {}",
+                dim.as_str(),
+                e
+            );
+        }
+    }
+}
+
+/// Resyncs the client's loaded chunk window around the player's feet.
+fn resync_player_chunks(
+    world: &World,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    chunk_states: &mut HashMap<i32, PlayerChunkState>,
+    entity_id: i32,
+    x: f64,
+    z: f64,
+) {
+    let dimension = world
+        .get_player(entity_id)
+        .map(|p| p.dimension)
+        .unwrap_or_default();
+    let cx = chunk_x_from_world(x);
+    let cz = chunk_z_from_world(z);
+    let Some(chunk_state) = chunk_states.get_mut(&entity_id) else {
+        return;
+    };
+    let old_loaded: Vec<_> = chunk_state.loaded_chunks.iter().copied().collect();
+    chunk_state.center_x = cx;
+    chunk_state.center_z = cz;
+    let new_desired = chunk_state.desired_chunk_set();
+    let new_chunks: Vec<_> = new_desired
+        .iter()
+        .filter(|pos| !chunk_state.loaded_chunks.contains(pos))
+        .copied()
+        .collect();
+    let unloaded: Vec<_> = old_loaded
+        .iter()
+        .filter(|pos| !new_desired.contains(pos))
+        .copied()
+        .collect();
+    // Force reload of overlapping chunks so terrain matches the new dimension.
+    let reload: Vec<_> = new_desired
+        .iter()
+        .filter(|pos| old_loaded.contains(pos))
+        .copied()
+        .collect();
+    chunk_state.loaded_chunks = new_desired;
+    let Some(sender) = session_senders.get(&entity_id) else {
+        return;
+    };
+    let _ = sender.send(SessionEvent::SetCenterChunkEvent {
+        chunk_x: cx,
+        chunk_z: cz,
+    });
+    for chunk in unloaded {
+        let _ = sender.send(SessionEvent::UnloadChunk {
+            chunk_x: chunk.x,
+            chunk_z: chunk.z,
+        });
+    }
+    for chunk in reload {
+        let _ = sender.send(SessionEvent::UnloadChunk {
+            chunk_x: chunk.x,
+            chunk_z: chunk.z,
+        });
+        send_chunk_to_session(sender, world, dimension, chunk.x, chunk.z);
+    }
+    for chunk in new_chunks {
+        send_chunk_to_session(sender, world, dimension, chunk.x, chunk.z);
+    }
+}
+
+/// Moves a player to another enabled dimension (portal or `/dim`).
+fn transfer_player_dimension(
+    world: &mut World,
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    chunk_states: &mut HashMap<i32, PlayerChunkState>,
+    entity_id: i32,
+    dest: crate::hakoniwa::DimensionId,
+) {
+    if !world.enabled_dimensions().contains(dest) {
+        return;
+    }
+    let Some(player) = world.get_player(entity_id) else {
+        return;
+    };
+    if player.dimension == dest {
+        return;
+    }
+    let gamemode = player.gamemode;
+    let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
+    let name = dest.protocol_name().to_string();
+    if let Some(player) = world.get_player_mut(entity_id) {
+        player.dimension = dest;
+        player.set_position(spawn_x, spawn_y, spawn_z);
+    }
+    if let Some(sender) = session_senders.get(&entity_id) {
+        let _ = sender.send(SessionEvent::RespawnPlayer {
+            dimension_type: name.clone(),
+            dimension_name: name,
+            hashed_seed: 0,
+            gamemode,
+            previous_gamemode: -1,
+            is_debug: false,
+            is_flat: true,
+            has_death_location: false,
+            death_dimension_name: String::new(),
+            death_location: (0, 0, 0),
+            portal_cooldown: 0,
+            data_kept: 0,
+            x: spawn_x,
+            y: spawn_y,
+            z: spawn_z,
+        });
+        let _ = sender.send(SessionEvent::SystemChat {
+            content: format!(r#"{{"text":"Warped to {}"}}"#, dest.as_str()),
+        });
+    }
+    resync_player_chunks(
+        world,
+        session_senders,
+        chunk_states,
+        entity_id,
+        spawn_x,
+        spawn_z,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -608,13 +770,17 @@ fn run_tick_loop(
     garden: crate::hakoniwa::GardenSpec,
     mod_host: ModHost,
 ) {
-    // Load dig/place overrides, then apply the hakoniwa map pack layer.
-    let loaded = crate::persist::load_overrides(&level_name);
+    // Load dig/place overrides and map packs for every dimension.
     let mut saved_players = crate::persist::load_players(&level_name);
-    let pack = crate::map_pack::resolve_pack(&level_name, garden.size);
-    let mut world = World::with_garden(pack.garden.clone());
-    world.load_block_overrides(loaded);
-    world.load_pack_blocks(pack.blocks);
+    let packs = crate::map_pack::resolve_all_packs(&level_name, garden.size);
+    let mut world = World::with_garden(garden.clone());
+    world.set_enabled_dimensions(garden.dimensions);
+    for dim in crate::hakoniwa::DimensionId::all() {
+        world.load_block_overrides_for(dim, crate::persist::load_overrides_for(&level_name, dim));
+        if let Some(pack) = packs.get(&dim) {
+            world.load_pack_blocks_for(dim, pack.blocks.clone());
+        }
+    }
     let garden = world.garden().clone();
     let garden_chunk_radius = garden.size.chunk_radius();
     // Autosave interval in ticks (20 TPS). 0 means disabled.
@@ -643,11 +809,7 @@ fn run_tick_loop(
             match msg {
                 TickMessage::Shutdown => {
                     // Save block overrides to disk before shutting down
-                    if let Err(e) =
-                        crate::persist::save_overrides(&level_name, world.block_overrides())
-                    {
-                        eprintln!("error: failed to save block overrides: {}", e);
-                    }
+                    save_all_overrides(&level_name, &world);
                     // Merge online players into the cache, then write everyone
                     // (including players who already left this session).
                     merge_online_into_saved(&world, &inventories, &mut saved_players);
@@ -676,7 +838,8 @@ fn run_tick_loop(
                         gamemode,
                     );
                     // Restore position if saved — but never reload into the void
-                    // or outside the hakoniwa border.
+                    // or outside the hakoniwa border. Dimension always starts Overworld
+                    // (H3 does not yet persist dimension across reconnects).
                     if let Some(ref d) = saved {
                         let (px, py, pz) = if d.y < VOID_DEATH_Y {
                             let (sx, sy, sz) = world.spawn_point();
@@ -739,9 +902,12 @@ fn run_tick_loop(
                         });
                     }
 
-                    // Broadcast join to all OTHER existing sessions
+                    // Broadcast join to all OTHER existing sessions in the same dimension.
                     for (&eid, sender) in &session_senders {
-                        if eid != entity_id {
+                        if eid != entity_id
+                            && world.get_player(eid).map(|p| p.dimension)
+                                == Some(crate::hakoniwa::DimensionId::Overworld)
+                        {
                             let _ = sender.send(SessionEvent::PlayerJoined {
                                 entity_id,
                                 uuid,
@@ -754,9 +920,11 @@ fn run_tick_loop(
                         }
                     }
 
-                    // Send info about all existing players to the new session
+                    // Send info about all existing players in the same dimension.
                     for p in world.players() {
-                        if p.entity_id != entity_id {
+                        if p.entity_id != entity_id
+                            && p.dimension == crate::hakoniwa::DimensionId::Overworld
+                        {
                             let _ = event_sender.send(SessionEvent::PlayerJoined {
                                 entity_id: p.entity_id,
                                 uuid: p.uuid,
@@ -774,8 +942,11 @@ fn run_tick_loop(
                     let mut new_player_overrides: Vec<((i32, i32, i32), i32)> = Vec::new();
                     for cx in -initial_radius..=initial_radius {
                         for cz in -initial_radius..=initial_radius {
-                            new_player_overrides
-                                .extend(world.get_client_block_deltas_for_chunk(cx, cz));
+                            new_player_overrides.extend(world.get_client_block_deltas_for_chunk(
+                                crate::hakoniwa::DimensionId::Overworld,
+                                cx,
+                                cz,
+                            ));
                         }
                     }
                     if !new_player_overrides.is_empty() {
@@ -830,10 +1001,10 @@ fn run_tick_loop(
                     let raw_x = x;
                     let raw_y = y;
                     let raw_z = z;
-                    let (old_x, old_y, old_z, gamemode) =
+                    let (old_x, old_y, old_z, gamemode, dimension) =
                         match world.get_player(entity_id).map(|p| {
                             let (ox, oy, oz) = p.position();
-                            (ox, oy, oz, p.gamemode)
+                            (ox, oy, oz, p.gamemode, p.dimension)
                         }) {
                             Some(v) => v,
                             None => continue,
@@ -847,7 +1018,7 @@ fn run_tick_loop(
                         (x, y, z, false, false)
                     } else {
                         let collision = crate::collision::resolve_movement(
-                            &world, old_x, old_y, old_z, x, y, z, gamemode,
+                            &world, dimension, old_x, old_y, old_z, x, y, z, gamemode,
                         );
                         (
                             collision.x,
@@ -859,86 +1030,105 @@ fn run_tick_loop(
                     };
                     let corrected = border_clamped || phys_corrected;
                     let _ = on_ground;
+                    let (old_yaw, old_pitch) = world
+                        .get_player(entity_id)
+                        .map(|p| p.rotation())
+                        .unwrap_or((0.0, 0.0));
                     if let Some(player) = world.get_player_mut(entity_id) {
-                        let (old_yaw, old_pitch) = player.rotation();
                         player.set_position(x, y, z);
                         player.set_rotation(yaw, pitch);
-                        let pos_changed = (x - old_x).abs() > f64::EPSILON
-                            || (y - old_y).abs() > f64::EPSILON
-                            || (z - old_z).abs() > f64::EPSILON;
-                        let rot_changed = (yaw - old_yaw).abs() > f32::EPSILON
-                            || (pitch - old_pitch).abs() > f32::EPSILON;
+                    }
+                    let pos_changed = (x - old_x).abs() > f64::EPSILON
+                        || (y - old_y).abs() > f64::EPSILON
+                        || (z - old_z).abs() > f64::EPSILON;
+                    let rot_changed = (yaw - old_yaw).abs() > f32::EPSILON
+                        || (pitch - old_pitch).abs() > f32::EPSILON;
 
-                        if corrected {
-                            if let Some(sender) = session_senders.get(&entity_id) {
-                                let _ = sender.send(SessionEvent::SynchronizePosition { x, y, z });
+                    if corrected {
+                        if let Some(sender) = session_senders.get(&entity_id) {
+                            let _ = sender.send(SessionEvent::SynchronizePosition { x, y, z });
+                        }
+                    }
+
+                    if pos_changed || rot_changed {
+                        for (&eid, sender) in &session_senders {
+                            if eid != entity_id
+                                && world.get_player(eid).map(|p| p.dimension) == Some(dimension)
+                            {
+                                let _ = sender.send(SessionEvent::EntityMovement {
+                                    entity_id,
+                                    old_x,
+                                    old_y,
+                                    old_z,
+                                    new_x: x,
+                                    new_y: y,
+                                    new_z: z,
+                                    new_yaw: yaw,
+                                    new_pitch: pitch,
+                                    on_ground: server_on_ground,
+                                });
                             }
                         }
+                    }
 
-                        if pos_changed || rot_changed {
-                            for (&eid, sender) in &session_senders {
-                                if eid != entity_id {
-                                    let _ = sender.send(SessionEvent::EntityMovement {
-                                        entity_id,
-                                        old_x,
-                                        old_y,
-                                        old_z,
-                                        new_x: x,
-                                        new_y: y,
-                                        new_z: z,
-                                        new_yaw: yaw,
-                                        new_pitch: pitch,
-                                        on_ground: server_on_ground,
+                    if pos_changed {
+                        let new_cx = chunk_x_from_world(x);
+                        let new_cz = chunk_z_from_world(z);
+                        if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
+                            let (center_changed, new_chunks, unloaded_chunks) =
+                                chunk_state.update_center(new_cx, new_cz);
+                            if let Some(sender) = session_senders.get(&entity_id) {
+                                if center_changed {
+                                    let _ = sender.send(SessionEvent::SetCenterChunkEvent {
+                                        chunk_x: new_cx,
+                                        chunk_z: new_cz,
+                                    });
+                                }
+                                for chunk in new_chunks {
+                                    send_chunk_to_session(
+                                        sender, &world, dimension, chunk.x, chunk.z,
+                                    );
+                                }
+                                for chunk in unloaded_chunks {
+                                    let _ = sender.send(SessionEvent::UnloadChunk {
+                                        chunk_x: chunk.x,
+                                        chunk_z: chunk.z,
                                     });
                                 }
                             }
                         }
-
-                        if pos_changed {
-                            let new_cx = chunk_x_from_world(x);
-                            let new_cz = chunk_z_from_world(z);
-                            if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                                let (center_changed, new_chunks, unloaded_chunks) =
-                                    chunk_state.update_center(new_cx, new_cz);
-                                if let Some(sender) = session_senders.get(&entity_id) {
-                                    if center_changed {
-                                        let _ = sender.send(SessionEvent::SetCenterChunkEvent {
-                                            chunk_x: new_cx,
-                                            chunk_z: new_cz,
-                                        });
-                                    }
-                                    for chunk in new_chunks {
-                                        send_chunk_to_session(sender, &world, chunk.x, chunk.z);
-                                    }
-                                    for chunk in unloaded_chunks {
-                                        let _ = sender.send(SessionEvent::UnloadChunk {
-                                            chunk_x: chunk.x,
-                                            chunk_z: chunk.z,
-                                        });
-                                    }
-                                }
-                            }
+                        let under = crate::dimension::block_under_feet(&world, dimension, x, y, z);
+                        if let Some(dest) = crate::dimension::portal_destination(dimension, under) {
+                            transfer_player_dimension(
+                                &mut world,
+                                &session_senders,
+                                &mut chunk_states,
+                                entity_id,
+                                dest,
+                            );
                         }
                     }
                 }
                 TickMessage::SetBlock {
+                    entity_id,
                     position,
                     block_state,
                 } => {
-                    world.set_block(position.0, position.1, position.2, block_state);
-                    // Broadcast Block Update to all sessions
-                    for sender in session_senders.values() {
-                        let _ = sender.send(SessionEvent::BlockUpdate {
-                            position,
-                            block_state,
-                        });
-                    }
+                    let dim = entity_id
+                        .and_then(|eid| world.get_player(eid).map(|p| p.dimension))
+                        .unwrap_or(crate::hakoniwa::DimensionId::Overworld);
+                    world.set_block(dim, position.0, position.1, position.2, block_state);
+                    broadcast_block_update(&world, &session_senders, dim, position, block_state);
                 }
                 TickMessage::PlaceBlock {
                     entity_id,
                     position,
                     face,
                 } => {
+                    let dim = world
+                        .get_player(entity_id)
+                        .map(|p| p.dimension)
+                        .unwrap_or(crate::hakoniwa::DimensionId::Overworld);
                     // Look up the held hotbar item and place the corresponding block.
                     if let Some(inv) = inventories.get(&entity_id) {
                         let held_idx = inv.held_slot as usize;
@@ -959,14 +1149,20 @@ fn run_tick_loop(
                                             5 => (position.0 + 1, position.1, position.2),
                                             _ => position,
                                         };
-                                        world.set_block(target.0, target.1, target.2, block_state);
-                                        // Broadcast Block Update to all sessions
-                                        for sender in session_senders.values() {
-                                            let _ = sender.send(SessionEvent::BlockUpdate {
-                                                position: target,
-                                                block_state,
-                                            });
-                                        }
+                                        world.set_block(
+                                            dim,
+                                            target.0,
+                                            target.1,
+                                            target.2,
+                                            block_state,
+                                        );
+                                        broadcast_block_update(
+                                            &world,
+                                            &session_senders,
+                                            dim,
+                                            target,
+                                            block_state,
+                                        );
                                     }
                                 }
                             }
@@ -977,12 +1173,16 @@ fn run_tick_loop(
                     entity_id,
                     view_distance,
                 } => {
+                    let dim = world
+                        .get_player(entity_id)
+                        .map(|p| p.dimension)
+                        .unwrap_or_default();
                     if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
                         let (new_chunks, unloaded_chunks) =
                             chunk_state.update_view_distance(view_distance);
                         if let Some(sender) = session_senders.get(&entity_id) {
                             for chunk in new_chunks {
-                                send_chunk_to_session(sender, &world, chunk.x, chunk.z);
+                                send_chunk_to_session(sender, &world, dim, chunk.x, chunk.z);
                             }
                             for chunk in unloaded_chunks {
                                 let _ = sender.send(SessionEvent::UnloadChunk {
@@ -1079,21 +1279,31 @@ fn run_tick_loop(
                     }
                 }
                 TickMessage::ChatMessage {
-                    entity_id: _,
+                    entity_id,
                     uuid: _,
                     username,
                     message,
                 } => {
-                    // Broadcast chat to all sessions as a System Chat Message.
-                    // In offline mode, we use the unsigned/system chat path
-                    // (no signed Player Chat Message).
-                    let content = format_chat_message(&username, &message);
-                    // Broadcast to everyone including the sender so offline
-                    // clients without local echo still see their own chat.
-                    for sender in session_senders.values() {
-                        let _ = sender.send(SessionEvent::SystemChat {
-                            content: content.clone(),
-                        });
+                    if let Some(dest) = crate::dimension::parse_dim_command(&message) {
+                        transfer_player_dimension(
+                            &mut world,
+                            &session_senders,
+                            &mut chunk_states,
+                            entity_id,
+                            dest,
+                        );
+                    } else {
+                        // Broadcast chat to all sessions as a System Chat Message.
+                        // In offline mode, we use the unsigned/system chat path
+                        // (no signed Player Chat Message).
+                        let content = format_chat_message(&username, &message);
+                        // Broadcast to everyone including the sender so offline
+                        // clients without local echo still see their own chat.
+                        for sender in session_senders.values() {
+                            let _ = sender.send(SessionEvent::SystemChat {
+                                content: content.clone(),
+                            });
+                        }
                     }
                 }
                 TickMessage::ClientStatus { entity_id, action } => {
@@ -1113,16 +1323,20 @@ fn run_tick_loop(
                                 }
                                 inv.respawn();
                                 let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
-                                let gamemode = world
+                                let (gamemode, dim_name) = world
                                     .get_player(entity_id)
-                                    .map(|player| player.gamemode)
-                                    .unwrap_or(0);
+                                    .map(|player| {
+                                        (
+                                            player.gamemode,
+                                            player.dimension.protocol_name().to_string(),
+                                        )
+                                    })
+                                    .unwrap_or((0, "minecraft:overworld".to_string()));
                                 if let Some(sender) = session_senders.get(&entity_id) {
-                                    // Use the player's real gamemode and world spawn
-                                    // (not hardcoded Creative / fixed coordinates).
+                                    // Use the player's real gamemode, dimension, and world spawn.
                                     let _ = sender.send(SessionEvent::RespawnPlayer {
-                                        dimension_type: "minecraft:overworld".to_string(),
-                                        dimension_name: "minecraft:overworld".to_string(),
+                                        dimension_type: dim_name.clone(),
+                                        dimension_name: dim_name,
                                         hashed_seed: 0,
                                         gamemode,
                                         previous_gamemode: -1,
@@ -1159,49 +1373,14 @@ fn run_tick_loop(
                                 if let Some(player) = world.get_player_mut(entity_id) {
                                     player.set_position(spawn_x, spawn_y, spawn_z);
                                 }
-                                // Re-sync chunks: reset center to spawn, unload old, load new
-                                let spawn_cx = chunk_x_from_world(spawn_x);
-                                let spawn_cz = chunk_z_from_world(spawn_z);
-                                if let Some(chunk_state) = chunk_states.get_mut(&entity_id) {
-                                    // Unload all currently loaded chunks
-                                    let old_loaded: Vec<_> =
-                                        chunk_state.loaded_chunks.iter().copied().collect();
-                                    // Reset center and loaded set to spawn
-                                    chunk_state.center_x = spawn_cx;
-                                    chunk_state.center_z = spawn_cz;
-                                    let new_desired = chunk_state.desired_chunk_set();
-                                    // Chunks to load: in new desired but not in old loaded
-                                    let new_chunks: Vec<_> = new_desired
-                                        .iter()
-                                        .filter(|pos| !chunk_state.loaded_chunks.contains(pos))
-                                        .copied()
-                                        .collect();
-                                    // Chunks to unload: in old loaded but not in new desired
-                                    let unloaded: Vec<_> = old_loaded
-                                        .iter()
-                                        .filter(|pos| !new_desired.contains(pos))
-                                        .copied()
-                                        .collect();
-                                    chunk_state.loaded_chunks = new_desired;
-                                    if let Some(sender) = session_senders.get(&entity_id) {
-                                        // Send Set Center Chunk
-                                        let _ = sender.send(SessionEvent::SetCenterChunkEvent {
-                                            chunk_x: spawn_cx,
-                                            chunk_z: spawn_cz,
-                                        });
-                                        // Unload old chunks
-                                        for chunk in unloaded {
-                                            let _ = sender.send(SessionEvent::UnloadChunk {
-                                                chunk_x: chunk.x,
-                                                chunk_z: chunk.z,
-                                            });
-                                        }
-                                        // Load new chunks
-                                        for chunk in new_chunks {
-                                            send_chunk_to_session(sender, &world, chunk.x, chunk.z);
-                                        }
-                                    }
-                                }
+                                resync_player_chunks(
+                                    &world,
+                                    &session_senders,
+                                    &mut chunk_states,
+                                    entity_id,
+                                    spawn_x,
+                                    spawn_z,
+                                );
                             }
                         }
                     }
@@ -1317,22 +1496,18 @@ fn run_tick_loop(
         // Complete breaks: set block to air and remove progress
         for (entity_id, position) in completed_breaks {
             break_progress.remove(&entity_id);
-            world.set_block(position.0, position.1, position.2, 0);
-            // Broadcast Block Update to all sessions
-            for sender in session_senders.values() {
-                let _ = sender.send(SessionEvent::BlockUpdate {
-                    position,
-                    block_state: 0,
-                });
-            }
+            let dim = world
+                .get_player(entity_id)
+                .map(|p| p.dimension)
+                .unwrap_or_default();
+            world.set_block(dim, position.0, position.1, position.2, 0);
+            broadcast_block_update(&world, &session_senders, dim, position, 0);
         }
 
         // Periodic task: autosave block overrides and player data
         if autosave_interval_ticks > 0 && tick_count - last_autosave_tick >= autosave_interval_ticks
         {
-            if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
-                eprintln!("error: autosave failed for block overrides: {}", e);
-            }
+            save_all_overrides(&level_name, &world);
             merge_online_into_saved(&world, &inventories, &mut saved_players);
             if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
                 eprintln!("error: autosave failed for player data: {}", e);
@@ -1358,9 +1533,7 @@ fn run_tick_loop(
     // Flush remaining data to disk on shutdown (covers the case where the
     // shutdown flag was set before the Shutdown message was processed).
     // The Shutdown message handler also saves, but this is a safety net.
-    if let Err(e) = crate::persist::save_overrides(&level_name, world.block_overrides()) {
-        eprintln!("error: failed to save block overrides on shutdown: {}", e);
-    }
+    save_all_overrides(&level_name, &world);
     merge_online_into_saved(&world, &inventories, &mut saved_players);
     if let Err(e) = crate::persist::save_players(&level_name, &saved_players) {
         eprintln!("error: failed to save player data on shutdown: {}", e);
@@ -1668,16 +1841,19 @@ mod tests {
         // Player 1 digs blocks within the initial chunk radius (radius 2)
         // Block at (5, 64, 5) is in chunk (0, 0), within radius 2 of center (0, 0)
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (5, 64, 5),
             block_state: 0, // air (dug)
         })?;
         // Block at (20, 64, 20) is in chunk (1, 1), within radius 2
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (20, 64, 20),
             block_state: 1, // stone (placed)
         })?;
         // Block at (100, 64, 100) is in chunk (6, 6), OUTSIDE radius 2
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (100, 64, 100),
             block_state: 2,
         })?;
@@ -2527,6 +2703,54 @@ mod tests {
     }
 
     #[test]
+    fn tick_loop_dim_command_sends_respawn() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1,
+            view_distance: 2,
+            event_sender: event_tx,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        handle.send(super::TickMessage::ChatMessage {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            message: "/dim nether".to_string(),
+        })?;
+
+        let start = Instant::now();
+        let mut got_respawn = false;
+        while start.elapsed() < Duration::from_millis(800) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::RespawnPlayer { dimension_name, .. }) => {
+                    assert_eq!(dimension_name, "minecraft:the_nether");
+                    got_respawn = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_respawn, "/dim nether should Respawn into the nether");
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn player_inventory_default_vitals() {
         let inv = PlayerInventory::new();
         assert_eq!(inv.health, DEFAULT_HEALTH);
@@ -3312,6 +3536,7 @@ mod tests {
 
         // Place a block
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (10, 64, 20),
             block_state: 1,
         })?;
@@ -3357,6 +3582,7 @@ mod tests {
 
         // Place a block
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (5, 70, -10),
             block_state: 10,
         })?;
@@ -3496,6 +3722,7 @@ mod tests {
 
         // Place a block at (0, 100, 0)
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (0, 100, 0),
             block_state: 1,
         })?;
@@ -3569,6 +3796,7 @@ mod tests {
 
         // Place a block
         handle.send(super::TickMessage::SetBlock {
+            entity_id: None,
             position: (0, 100, 0),
             block_state: 1,
         })?;

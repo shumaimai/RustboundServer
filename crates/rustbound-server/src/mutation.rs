@@ -45,6 +45,7 @@ impl WorldFacade {
     /// The tick loop will broadcast a Block Update to all connected sessions.
     pub fn set_block(&self, x: i32, y: i32, z: i32, block_state: i32) {
         let _ = self.sender.send(TickMessage::SetBlock {
+            entity_id: None,
             position: (x, y, z),
             block_state,
         });
@@ -102,6 +103,7 @@ mod tests {
         facade.set_block(1, 2, 3, 42);
         match rx.recv() {
             Ok(TickMessage::SetBlock {
+                entity_id: None,
                 position,
                 block_state,
             }) => {
@@ -169,6 +171,7 @@ mod tests {
         let facade = WorldFacade::new(tx.clone());
         let sender = facade.sender();
         let _ = sender.send(TickMessage::SetBlock {
+            entity_id: None,
             position: (0, 0, 0),
             block_state: 0,
         });
