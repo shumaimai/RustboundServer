@@ -281,12 +281,13 @@ c587232 Establish clean-room Rust workspace.
 2. ~~Offline playability (Phase J) — 参加・平坦台地可視化~~
 3. ~~**H0** — スコープ固定・`hakoniwa-size`・境界クランプ・`dist` プロファイル~~
 4. ~~**H1** — ブロック衝突~~
-5. **H2–H6** — マップパック、次元、簡易 Mob、静的液体、極限サイズ
-6. Online mode (#60) / 実 mod 登録 — 任意・後回し可
+5. ~~**H2** — マップパック形式＋3サイズ現世箱庭~~
+6. **H3–H6** — 次元、簡易 Mob、静的液体、極限サイズ
+7. Online mode (#60) / 実 mod 登録 — 任意・後回し可
 
 無限地形生成・Forge 互換・統合版プロトコルは目標外。
 
 ---
 
-*最終更新: 箱庭計画 H1*
+*最終更新: 箱庭計画 H2*
 *テスト数: workspace 緑想定*
