@@ -100,20 +100,46 @@ pub struct World {
     /// Block state overrides from dig/place, keyed by absolute position.
     /// Block state 0 = air.
     block_overrides: HashMap<(i32, i32, i32), i32>,
+    /// Map-pack decorations (not persisted in `blocks.bin`).
+    pack_blocks: HashMap<(i32, i32, i32), i32>,
+    /// Active garden bounds (void outside).
+    garden: crate::hakoniwa::GardenSpec,
 }
 
 impl World {
-    /// Creates a new empty world with a default spawn point.
+    /// Creates a new empty world with a default spawn point and tiny garden.
     pub fn new() -> Self {
+        Self::with_garden(crate::hakoniwa::GardenSpec::default())
+    }
+
+    /// Creates a world bound to a hakoniwa garden.
+    pub fn with_garden(garden: crate::hakoniwa::GardenSpec) -> Self {
         Self {
             chunks: HashMap::new(),
             players: HashMap::new(),
             next_entity_id: 1,
-            spawn_x: 0.0,
-            spawn_y: 64.0,
-            spawn_z: 0.0,
+            spawn_x: 0.5,
+            spawn_y: garden.surface_y,
+            spawn_z: 0.5,
             block_overrides: HashMap::new(),
+            pack_blocks: HashMap::new(),
+            garden,
         }
+    }
+
+    /// Returns the active garden specification.
+    pub fn garden(&self) -> &crate::hakoniwa::GardenSpec {
+        &self.garden
+    }
+
+    /// Loads map-pack decoration blocks (replaces any previous pack layer).
+    pub fn load_pack_blocks(&mut self, blocks: HashMap<(i32, i32, i32), i32>) {
+        self.pack_blocks = blocks;
+    }
+
+    /// Returns a reference to pack decoration blocks.
+    pub fn pack_blocks(&self) -> &HashMap<(i32, i32, i32), i32> {
+        &self.pack_blocks
     }
 
     /// Allocates the next entity ID.
@@ -217,13 +243,20 @@ impl World {
 
     /// Gets the block state at the given absolute position.
     ///
-    /// Prefers dig/place overrides; otherwise returns the generated flat
-    /// plateau (stone for y in [-64, 63], air above/below).
+    /// Resolution order: dig/place override → map-pack decoration →
+    /// generated flat plateau inside the garden → air (outside / above).
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> i32 {
-        self.block_overrides
-            .get(&(x, y, z))
-            .copied()
-            .unwrap_or_else(|| crate::chunk::generated_flat_block(x, y, z))
+        if let Some(&state) = self.block_overrides.get(&(x, y, z)) {
+            return state;
+        }
+        if let Some(&state) = self.pack_blocks.get(&(x, y, z)) {
+            return state;
+        }
+        if self.garden.contains_block(x, z) {
+            crate::chunk::generated_flat_block(x, y, z)
+        } else {
+            crate::chunk::AIR_BLOCK_STATE
+        }
     }
 
     /// Returns the number of block overrides.
@@ -241,11 +274,7 @@ impl World {
         self.block_overrides = overrides;
     }
 
-    /// Returns all block overrides within the given chunk's coordinate range.
-    ///
-    /// A chunk at `(chunk_x, chunk_z)` covers blocks `x in [chunk_x*16, chunk_x*16+15]`
-    /// and `z in [chunk_z*16, chunk_z*16+15]`, with `y` ranging from -64 to 319.
-    /// Returns a vector of `((x, y, z), block_state)` pairs.
+    /// Returns dig/place overrides within the given chunk's coordinate range.
     pub fn get_block_overrides_for_chunk(
         &self,
         chunk_x: i32,
@@ -260,6 +289,33 @@ impl World {
             .filter(|((x, _, z), _)| *x >= x_min && *x <= x_max && *z >= z_min && *z <= z_max)
             .map(|(&pos, &state)| (pos, state))
             .collect()
+    }
+
+    /// Returns all non-generated blocks the client must learn about in a chunk
+    /// (map-pack decorations plus dig/place overrides). Dig/place wins on ties.
+    pub fn get_client_block_deltas_for_chunk(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Vec<((i32, i32, i32), i32)> {
+        let x_min = chunk_x * 16;
+        let x_max = x_min + 15;
+        let z_min = chunk_z * 16;
+        let z_max = z_min + 15;
+        let in_chunk = |x: i32, z: i32| x >= x_min && x <= x_max && z >= z_min && z <= z_max;
+
+        let mut merged: HashMap<(i32, i32, i32), i32> = HashMap::new();
+        for (&pos, &state) in &self.pack_blocks {
+            if in_chunk(pos.0, pos.2) {
+                merged.insert(pos, state);
+            }
+        }
+        for (&pos, &state) in &self.block_overrides {
+            if in_chunk(pos.0, pos.2) {
+                merged.insert(pos, state);
+            }
+        }
+        merged.into_iter().collect()
     }
 }
 
@@ -342,7 +398,7 @@ mod tests {
         let world = World::new();
         assert_eq!(world.loaded_chunk_count(), 0);
         assert_eq!(world.player_count(), 0);
-        assert_eq!(world.spawn_point(), (0.0, 64.0, 0.0));
+        assert_eq!(world.spawn_point(), (0.5, 64.0, 0.5));
     }
 
     #[test]

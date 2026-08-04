@@ -16,4 +16,5 @@ connection-timeout=30
 keep-alive-timeout=30
 autosave-interval=300
 # Fixed garden size: tiny | small | medium
+# Built-in overworld pack is used unless world/packs/{size}.rbpk exists
 hakoniwa-size=tiny

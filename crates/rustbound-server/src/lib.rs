@@ -9,6 +9,7 @@ pub mod config;
 pub mod connection;
 pub mod hakoniwa;
 pub mod listener;
+pub mod map_pack;
 pub mod mod_api;
 pub mod mutation;
 pub mod offline_uuid;

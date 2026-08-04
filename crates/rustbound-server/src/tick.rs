@@ -588,6 +588,15 @@ pub fn start_tick_loop(
     ))
 }
 
+/// Sends LoadChunk plus any pack/dig block deltas the client must apply.
+fn send_chunk_to_session(sender: &Sender<SessionEvent>, world: &World, chunk_x: i32, chunk_z: i32) {
+    let _ = sender.send(SessionEvent::LoadChunk { chunk_x, chunk_z });
+    let deltas = world.get_client_block_deltas_for_chunk(chunk_x, chunk_z);
+    if !deltas.is_empty() {
+        let _ = sender.send(SessionEvent::ChunkBlockOverrides { overrides: deltas });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_tick_loop(
     msg_rx: Receiver<TickMessage>,
@@ -599,11 +608,14 @@ fn run_tick_loop(
     garden: crate::hakoniwa::GardenSpec,
     mod_host: ModHost,
 ) {
-    // Load block overrides and player data from disk on startup
+    // Load dig/place overrides, then apply the hakoniwa map pack layer.
     let loaded = crate::persist::load_overrides(&level_name);
     let mut saved_players = crate::persist::load_players(&level_name);
-    let mut world = World::new();
+    let pack = crate::map_pack::resolve_pack(&level_name, garden.size);
+    let mut world = World::with_garden(pack.garden.clone());
     world.load_block_overrides(loaded);
+    world.load_pack_blocks(pack.blocks);
+    let garden = world.garden().clone();
     let garden_chunk_radius = garden.size.chunk_radius();
     // Autosave interval in ticks (20 TPS). 0 means disabled.
     let autosave_interval_ticks: u64 = autosave_interval_secs.saturating_mul(20);
@@ -757,15 +769,13 @@ fn run_tick_loop(
                         }
                     }
 
-                    // Send block overrides for the initial chunk area so the
-                    // new player sees dug/placed blocks in their initial chunks.
-                    // The initial chunk radius is 2 (see session::send_initial_chunks).
+                    // Send pack decorations + dig/place for the initial chunk area.
                     let initial_radius = 2;
                     let mut new_player_overrides: Vec<((i32, i32, i32), i32)> = Vec::new();
                     for cx in -initial_radius..=initial_radius {
                         for cz in -initial_radius..=initial_radius {
                             new_player_overrides
-                                .extend(world.get_block_overrides_for_chunk(cx, cz));
+                                .extend(world.get_client_block_deltas_for_chunk(cx, cz));
                         }
                     }
                     if !new_player_overrides.is_empty() {
@@ -898,10 +908,7 @@ fn run_tick_loop(
                                         });
                                     }
                                     for chunk in new_chunks {
-                                        let _ = sender.send(SessionEvent::LoadChunk {
-                                            chunk_x: chunk.x,
-                                            chunk_z: chunk.z,
-                                        });
+                                        send_chunk_to_session(sender, &world, chunk.x, chunk.z);
                                     }
                                     for chunk in unloaded_chunks {
                                         let _ = sender.send(SessionEvent::UnloadChunk {
@@ -975,10 +982,7 @@ fn run_tick_loop(
                             chunk_state.update_view_distance(view_distance);
                         if let Some(sender) = session_senders.get(&entity_id) {
                             for chunk in new_chunks {
-                                let _ = sender.send(SessionEvent::LoadChunk {
-                                    chunk_x: chunk.x,
-                                    chunk_z: chunk.z,
-                                });
+                                send_chunk_to_session(sender, &world, chunk.x, chunk.z);
                             }
                             for chunk in unloaded_chunks {
                                 let _ = sender.send(SessionEvent::UnloadChunk {
@@ -1194,10 +1198,7 @@ fn run_tick_loop(
                                         }
                                         // Load new chunks
                                         for chunk in new_chunks {
-                                            let _ = sender.send(SessionEvent::LoadChunk {
-                                                chunk_x: chunk.x,
-                                                chunk_z: chunk.z,
-                                            });
+                                            send_chunk_to_session(sender, &world, chunk.x, chunk.z);
                                         }
                                     }
                                 }
@@ -1721,6 +1722,11 @@ mod tests {
                         !has_100_100,
                         "should NOT include override at (100, 64, 100) - outside radius"
                     );
+                    // Pack decorations are also included; dig/place entries must be present.
+                    assert!(
+                        overrides.len() >= 2,
+                        "should include dig/place overrides plus any pack deltas"
+                    );
                     break;
                 }
                 Ok(_) => {}
@@ -1731,17 +1737,14 @@ mod tests {
             got_overrides,
             "player 2 should have received ChunkBlockOverrides event"
         );
-        assert_eq!(
-            override_count, 2,
-            "should have exactly 2 overrides in range"
-        );
+        let _ = override_count;
 
         handle.shutdown();
         Ok(())
     }
 
     #[test]
-    fn tick_loop_no_overrides_event_when_world_clean() -> Result<(), Box<dyn std::error::Error>> {
+    fn tick_loop_sends_pack_deltas_on_join() -> Result<(), Box<dyn std::error::Error>> {
         let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1751,7 +1754,6 @@ mod tests {
             Vec::new(),
         )?;
 
-        // Player joins a clean world (no overrides)
         let (event_tx, event_rx) = channel::<SessionEvent>();
         handle.send(super::TickMessage::PlayerJoined {
             entity_id: 1,
@@ -1762,21 +1764,22 @@ mod tests {
             event_sender: event_tx,
         })?;
 
-        // Collect events - should NOT receive ChunkBlockOverrides
         let start = Instant::now();
         let mut got_chunk_overrides = false;
-        while start.elapsed() < Duration::from_millis(200) {
+        let mut override_count = 0usize;
+        while start.elapsed() < Duration::from_millis(300) {
             match event_rx.try_recv() {
-                Ok(SessionEvent::ChunkBlockOverrides { .. }) => {
+                Ok(SessionEvent::ChunkBlockOverrides { overrides }) => {
                     got_chunk_overrides = true;
+                    override_count += overrides.len();
                 }
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
         }
         assert!(
-            !got_chunk_overrides,
-            "should not receive ChunkBlockOverrides when world has no overrides"
+            got_chunk_overrides && override_count > 0,
+            "built-in map pack should send decoration deltas on join"
         );
 
         handle.shutdown();
@@ -1846,7 +1849,7 @@ mod tests {
                     ..
                 }) => {
                     assert_eq!(entity_id, 1, "should be player 1's movement");
-                    assert_eq!(old_x, 0.0);
+                    assert!((old_x - 0.5).abs() < f64::EPSILON);
                     assert_eq!(new_x, 1.0);
                     assert_eq!(new_yaw, 90.0);
                     got_movement = true;
@@ -1916,12 +1919,12 @@ mod tests {
         while event_rx1.try_recv().is_ok() {}
         while event_rx2.try_recv().is_ok() {}
 
-        // Player 1 sends the SAME position (spawn point 0, 64, 0)
+        // Player 1 sends the SAME position as spawn (0.5, 64, 0.5)
         handle.send(super::TickMessage::PlayerPositionUpdate {
             entity_id: 1,
-            x: 0.0,
+            x: 0.5,
             y: 64.0,
-            z: 0.0,
+            z: 0.5,
             yaw: 0.0,
             pitch: 0.0,
             on_ground: true,
@@ -2913,9 +2916,9 @@ mod tests {
             match event_rx.try_recv() {
                 Ok(SessionEvent::RespawnPlayer { x, y, z, .. }) => {
                     got_respawn = true;
-                    assert_eq!(x, 0.0);
+                    assert!((x - 0.5).abs() < f64::EPSILON);
                     assert_eq!(y, 64.0);
-                    assert_eq!(z, 0.0);
+                    assert!((z - 0.5).abs() < f64::EPSILON);
                 }
                 Ok(SessionEvent::SetHealth { health, .. }) => {
                     if health > 0.0 {

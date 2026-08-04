@@ -125,6 +125,14 @@ impl GardenSpec {
         chunk_x >= -r && chunk_x <= r && chunk_z >= -r && chunk_z <= r
     }
 
+    /// Returns true if the block column (x, z) lies inside the garden border.
+    pub fn contains_block(&self, x: i32, z: i32) -> bool {
+        x >= self.min_block_x
+            && x <= self.max_block_x
+            && z >= self.min_block_z
+            && z <= self.max_block_z
+    }
+
     /// Clamps X/Z into the garden. Y is unchanged (void / fall handled elsewhere).
     pub fn clamp_horizontal(&self, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
         let min_x = f64::from(self.min_block_x) + 0.5;

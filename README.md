@@ -20,7 +20,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 | Flat plateau chunks + dig/place | Working |
 | Hakoniwa size + world border clamp | **Done (H0)** |
 | Block collision | **Done (H1)** |
-| Map packs / 3 sizes of real content | H2 |
+| Map packs / 3 sizes of overworld gardens | **Done (H2)** |
 | Nether / End | H3 |
 | Simple mobs | H4 |
 | Static liquids | H5 |
