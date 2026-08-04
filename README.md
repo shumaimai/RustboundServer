@@ -12,7 +12,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 
 ## Status
 
-**Hakoniwa Phase H0** on the path to a finished garden. Offline join + flat plateau work; garden border + size config ship in H0.
+**Hakoniwa Phase H6** — fixed gardens with dimensions, mobs, fluids, and chests.
 
 | Layer | Status |
 |-------|--------|
@@ -21,9 +21,10 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 | Hakoniwa size + world border clamp | **Done (H0)** |
 | Block collision | **Done (H1)** |
 | Map packs / 3 sizes of overworld gardens | **Done (H2)** |
-| Nether / End | H3 |
-| Simple mobs | H4 |
-| Static liquids | H5 |
+| Nether / End (portals + `/dim`) | **Done (H3)** |
+| Simple mobs (wander + light hostility) | **Done (H4)** |
+| Static liquids (swim damp + lava damage) | **Done (H5)** |
+| Containers + bundled packs + size polish | **Done (H6)** |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) (optional) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Façade + ModHost wired |
@@ -83,7 +84,7 @@ cargo fmt --check
 |-------|--------|--------|
 | M1–M4 + A–I | Foundations → offline play stubs | **Done** |
 | **J** | Offline join verification | Done / ongoing polish |
-| **H0–H6** | Hakoniwa garden completion + miniaturization | **H0 in progress** |
+| **H0–H6** | Hakoniwa garden completion + miniaturization | **H6 done** |
 | Later | Online mode (#60), richer Mod API | Optional |
 
 **Not a goal:** drop-in Java Forge mod compatibility, Bedrock/統合版 protocol, or infinite vanilla terrain.

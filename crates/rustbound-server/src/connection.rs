@@ -184,6 +184,8 @@ pub struct ConnectionConfig {
     pub motd: String,
     /// Keep Alive timeout: clients that don't respond within this duration are kicked.
     pub keep_alive_timeout: Duration,
+    /// Enabled hakoniwa dimensions for Join Game.
+    pub enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 /// Handles a single TCP connection through the full protocol lifecycle.
@@ -320,6 +322,7 @@ pub fn handle_connection(
                                             simulation_distance: config.simulation_distance,
                                             max_players: config.max_players,
                                             keep_alive_timeout: config.keep_alive_timeout,
+                                            enabled_dimensions: config.enabled_dimensions,
                                         },
                                         config.entity_id_allocator.allocate(),
                                         config.tick_sender.clone(),
@@ -601,6 +604,7 @@ mod tests {
             simulation_distance: 10,
             motd: "Test Server".to_string(),
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         }
     }
 

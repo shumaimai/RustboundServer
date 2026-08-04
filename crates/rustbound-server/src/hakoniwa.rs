@@ -3,6 +3,63 @@
 //! See `docs/hakoniwa.md` for the product definition. This module owns size
 //! presets, dimension flags, and world-border helpers.
 
+/// Playable dimension for hakoniwa packs (protocol 763 identifiers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DimensionId {
+    /// `minecraft:overworld`
+    #[default]
+    Overworld,
+    /// `minecraft:the_nether`
+    Nether,
+    /// `minecraft:the_end`
+    End,
+}
+
+impl DimensionId {
+    /// Protocol dimension / dimension-type identifier.
+    pub fn protocol_name(self) -> &'static str {
+        match self {
+            Self::Overworld => "minecraft:overworld",
+            Self::Nether => "minecraft:the_nether",
+            Self::End => "minecraft:the_end",
+        }
+    }
+
+    /// Short config / chat name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Overworld => "overworld",
+            Self::Nether => "nether",
+            Self::End => "end",
+        }
+    }
+
+    /// Parses `overworld` / `nether` / `end` (and common aliases).
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "overworld" | "ow" | "world" => Some(Self::Overworld),
+            "nether" | "hell" => Some(Self::Nether),
+            "end" | "the_end" | "the-end" => Some(Self::End),
+            _ => None,
+        }
+    }
+
+    /// All dimensions in join order.
+    pub fn all() -> [Self; 3] {
+        [Self::Overworld, Self::Nether, Self::End]
+    }
+
+    /// Parses a protocol dimension identifier (`minecraft:…`).
+    pub fn parse_protocol(name: &str) -> Option<Self> {
+        match name {
+            "minecraft:overworld" => Some(Self::Overworld),
+            "minecraft:the_nether" => Some(Self::Nether),
+            "minecraft:the_end" => Some(Self::End),
+            _ => None,
+        }
+    }
+}
+
 /// Preset garden sizes (chunk radius from spawn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MapSize {
@@ -65,9 +122,29 @@ impl Default for DimensionSet {
     fn default() -> Self {
         Self {
             overworld: true,
-            nether: false,
-            end: false,
+            nether: true,
+            end: true,
         }
+    }
+}
+
+impl DimensionSet {
+    /// Returns whether `dim` is enabled.
+    pub fn contains(self, dim: DimensionId) -> bool {
+        match dim {
+            DimensionId::Overworld => self.overworld,
+            DimensionId::Nether => self.nether,
+            DimensionId::End => self.end,
+        }
+    }
+
+    /// Protocol names for Join Game's dimension list (enabled only).
+    pub fn protocol_names(self) -> Vec<String> {
+        DimensionId::all()
+            .into_iter()
+            .filter(|&d| self.contains(d))
+            .map(|d| d.protocol_name().to_string())
+            .collect()
     }
 }
 

@@ -61,9 +61,13 @@ impl Server {
     /// Starts the server with the given configuration.
     pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
         let player_count = Arc::new(AtomicUsize::new(0));
-        let garden = crate::hakoniwa::GardenSpec::from_size(config.hakoniwa_size);
+        let mut garden = crate::hakoniwa::GardenSpec::from_size(config.hakoniwa_size);
+        garden.dimensions.nether = config.allow_nether;
+        // End is always available in H3 (builtin end pack).
+        garden.dimensions.end = true;
         let view_distance = config.view_distance.min(garden.recommended_view_distance());
         let simulation_distance = config.simulation_distance.min(view_distance);
+        let enabled_dimensions = garden.dimensions;
         let (tick_handle, _event_rx) = start_tick_loop(
             player_count.clone(),
             config.level_name.clone(),
@@ -89,6 +93,7 @@ impl Server {
             simulation_distance,
             motd: config.motd.clone(),
             keep_alive_timeout: Duration::from_secs(config.keep_alive_timeout_secs),
+            enabled_dimensions,
         });
 
         let listener_config = ListenerConfig {

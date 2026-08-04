@@ -29,8 +29,8 @@ Rustbound の製品着地定義。バニラ同等の無限生成・完全 AI は
 | `small` | 8 | 17×17 | 272 |
 | `medium` | 16 | 33×33 | 528 |
 
-各サイズについて、将来は **overworld / nether / end** のデータを用意する。  
-Phase H2 では overworld の組み込みマップパック（装飾付き箱庭）＋ `.rbpk` 読み込み。
+各サイズについて **overworld / nether / end** の組み込みパックを同梱する。  
+外部 `.rbpk` がある場合はそれを優先（`packs/{size}.rbpk`, `packs/{size}-nether.rbpk`, `packs/{size}-end.rbpk`）。
 
 ## フェーズ
 
@@ -39,26 +39,31 @@ Phase H2 では overworld の組み込みマップパック（装飾付き箱庭
 | **H0** | スコープ固定、`hakoniwa-size`、境界クランプ、配布サイズプロファイル | **Done** |
 | **H1** | サーバ側ブロック衝突（足元・天井・壁の簡易） | **Done** |
 | **H2** | マップパック形式＋3サイズの現世箱庭 | **Done** |
-| **H3** | ネザー／エンド切替 | 予定 |
-| **H4** | Mob 簡易（出現・ふらつき → 数種敵対） | 予定 |
-| **H5** | 液体静的（泳げる／溶岩ダメージ簡易） | 予定 |
-| **H6** | チェスト等コンテナ最低限、同梱データセット、極限サイズ磨き | 予定 |
+| **H3** | ネザー／エンド切替 | **Done** |
+| **H4** | Mob 簡易（出現・ふらつき → 数種敵対） | **Done** |
+| **H5** | 液体静的（泳げる／溶岩ダメージ簡易） | **Done** |
+| **H6** | チェスト等コンテナ最低限、同梱データセット、極限サイズ磨き | **Done** |
 
 ## マップパック
 
-- 形式: `{level}/packs/{tiny|small|medium}.rbpk`（無い場合は組み込み）
+- 形式: `{level}/packs/{tiny|small|medium}[-nether|-end].rbpk`（無い場合は組み込み）
 - マジック `RBPK`、装飾ブロックの疎なリスト（掘る/置くの `blocks.bin` とは別レイヤ）
-- 組み込み: 芝生広場・境界壁・サイズ別ランドマーク（ダイヤ／エメラルド／石炭ブロック）
+- 組み込み: 芝生広場・境界壁・サイズ別ランドマーク、次元ポータルパッド
+- ポータル: 現世で glowstone（西）→ ネザー、end stone（東）→ エンド。帰還パッドは各次元の西。チャット `/dim <overworld|nether|end>` でも切替。
+- Mob (H4): 現世にブタ／ウシ（ふらつき）とゾンビ（追尾・接触ダメージ）、ネザーにゾンビ化ピグリン、エンドにエンダーマン。殴って倒せる。
+- 液体 (H5): 流動なしの水源／溶岩源。水中は沈降減衰＋軽い浮力。溶岩は定期ダメージ（Creative／Spectator は免除）。現世に水たまり、ネザーに溶岩プール。
+- コンテナ (H6): 現世スポーン北のチェストを右クリックで `generic_9x3` を開く。クリックはクライアント報告を信頼して反映。内容は `{level}/chests.bin` に永続化。同梱マップは `data/hakoniwa/packs/*.rbpk`（level 配下があれば優先）。
 
 ## 小型化
 
 | ビルド | 目安 |
 |--------|------|
 | `cargo build -p rustbound-server --release` | ~1 MB 前後 |
-| `cargo build -p rustbound-server --profile dist` | ~0.6 MB 前後（strip + LTO + `opt-level=z`） |
+| `cargo build -p rustbound-server --profile dist` | ~0.7 MB 前後（strip + LTO + `opt-level=z`） |
+| `data/hakoniwa/packs/`（全サイズ×3次元） | ~0.4 MB |
 
 サーバ実行ファイルは既に小さい。配布物の主サイズは **同梱マップ**になる。  
-マップは「入れた分だけ」：未同梱次元は無効。
+マップは「入れた分だけ」：未同梱次元は無効。再生成は `cargo run -p rustbound-server --example write_packs`。
 
 ## 設定
 
@@ -66,9 +71,10 @@ Phase H2 では overworld の組み込みマップパック（装飾付き箱庭
 
 ```properties
 hakoniwa-size=tiny
+allow-nether=true
 ```
 
-`tiny` / `small` / `medium`。省略時は `tiny`。
+`tiny` / `small` / `medium`。省略時は `tiny`。`allow-nether=false` でネザーを無効化。
 
 ## クリーンルーム
 

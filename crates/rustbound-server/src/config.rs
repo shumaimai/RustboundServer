@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 /// **Intentionally unused (parsed but not enforced):**
 /// - `white_list`: Whitelist enforcement is not implemented
 /// - `pvp`: PvP damage rules not implemented
-/// - `allow_nether`: deferred until hakoniwa H3 dimension packs
+/// - `allow_nether`: when false, nether portal/`/dim nether` are disabled (H3)
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The host to bind to.

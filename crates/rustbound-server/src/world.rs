@@ -54,10 +54,10 @@ impl Chunk {
     }
 
     /// Creates a new generated chunk at the given position using the flat
-    /// world generator.
-    pub fn generate(pos: ChunkPos) -> Self {
+    /// plateau for `dimension`.
+    pub fn generate(pos: ChunkPos, dimension: crate::hakoniwa::DimensionId) -> Self {
         let (heightmaps, data, block_entities, light_data) =
-            crate::chunk::generate_chunk(pos.x, pos.z);
+            crate::chunk::generate_chunk(pos.x, pos.z, dimension);
         Self {
             pos,
             generated: true,
@@ -97,13 +97,14 @@ pub struct World {
     spawn_x: f64,
     spawn_y: f64,
     spawn_z: f64,
-    /// Block state overrides from dig/place, keyed by absolute position.
-    /// Block state 0 = air.
-    block_overrides: HashMap<(i32, i32, i32), i32>,
-    /// Map-pack decorations (not persisted in `blocks.bin`).
-    pack_blocks: HashMap<(i32, i32, i32), i32>,
+    /// Dig/place overrides per dimension (persisted separately).
+    overrides_by_dim: HashMap<crate::hakoniwa::DimensionId, HashMap<(i32, i32, i32), i32>>,
+    /// Map-pack decorations per dimension (not persisted).
+    pack_by_dim: HashMap<crate::hakoniwa::DimensionId, HashMap<(i32, i32, i32), i32>>,
     /// Active garden bounds (void outside).
     garden: crate::hakoniwa::GardenSpec,
+    /// Which dimensions are playable.
+    enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 impl World {
@@ -114,6 +115,12 @@ impl World {
 
     /// Creates a world bound to a hakoniwa garden.
     pub fn with_garden(garden: crate::hakoniwa::GardenSpec) -> Self {
+        let mut overrides_by_dim = HashMap::new();
+        let mut pack_by_dim = HashMap::new();
+        for dim in crate::hakoniwa::DimensionId::all() {
+            overrides_by_dim.insert(dim, HashMap::new());
+            pack_by_dim.insert(dim, HashMap::new());
+        }
         Self {
             chunks: HashMap::new(),
             players: HashMap::new(),
@@ -121,8 +128,9 @@ impl World {
             spawn_x: 0.5,
             spawn_y: garden.surface_y,
             spawn_z: 0.5,
-            block_overrides: HashMap::new(),
-            pack_blocks: HashMap::new(),
+            overrides_by_dim,
+            pack_by_dim,
+            enabled_dimensions: garden.dimensions,
             garden,
         }
     }
@@ -132,14 +140,45 @@ impl World {
         &self.garden
     }
 
-    /// Loads map-pack decoration blocks (replaces any previous pack layer).
-    pub fn load_pack_blocks(&mut self, blocks: HashMap<(i32, i32, i32), i32>) {
-        self.pack_blocks = blocks;
+    /// Returns enabled dimensions.
+    pub fn enabled_dimensions(&self) -> crate::hakoniwa::DimensionSet {
+        self.enabled_dimensions
     }
 
-    /// Returns a reference to pack decoration blocks.
-    pub fn pack_blocks(&self) -> &HashMap<(i32, i32, i32), i32> {
-        &self.pack_blocks
+    /// Sets which dimensions can be entered.
+    pub fn set_enabled_dimensions(&mut self, dims: crate::hakoniwa::DimensionSet) {
+        self.enabled_dimensions = dims;
+        self.garden.dimensions = dims;
+    }
+
+    /// Loads map-pack decoration blocks for one dimension.
+    pub fn load_pack_blocks_for(
+        &mut self,
+        dimension: crate::hakoniwa::DimensionId,
+        blocks: HashMap<(i32, i32, i32), i32>,
+    ) {
+        self.pack_by_dim.insert(dimension, blocks);
+    }
+
+    /// Loads dig/place overrides for one dimension.
+    pub fn load_block_overrides_for(
+        &mut self,
+        dimension: crate::hakoniwa::DimensionId,
+        overrides: HashMap<(i32, i32, i32), i32>,
+    ) {
+        self.overrides_by_dim.insert(dimension, overrides);
+    }
+
+    /// Returns dig/place overrides for a dimension.
+    pub fn block_overrides_for(
+        &self,
+        dimension: crate::hakoniwa::DimensionId,
+    ) -> &HashMap<(i32, i32, i32), i32> {
+        static EMPTY: std::sync::OnceLock<HashMap<(i32, i32, i32), i32>> =
+            std::sync::OnceLock::new();
+        self.overrides_by_dim
+            .get(&dimension)
+            .unwrap_or_else(|| EMPTY.get_or_init(HashMap::new))
     }
 
     /// Allocates the next entity ID.
@@ -161,9 +200,9 @@ impl World {
         self.spawn_z = z;
     }
 
-    /// Loads a chunk at the given position, generating its data.
-    pub fn load_chunk(&mut self, pos: ChunkPos) {
-        self.chunks.insert(pos, Chunk::generate(pos));
+    /// Loads a chunk at the given position, generating its data for `dimension`.
+    pub fn load_chunk(&mut self, pos: ChunkPos, dimension: crate::hakoniwa::DimensionId) {
+        self.chunks.insert(pos, Chunk::generate(pos, dimension));
     }
 
     /// Unloads a chunk at the given position.
@@ -232,51 +271,68 @@ impl World {
         self.players.get_mut(&entity_id)
     }
 
-    /// Sets a block at the given absolute position to the given block state.
-    ///
-    /// This stores an override in the world's block override map. The chunk
-    /// data blob itself is not modified (it remains the generated snapshot).
-    /// Block state 0 = air.
-    pub fn set_block(&mut self, x: i32, y: i32, z: i32, block_state: i32) {
-        self.block_overrides.insert((x, y, z), block_state);
+    /// Sets a block override in `dimension` (0 = air).
+    pub fn set_block(
+        &mut self,
+        dimension: crate::hakoniwa::DimensionId,
+        x: i32,
+        y: i32,
+        z: i32,
+        block_state: i32,
+    ) {
+        self.overrides_by_dim
+            .entry(dimension)
+            .or_default()
+            .insert((x, y, z), block_state);
     }
 
-    /// Gets the block state at the given absolute position.
+    /// Gets the block state in `dimension`.
     ///
     /// Resolution order: dig/place override → map-pack decoration →
-    /// generated flat plateau inside the garden → air (outside / above).
-    pub fn get_block(&self, x: i32, y: i32, z: i32) -> i32 {
-        if let Some(&state) = self.block_overrides.get(&(x, y, z)) {
-            return state;
+    /// generated plateau inside the garden → air.
+    pub fn get_block(
+        &self,
+        dimension: crate::hakoniwa::DimensionId,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> i32 {
+        if let Some(map) = self.overrides_by_dim.get(&dimension) {
+            if let Some(&state) = map.get(&(x, y, z)) {
+                return state;
+            }
         }
-        if let Some(&state) = self.pack_blocks.get(&(x, y, z)) {
-            return state;
+        if let Some(map) = self.pack_by_dim.get(&dimension) {
+            if let Some(&state) = map.get(&(x, y, z)) {
+                return state;
+            }
         }
         if self.garden.contains_block(x, z) {
-            crate::chunk::generated_flat_block(x, y, z)
+            crate::chunk::generated_flat_block(dimension, x, y, z)
         } else {
             crate::chunk::AIR_BLOCK_STATE
         }
     }
 
-    /// Returns the number of block overrides.
+    /// Returns the number of dig/place overrides across all dimensions.
     pub fn block_override_count(&self) -> usize {
-        self.block_overrides.len()
+        self.overrides_by_dim.values().map(|m| m.len()).sum()
     }
 
-    /// Returns a reference to all block overrides.
+    /// Returns dig/place overrides for overworld (legacy helper for tests).
     pub fn block_overrides(&self) -> &HashMap<(i32, i32, i32), i32> {
-        &self.block_overrides
+        self.block_overrides_for(crate::hakoniwa::DimensionId::Overworld)
     }
 
-    /// Loads block overrides from a map (e.g. from disk).
+    /// Loads overworld dig/place overrides (legacy helper).
     pub fn load_block_overrides(&mut self, overrides: HashMap<(i32, i32, i32), i32>) {
-        self.block_overrides = overrides;
+        self.load_block_overrides_for(crate::hakoniwa::DimensionId::Overworld, overrides);
     }
 
-    /// Returns dig/place overrides within the given chunk's coordinate range.
+    /// Returns dig/place overrides within a chunk for `dimension`.
     pub fn get_block_overrides_for_chunk(
         &self,
+        dimension: crate::hakoniwa::DimensionId,
         chunk_x: i32,
         chunk_z: i32,
     ) -> Vec<((i32, i32, i32), i32)> {
@@ -284,17 +340,19 @@ impl World {
         let x_max = x_min + 15;
         let z_min = chunk_z * 16;
         let z_max = z_min + 15;
-        self.block_overrides
-            .iter()
+        self.overrides_by_dim
+            .get(&dimension)
+            .into_iter()
+            .flat_map(|m| m.iter())
             .filter(|((x, _, z), _)| *x >= x_min && *x <= x_max && *z >= z_min && *z <= z_max)
             .map(|(&pos, &state)| (pos, state))
             .collect()
     }
 
-    /// Returns all non-generated blocks the client must learn about in a chunk
-    /// (map-pack decorations plus dig/place overrides). Dig/place wins on ties.
+    /// Pack + dig/place deltas for a chunk in `dimension`.
     pub fn get_client_block_deltas_for_chunk(
         &self,
+        dimension: crate::hakoniwa::DimensionId,
         chunk_x: i32,
         chunk_z: i32,
     ) -> Vec<((i32, i32, i32), i32)> {
@@ -305,14 +363,18 @@ impl World {
         let in_chunk = |x: i32, z: i32| x >= x_min && x <= x_max && z >= z_min && z <= z_max;
 
         let mut merged: HashMap<(i32, i32, i32), i32> = HashMap::new();
-        for (&pos, &state) in &self.pack_blocks {
-            if in_chunk(pos.0, pos.2) {
-                merged.insert(pos, state);
+        if let Some(pack) = self.pack_by_dim.get(&dimension) {
+            for (&pos, &state) in pack {
+                if in_chunk(pos.0, pos.2) {
+                    merged.insert(pos, state);
+                }
             }
         }
-        for (&pos, &state) in &self.block_overrides {
-            if in_chunk(pos.0, pos.2) {
-                merged.insert(pos, state);
+        if let Some(over) = self.overrides_by_dim.get(&dimension) {
+            for (&pos, &state) in over {
+                if in_chunk(pos.0, pos.2) {
+                    merged.insert(pos, state);
+                }
             }
         }
         merged.into_iter().collect()
@@ -346,6 +408,8 @@ pub struct PlayerHandle {
     pub pitch: f32,
     /// The player's gamemode (0=Survival, 1=Creative, 2=Adventure, 3=Spectator).
     pub gamemode: u8,
+    /// Current hakoniwa dimension.
+    pub dimension: crate::hakoniwa::DimensionId,
 }
 
 impl PlayerHandle {
@@ -361,6 +425,7 @@ impl PlayerHandle {
             yaw: 0.0,
             pitch: 0.0,
             gamemode,
+            dimension: crate::hakoniwa::DimensionId::Overworld,
         }
     }
 
@@ -413,7 +478,7 @@ mod tests {
     fn world_loads_and_unloads_chunks() {
         let mut world = World::new();
         let pos = ChunkPos::new(10, -5);
-        world.load_chunk(pos);
+        world.load_chunk(pos, crate::hakoniwa::DimensionId::Overworld);
         assert!(world.is_chunk_loaded(pos));
         assert_eq!(world.loaded_chunk_count(), 1);
 
@@ -491,7 +556,7 @@ mod tests {
 
     #[test]
     fn generated_chunk_has_data() {
-        let chunk = Chunk::generate(ChunkPos::new(0, 0));
+        let chunk = Chunk::generate(ChunkPos::new(0, 0), crate::hakoniwa::DimensionId::Overworld);
         assert!(chunk.generated);
         assert!(!chunk.heightmaps.is_empty());
         assert!(!chunk.data.is_empty());
@@ -501,7 +566,7 @@ mod tests {
     fn load_chunk_generates_data() {
         let mut world = World::new();
         let pos = ChunkPos::new(5, 10);
-        world.load_chunk(pos);
+        world.load_chunk(pos, crate::hakoniwa::DimensionId::Overworld);
         match world.get_chunk(pos) {
             Some(chunk) => {
                 assert!(chunk.generated);
@@ -514,34 +579,36 @@ mod tests {
     #[test]
     fn set_and_get_block_override() {
         let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
         // Above the plateau is air
-        assert_eq!(world.get_block(10, 64, -20), 0);
+        assert_eq!(world.get_block(dim, 10, 64, -20), 0);
         // Generated stone on the plateau
-        assert_eq!(world.get_block(10, 63, -20), 1);
+        assert_eq!(world.get_block(dim, 10, 63, -20), 1);
         // Set to stone (1) above surface
-        world.set_block(10, 64, -20, 1);
-        assert_eq!(world.get_block(10, 64, -20), 1);
+        world.set_block(dim, 10, 64, -20, 1);
+        assert_eq!(world.get_block(dim, 10, 64, -20), 1);
         assert_eq!(world.block_override_count(), 1);
         // Set to air (0) - still an override
-        world.set_block(10, 64, -20, 0);
-        assert_eq!(world.get_block(10, 64, -20), 0);
+        world.set_block(dim, 10, 64, -20, 0);
+        assert_eq!(world.get_block(dim, 10, 64, -20), 0);
         assert_eq!(world.block_override_count(), 1);
         // Digging stone away leaves air via override
-        world.set_block(10, 63, -20, 0);
-        assert_eq!(world.get_block(10, 63, -20), 0);
+        world.set_block(dim, 10, 63, -20, 0);
+        assert_eq!(world.get_block(dim, 10, 63, -20), 0);
     }
 
     #[test]
     fn get_block_overrides_for_chunk_returns_only_in_range() {
         let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
         // Chunk (0, 0) covers x in [0, 15], z in [0, 15]
-        world.set_block(5, 64, 5, 1); // in chunk (0, 0)
-        world.set_block(15, 64, 15, 2); // in chunk (0, 0) (edge)
-        world.set_block(16, 64, 0, 3); // in chunk (1, 0) - out of range
-        world.set_block(0, 64, 16, 4); // in chunk (0, 1) - out of range
-        world.set_block(-1, 64, -1, 5); // in chunk (-1, -1) - out of range
+        world.set_block(dim, 5, 64, 5, 1); // in chunk (0, 0)
+        world.set_block(dim, 15, 64, 15, 2); // in chunk (0, 0) (edge)
+        world.set_block(dim, 16, 64, 0, 3); // in chunk (1, 0) - out of range
+        world.set_block(dim, 0, 64, 16, 4); // in chunk (0, 1) - out of range
+        world.set_block(dim, -1, 64, -1, 5); // in chunk (-1, -1) - out of range
 
-        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        let overrides = world.get_block_overrides_for_chunk(dim, 0, 0);
         assert_eq!(overrides.len(), 2);
         // Should contain (5, 64, 5) -> 1 and (15, 64, 15) -> 2
         let mut found_5_5 = false;
@@ -563,31 +630,47 @@ mod tests {
     #[test]
     fn get_block_overrides_for_chunk_negative_coords() {
         let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
         // Chunk (-1, -1) covers x in [-16, -1], z in [-16, -1]
-        world.set_block(-16, 64, -16, 1); // edge of chunk (-1, -1)
-        world.set_block(-1, 64, -1, 2); // edge of chunk (-1, -1)
-        world.set_block(0, 64, 0, 3); // in chunk (0, 0) - out of range
+        world.set_block(dim, -16, 64, -16, 1); // edge of chunk (-1, -1)
+        world.set_block(dim, -1, 64, -1, 2); // edge of chunk (-1, -1)
+        world.set_block(dim, 0, 64, 0, 3); // in chunk (0, 0) - out of range
 
-        let overrides = world.get_block_overrides_for_chunk(-1, -1);
+        let overrides = world.get_block_overrides_for_chunk(dim, -1, -1);
         assert_eq!(overrides.len(), 2);
     }
 
     #[test]
     fn get_block_overrides_for_empty_chunk() {
         let world = World::new();
-        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        let overrides =
+            world.get_block_overrides_for_chunk(crate::hakoniwa::DimensionId::Overworld, 0, 0);
         assert!(overrides.is_empty());
     }
 
     #[test]
     fn get_block_overrides_for_chunk_includes_all_y() {
         let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
         // Y ranges from -64 to 319 in 1.20.1; all should be included
-        world.set_block(0, -64, 0, 1);
-        world.set_block(0, 0, 0, 2);
-        world.set_block(0, 319, 0, 3);
+        world.set_block(dim, 0, -64, 0, 1);
+        world.set_block(dim, 0, 0, 0, 2);
+        world.set_block(dim, 0, 319, 0, 3);
 
-        let overrides = world.get_block_overrides_for_chunk(0, 0);
+        let overrides = world.get_block_overrides_for_chunk(dim, 0, 0);
         assert_eq!(overrides.len(), 3);
+    }
+
+    #[test]
+    fn nether_plateau_is_netherrack() {
+        let world = World::new();
+        assert_eq!(
+            world.get_block(crate::hakoniwa::DimensionId::Nether, 0, 63, 0),
+            crate::chunk::NETHERRACK_BLOCK_STATE
+        );
+        assert_eq!(
+            world.get_block(crate::hakoniwa::DimensionId::End, 0, 63, 0),
+            crate::chunk::END_STONE_BLOCK_STATE
+        );
     }
 }

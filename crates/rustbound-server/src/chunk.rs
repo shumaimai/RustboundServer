@@ -25,16 +25,36 @@ pub const AIR_BLOCK_STATE: i32 = 0;
 /// Block state ID for stone (1.20.1 global palette).
 pub const STONE_BLOCK_STATE: i32 = 1;
 
-/// Inclusive min Y of the generated stone plateau.
+/// Block state ID for netherrack (1.20.1 global palette).
+pub const NETHERRACK_BLOCK_STATE: i32 = 87;
+
+/// Block state ID for end stone (1.20.1 global palette).
+pub const END_STONE_BLOCK_STATE: i32 = 121;
+
+/// Inclusive min Y of the generated solid plateau.
 pub const FLAT_STONE_MIN_Y: i32 = -64;
 
-/// Inclusive max Y of the generated stone plateau (stand at y=64 on top).
+/// Inclusive max Y of the generated solid plateau (stand at y=64 on top).
 pub const FLAT_STONE_MAX_Y: i32 = 63;
 
+/// Returns the fill block for a dimension's generated plateau.
+pub fn plateau_block_for(dimension: crate::hakoniwa::DimensionId) -> i32 {
+    match dimension {
+        crate::hakoniwa::DimensionId::Overworld => STONE_BLOCK_STATE,
+        crate::hakoniwa::DimensionId::Nether => NETHERRACK_BLOCK_STATE,
+        crate::hakoniwa::DimensionId::End => END_STONE_BLOCK_STATE,
+    }
+}
+
 /// Returns the generated flat-world block state (ignores dig/place overrides).
-pub fn generated_flat_block(_x: i32, y: i32, _z: i32) -> i32 {
+pub fn generated_flat_block(
+    dimension: crate::hakoniwa::DimensionId,
+    _x: i32,
+    y: i32,
+    _z: i32,
+) -> i32 {
     if (FLAT_STONE_MIN_Y..=FLAT_STONE_MAX_Y).contains(&y) {
-        STONE_BLOCK_STATE
+        plateau_block_for(dimension)
     } else {
         AIR_BLOCK_STATE
     }
@@ -207,14 +227,8 @@ fn encode_section(buf: &mut Vec<u8>, block_count: i16, block_state: i32, biome_i
     encode_var_int(0, buf); // data array length = 0
 }
 
-/// Generates the chunk section data for a flat world.
-///
-/// Solid stone fills sections 0..=7 (world y=-64..=63). Everything above is
-/// air, so players spawning at y=64 stand on the flat surface.
-///
-/// Section count is NOT encoded: the client derives it from the dimension
-/// height (384 / 16 = 24 for overworld).
-fn build_section_data() -> Vec<u8> {
+/// Generates the chunk section data for a flat plateau of `fill_block`.
+fn build_section_data(fill_block: i32) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Section 7 top is y=63; spawn at y=64 stands on that surface.
@@ -225,7 +239,7 @@ fn build_section_data() -> Vec<u8> {
             encode_section(
                 &mut buf,
                 SECTION_BLOCK_COUNT as i16,
-                STONE_BLOCK_STATE,
+                fill_block,
                 PLAINS_BIOME_ID,
             );
         } else {
@@ -240,17 +254,26 @@ fn build_section_data() -> Vec<u8> {
 ///
 /// Returns a tuple of (heightmaps_nbt, section_data, block_entities, light_data).
 /// Block entities is empty for a flat world.
-pub fn generate_chunk(_chunk_x: i32, _chunk_z: i32) -> (Vec<u8>, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
+pub fn generate_chunk(
+    _chunk_x: i32,
+    _chunk_z: i32,
+    dimension: crate::hakoniwa::DimensionId,
+) -> (Vec<u8>, Vec<u8>, Vec<Vec<u8>>, Vec<u8>) {
     let heightmaps = build_heightmaps_nbt();
-    let data = build_section_data();
+    let data = build_section_data(plateau_block_for(dimension));
     let block_entities: Vec<Vec<u8>> = Vec::new();
     let light_data = build_light_data();
     (heightmaps, data, block_entities, light_data)
 }
 
 /// Builds a `ChunkData` packet ready for encoding.
-pub fn build_chunk_data_packet(chunk_x: i32, chunk_z: i32) -> rustbound_protocol::play::ChunkData {
-    let (heightmaps, data, block_entities, light_data) = generate_chunk(chunk_x, chunk_z);
+pub fn build_chunk_data_packet(
+    chunk_x: i32,
+    chunk_z: i32,
+    dimension: crate::hakoniwa::DimensionId,
+) -> rustbound_protocol::play::ChunkData {
+    let (heightmaps, data, block_entities, light_data) =
+        generate_chunk(chunk_x, chunk_z, dimension);
     rustbound_protocol::play::ChunkData {
         chunk_x,
         chunk_z,
@@ -284,7 +307,7 @@ mod tests {
 
     #[test]
     fn section_data_has_expected_size() {
-        let data = build_section_data();
+        let data = build_section_data(STONE_BLOCK_STATE);
         // Each single-valued section is: i16 + 2 × (u8 + VarInt value + VarInt data_len)
         // block: 2 + 1 + 1 + 1 = 5; biome: 1 + 1 + 1 = 3; total 8 bytes
         assert_eq!(data.len(), NUM_SECTIONS * 8);
@@ -311,7 +334,7 @@ mod tests {
             "single-valued air section must omit palette length"
         );
 
-        let data = build_section_data();
+        let data = build_section_data(STONE_BLOCK_STATE);
         assert_eq!(&data[..8], stone.as_slice());
         assert_eq!(&data[8 * 7..8 * 8], stone.as_slice());
         assert_eq!(&data[8 * 8..8 * 9], air.as_slice());
@@ -319,7 +342,7 @@ mod tests {
 
     #[test]
     fn chunk_data_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-        let packet = build_chunk_data_packet(10, -5);
+        let packet = build_chunk_data_packet(10, -5, crate::hakoniwa::DimensionId::Overworld);
         let mut wire = Vec::new();
         encode_chunk_data(&packet, TEST_MAX_FRAME, &mut wire)?;
 
@@ -391,8 +414,8 @@ mod tests {
 
     #[test]
     fn chunk_generation_is_deterministic() {
-        let (h1, d1, _, l1) = generate_chunk(0, 0);
-        let (h2, d2, _, l2) = generate_chunk(0, 0);
+        let (h1, d1, _, l1) = generate_chunk(0, 0, crate::hakoniwa::DimensionId::Overworld);
+        let (h2, d2, _, l2) = generate_chunk(0, 0, crate::hakoniwa::DimensionId::Overworld);
         assert_eq!(h1, h2);
         assert_eq!(d1, d2);
         assert_eq!(l1, l2);
@@ -401,8 +424,8 @@ mod tests {
     #[test]
     fn different_chunks_have_same_data() {
         // Flat world: all chunks have the same section data
-        let (_, d1, _, _) = generate_chunk(0, 0);
-        let (_, d2, _, _) = generate_chunk(100, -200);
+        let (_, d1, _, _) = generate_chunk(0, 0, crate::hakoniwa::DimensionId::Overworld);
+        let (_, d2, _, _) = generate_chunk(100, -200, crate::hakoniwa::DimensionId::Overworld);
         assert_eq!(d1, d2);
     }
 }

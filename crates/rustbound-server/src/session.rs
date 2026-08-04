@@ -209,6 +209,20 @@ pub enum SessionEvent {
         /// The new slot data.
         item: rustbound_protocol::play::Slot,
     },
+    /// Open a container GUI on the client.
+    OpenScreen {
+        /// Window ID (non-zero).
+        window_id: i32,
+        /// Menu type registry ID.
+        window_type: i32,
+        /// JSON chat title.
+        title: String,
+    },
+    /// Force-close a container window on the client.
+    CloseContainer {
+        /// Window ID to close.
+        window_id: u8,
+    },
     /// Send a Set Held Item (clientbound) packet to sync the hotbar selection.
     SetHeldItemClientbound {
         /// The hotbar slot (0-8).
@@ -269,6 +283,30 @@ pub enum SessionEvent {
         y: f64,
         /// Absolute Z.
         z: f64,
+    },
+    /// Spawn a non-player entity (mob) via Spawn Entity.
+    SpawnMob {
+        /// Entity ID.
+        entity_id: i32,
+        /// Entity UUID.
+        uuid: Uuid,
+        /// `minecraft:entity_type` registry ID.
+        entity_type: i32,
+        /// Feet X.
+        x: f64,
+        /// Feet Y.
+        y: f64,
+        /// Feet Z.
+        z: f64,
+        /// Yaw degrees.
+        yaw: f32,
+        /// Pitch degrees.
+        pitch: f32,
+    },
+    /// Remove one or more entities from the client.
+    RemoveEntities {
+        /// Entity IDs to destroy.
+        entity_ids: Vec<i32>,
     },
 }
 
@@ -366,6 +404,8 @@ pub struct SessionConfig {
     pub max_players: i32,
     /// Keep Alive timeout: clients that don't respond within this duration are kicked.
     pub keep_alive_timeout: Duration,
+    /// Enabled hakoniwa dimensions (Join Game list).
+    pub enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 /// A player session in the Play state.
@@ -415,6 +455,10 @@ pub struct PlayerSession {
     last_keep_alive_sent: Option<std::time::Instant>,
     /// The instant the client last responded to a KeepAlive.
     last_keep_alive_response: std::time::Instant,
+    /// Current dimension (drives Chunk Data terrain fill).
+    dimension: crate::hakoniwa::DimensionId,
+    /// Enabled dimensions advertised in Join Game.
+    enabled_dimensions: crate::hakoniwa::DimensionSet,
 }
 
 impl PlayerSession {
@@ -467,6 +511,8 @@ impl PlayerSession {
             last_keep_alive_payload: 0,
             last_keep_alive_sent: None,
             last_keep_alive_response: std::time::Instant::now(),
+            dimension: crate::hakoniwa::DimensionId::Overworld,
+            enabled_dimensions: config.enabled_dimensions,
         })
     }
 
@@ -532,15 +578,16 @@ impl PlayerSession {
             self.entity_id,
             registry_codec.len()
         );
+        let dim = self.dimension.protocol_name().to_string();
         let join_game = JoinGame {
             entity_id: self.entity_id,
             is_hardcore: false,
             gamemode: self.gamemode,
             previous_gamemode: None,
-            dimension_names: vec!["minecraft:overworld".to_string()],
+            dimension_names: self.enabled_dimensions.protocol_names(),
             registry_codec,
-            dimension_type: "minecraft:overworld".to_string(),
-            dimension_name: "minecraft:overworld".to_string(),
+            dimension_type: dim.clone(),
+            dimension_name: dim,
             hashed_seed: 0,
             max_players: self.max_players,
             view_distance: self.view_distance,
@@ -704,7 +751,7 @@ impl PlayerSession {
         let positions = crate::world::World::desired_chunks(0, 0, radius);
 
         for pos in positions {
-            let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z);
+            let chunk_data = crate::chunk::build_chunk_data_packet(pos.x, pos.z, self.dimension);
             let mut wire = Vec::new();
             encode_chunk_data(&chunk_data, mfl, &mut wire)?;
             self.send_wire(stream, &wire)?;
@@ -720,7 +767,7 @@ impl PlayerSession {
         chunk_x: i32,
         chunk_z: i32,
     ) -> Result<(), SessionError> {
-        let chunk_data = crate::chunk::build_chunk_data_packet(chunk_x, chunk_z);
+        let chunk_data = crate::chunk::build_chunk_data_packet(chunk_x, chunk_z, self.dimension);
         let mut wire = Vec::new();
         encode_chunk_data(&chunk_data, self.max_frame_length, &mut wire)?;
         self.send_wire(stream, &wire)?;
@@ -1037,6 +1084,36 @@ impl PlayerSession {
                     self.send_set_container_slot(stream, window_id, state_id, slot, &item)?;
                     processed = true;
                 }
+                SessionEvent::OpenScreen {
+                    window_id,
+                    window_type,
+                    title,
+                } => {
+                    let packet = rustbound_protocol::play::OpenScreen {
+                        window_id,
+                        window_type,
+                        title,
+                    };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_open_screen(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::CloseContainer { window_id } => {
+                    let packet = rustbound_protocol::play::CloseContainer { window_id };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_close_container_clientbound(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
                 SessionEvent::SetHeldItemClientbound { slot } => {
                     let held = SetHeldItem { slot };
                     let mut wire = Vec::new();
@@ -1073,6 +1150,10 @@ impl PlayerSession {
                     y,
                     z,
                 } => {
+                    if let Some(dim) = crate::hakoniwa::DimensionId::parse_protocol(&dimension_name)
+                    {
+                        self.dimension = dim;
+                    }
                     self.send_respawn(
                         stream,
                         &dimension_type,
@@ -1125,6 +1206,53 @@ impl PlayerSession {
                     };
                     let mut wire = Vec::new();
                     encode_synchronize_player_position(&sync, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::SpawnMob {
+                    entity_id,
+                    uuid,
+                    entity_type,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                } => {
+                    let yaw_b = degrees_to_angle_byte(yaw);
+                    let pitch_b = degrees_to_angle_byte(pitch);
+                    let packet = rustbound_protocol::play::SpawnEntity {
+                        entity_id,
+                        uuid,
+                        entity_type,
+                        x,
+                        y,
+                        z,
+                        pitch: pitch_b,
+                        yaw: yaw_b,
+                        head_yaw: yaw_b,
+                        data: 0,
+                        velocity_x: 0,
+                        velocity_y: 0,
+                        velocity_z: 0,
+                    };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_spawn_entity(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::RemoveEntities { entity_ids } => {
+                    let packet = rustbound_protocol::play::RemoveEntities { entity_ids };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_remove_entities(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
                     self.send_wire(stream, &wire)?;
                     processed = true;
                 }
@@ -1227,6 +1355,7 @@ impl PlayerSession {
                 {
                     // Set block to air (state 0)
                     let _ = self.tick_sender.send(TickMessage::SetBlock {
+                        entity_id: Some(self.entity_id),
                         position: dig.position,
                         block_state: 0,
                     });
@@ -1255,18 +1384,32 @@ impl PlayerSession {
                 Ok(Some(dig.sequence))
             }
             PlayPacket::UseItemOn(place) => {
-                // Creative mode: forward to tick loop which looks up the held
-                // hotbar item and places the corresponding block from the registry.
-                // Survival: deny (no placement yet) but still ACK
-                if self.gamemode == GameMode::Creative {
-                    let _ = self.tick_sender.send(TickMessage::PlaceBlock {
-                        entity_id: self.entity_id,
-                        position: place.position,
-                        face: place.face as i32,
-                    });
-                }
+                // Always forward: tick opens chests in any gamemode, and places
+                // blocks when Creative is holding a block item.
+                let _ = self.tick_sender.send(TickMessage::PlaceBlock {
+                    entity_id: self.entity_id,
+                    position: place.position,
+                    face: place.face as i32,
+                });
                 // Always ACK the place packet (protocol requires it)
                 Ok(Some(place.sequence))
+            }
+            PlayPacket::ClickContainer(click) => {
+                let _ = self.tick_sender.send(TickMessage::ClickContainer {
+                    entity_id: self.entity_id,
+                    window_id: click.window_id,
+                    state_id: click.state_id,
+                    changed_slots: click.changed_slots,
+                    cursor: click.cursor,
+                });
+                Ok(None)
+            }
+            PlayPacket::CloseContainerServerbound(close) => {
+                let _ = self.tick_sender.send(TickMessage::CloseContainer {
+                    entity_id: self.entity_id,
+                    window_id: close.window_id,
+                });
+                Ok(None)
             }
             PlayPacket::SetCreativeModeSlot(creative) => {
                 // Forward to tick loop for inventory tracking
@@ -1300,6 +1443,14 @@ impl PlayerSession {
                 let _ = self.tick_sender.send(TickMessage::ClientStatus {
                     entity_id: self.entity_id,
                     action: status.action,
+                });
+                Ok(None)
+            }
+            PlayPacket::InteractEntity(interact) => {
+                let _ = self.tick_sender.send(TickMessage::InteractEntity {
+                    entity_id: self.entity_id,
+                    target: interact.entity_id,
+                    action: interact.action,
                 });
                 Ok(None)
             }
@@ -1783,8 +1934,53 @@ fn try_decode_play_packet_inner(
         Err(error) => return Err(SessionError::from(error)),
     }
 
+    // Interact Entity (0x10)
+    match rustbound_protocol::play::decode_interact_entity(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
     // Use Item On (0x31)
     match decode_use_item_on(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Click Container (0x0B)
+    match rustbound_protocol::play::decode_click_container(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Close Container serverbound (0x0C)
+    match rustbound_protocol::play::decode_close_container_serverbound(
+        &mut input,
+        max_frame_length,
+    ) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);
@@ -2053,6 +2249,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 42, tx)?;
 
@@ -2093,6 +2290,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2232,6 +2430,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2249,9 +2448,10 @@ mod tests {
         // Should return ACK sequence
         assert_eq!(ack, Some(7));
 
-        // Should receive SetBlock with block_state=0 (air)
+        // Should receive SetBlock with block_state=0 (air) in the digger's dimension.
         match rx.recv()? {
             TickMessage::SetBlock {
+                entity_id: Some(1),
                 position,
                 block_state,
             } => {
@@ -2279,6 +2479,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2332,6 +2533,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2364,7 +2566,8 @@ mod tests {
     }
 
     #[test]
-    fn survival_place_does_not_modify_world_but_acks() -> Result<(), Box<dyn std::error::Error>> {
+    fn survival_use_item_on_forwards_place_block_for_chests() -> Result<(), Box<dyn std::error::Error>>
+    {
         use rustbound_protocol::play::UseItemOn;
 
         let (tx, rx) = channel::<TickMessage>();
@@ -2379,13 +2582,14 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
         // Consume PlayerJoined
         let _ = rx.recv()?;
 
-        // Send a UseItemOn packet in Survival mode
+        // Send a UseItemOn packet in Survival mode (needed to open chests)
         let ack = session.handle_play_packet(PlayPacket::UseItemOn(UseItemOn {
             position: (0, 64, 0),
             face: 1,
@@ -2400,10 +2604,18 @@ mod tests {
         // Should still return ACK sequence
         assert_eq!(ack, Some(55));
 
-        // Should NOT receive SetBlock
+        // Tick loop decides open-vs-place; session always forwards PlaceBlock.
         match rx.try_recv() {
-            Err(std::sync::mpsc::TryRecvError::Empty) => {} // Good: no SetBlock
-            Ok(msg) => panic!("Survival place should not send SetBlock, got {msg:?}"),
+            Ok(TickMessage::PlaceBlock {
+                entity_id,
+                position,
+                face,
+            }) => {
+                assert_eq!(entity_id, 1);
+                assert_eq!(position, (0, 64, 0));
+                assert_eq!(face, 1);
+            }
+            Ok(msg) => panic!("expected PlaceBlock, got {msg:?}"),
             Err(e) => panic!("channel error: {e}"),
         }
         Ok(())
@@ -2423,6 +2635,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let session = PlayerSession::new(&config, 1, tx)?;
         assert!(!session.is_keep_alive_timed_out());
@@ -2443,6 +2656,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_millis(1),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2474,6 +2688,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_secs(30),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 
@@ -2506,6 +2721,7 @@ mod tests {
             simulation_distance: 10,
             max_players: 20,
             keep_alive_timeout: Duration::from_millis(1),
+            enabled_dimensions: crate::hakoniwa::DimensionSet::default(),
         };
         let mut session = PlayerSession::new(&config, 1, tx)?;
 

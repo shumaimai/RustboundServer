@@ -50,9 +50,26 @@ pub fn blocks_file(level_name: &str) -> PathBuf {
     world_dir(level_name).join("blocks.bin")
 }
 
+/// Block override path for a hakoniwa dimension.
+pub fn blocks_file_for(level_name: &str, dimension: crate::hakoniwa::DimensionId) -> PathBuf {
+    match dimension {
+        crate::hakoniwa::DimensionId::Overworld => blocks_file(level_name),
+        crate::hakoniwa::DimensionId::Nether => world_dir(level_name).join("blocks-nether.bin"),
+        crate::hakoniwa::DimensionId::End => world_dir(level_name).join("blocks-end.bin"),
+    }
+}
+
 /// Returns the full path for the temporary block overrides file.
 fn blocks_tmp_file(level_name: &str) -> PathBuf {
     world_dir(level_name).join("blocks.tmp")
+}
+
+fn blocks_tmp_file_for(level_name: &str, dimension: crate::hakoniwa::DimensionId) -> PathBuf {
+    match dimension {
+        crate::hakoniwa::DimensionId::Overworld => blocks_tmp_file(level_name),
+        crate::hakoniwa::DimensionId::Nether => world_dir(level_name).join("blocks-nether.tmp"),
+        crate::hakoniwa::DimensionId::End => world_dir(level_name).join("blocks-end.tmp"),
+    }
 }
 
 /// Serializes block overrides to the v1 binary format.
@@ -135,10 +152,23 @@ pub fn save_overrides(
     level_name: &str,
     overrides: &HashMap<(i32, i32, i32), i32>,
 ) -> Result<(), PersistError> {
+    save_overrides_for(
+        level_name,
+        crate::hakoniwa::DimensionId::Overworld,
+        overrides,
+    )
+}
+
+/// Saves dig/place overrides for a specific dimension.
+pub fn save_overrides_for(
+    level_name: &str,
+    dimension: crate::hakoniwa::DimensionId,
+    overrides: &HashMap<(i32, i32, i32), i32>,
+) -> Result<(), PersistError> {
     let dir = world_dir(level_name);
     fs::create_dir_all(&dir).map_err(PersistError::Io)?;
-    let tmp_path = blocks_tmp_file(level_name);
-    let final_path = blocks_file(level_name);
+    let tmp_path = blocks_tmp_file_for(level_name, dimension);
+    let final_path = blocks_file_for(level_name, dimension);
     let data = serialize_overrides(overrides);
     {
         let mut file = fs::File::create(&tmp_path).map_err(PersistError::Io)?;
@@ -154,7 +184,15 @@ pub fn save_overrides(
 /// Returns an empty map if the file doesn't exist (fresh world).
 /// Returns an empty map and logs if the file is corrupt (safe fallback).
 pub fn load_overrides(level_name: &str) -> HashMap<(i32, i32, i32), i32> {
-    let path = blocks_file(level_name);
+    load_overrides_for(level_name, crate::hakoniwa::DimensionId::Overworld)
+}
+
+/// Loads dig/place overrides for a specific dimension.
+pub fn load_overrides_for(
+    level_name: &str,
+    dimension: crate::hakoniwa::DimensionId,
+) -> HashMap<(i32, i32, i32), i32> {
+    let path = blocks_file_for(level_name, dimension);
     match load_overrides_from_path(&path) {
         Ok(overrides) => overrides,
         Err(PersistError::FileNotFound) => HashMap::new(),

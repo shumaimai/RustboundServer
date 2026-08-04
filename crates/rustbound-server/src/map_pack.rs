@@ -280,6 +280,57 @@ fn path_east(blocks: &mut HashMap<(i32, i32, i32), i32>, length: i32) {
     }
 }
 
+const GLOWSTONE: i32 = 89;
+const NETHERRACK: i32 = 87;
+const END_STONE: i32 = 121;
+const SOUL_SAND: i32 = 88;
+const WATER: i32 = crate::fluid::WATER_BLOCK_STATE;
+const LAVA: i32 = crate::fluid::LAVA_BLOCK_STATE;
+const CHEST: i32 = crate::container::CHEST_BLOCK_STATE;
+
+/// Digs a shallow static water pond (source blocks, no flow).
+fn water_pond(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx * dx + dz * dz > radius * radius {
+                continue;
+            }
+            // Hollow the plateau and fill with still water.
+            put(blocks, cx + dx, 63, cz + dz, WATER);
+            put(blocks, cx + dx, 62, cz + dz, WATER);
+            put(blocks, cx + dx, 61, cz + dz, DIRT);
+        }
+    }
+}
+
+/// Digs a shallow static lava pool.
+fn lava_pool(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx * dx + dz * dz > radius * radius {
+                continue;
+            }
+            put(blocks, cx + dx, 63, cz + dz, LAVA);
+            put(blocks, cx + dx, 62, cz + dz, NETHERRACK);
+        }
+    }
+}
+
+fn portal_pad(
+    blocks: &mut HashMap<(i32, i32, i32), i32>,
+    cx: i32,
+    cz: i32,
+    surface_state: i32,
+    pad_state: i32,
+) {
+    for dx in -1..=1 {
+        for dz in -1..=1 {
+            put(blocks, cx + dx, 63, cz + dz, surface_state);
+            put(blocks, cx + dx, 64, cz + dz, pad_state);
+        }
+    }
+}
+
 /// Builds the built-in overworld garden for `size`.
 pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
     let garden = GardenSpec::from_size(size);
@@ -289,7 +340,6 @@ pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
         MapSize::Tiny => {
             spawn_plaza(&mut blocks, 3);
             border_wall(&mut blocks, &garden, 2);
-            // Landmark offset from spawn so the player is not inside the block.
             put(&mut blocks, 3, 64, 0, DIAMOND_BLOCK);
             put(&mut blocks, 2, 64, 0, STONE);
             put(&mut blocks, -2, 64, 0, STONE);
@@ -301,7 +351,6 @@ pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
             border_wall(&mut blocks, &garden, 2);
             path_east(&mut blocks, 24);
             put(&mut blocks, 3, 64, 0, EMERALD_BLOCK);
-            // Small sand dune
             for x in 10..14 {
                 for z in 8..12 {
                     put(&mut blocks, x, 63, z, SAND);
@@ -314,21 +363,124 @@ pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
             border_wall(&mut blocks, &garden, 3);
             path_east(&mut blocks, 48);
             put(&mut blocks, 3, 64, 0, COAL_BLOCK);
-            // Watchtower stump
             for y in 64..69 {
                 put(&mut blocks, 20, y, 20, STONE);
             }
             put(&mut blocks, 20, 69, 20, BEDROCK);
-            // Secondary plaza
             fill_disk(&mut blocks, -30, 63, 30, 4, GRASS);
         }
     }
 
+    // Dimension portals (H3): stand on the pad to transfer.
+    // Nether = glowstone west of spawn; End = end stone east of spawn.
+    portal_pad(&mut blocks, -6, 0, NETHERRACK, GLOWSTONE);
+    portal_pad(&mut blocks, 6, 0, END_STONE, END_STONE);
+    // H5: static water pond south of spawn (swim / damp fall).
+    water_pond(&mut blocks, 0, -12, 3);
+    // H6: starter chest north of spawn.
+    put(&mut blocks, 0, 64, 4, CHEST);
+
     MapPack {
         garden,
         blocks,
-        id: format!("builtin:{}", size.as_str()),
+        id: format!("builtin:{}:overworld", size.as_str()),
     }
+}
+
+/// Built-in nether garden (netherrack plateau + return pad).
+pub fn builtin_nether_pack(size: MapSize) -> MapPack {
+    let garden = GardenSpec::from_size(size);
+    let mut blocks = HashMap::new();
+    border_wall(&mut blocks, &garden, 2);
+    fill_disk(&mut blocks, 0, 63, 0, 4, SOUL_SAND);
+    portal_pad(&mut blocks, -6, 0, NETHERRACK, GLOWSTONE); // return to overworld
+    put(&mut blocks, 3, 64, 0, GLOWSTONE);
+    // H5: static lava pool (contact damage).
+    lava_pool(&mut blocks, 10, 0, 2);
+    MapPack {
+        garden,
+        blocks,
+        id: format!("builtin:{}:nether", size.as_str()),
+    }
+}
+
+/// Built-in end garden (end-stone plateau + return pad + city stub).
+pub fn builtin_end_pack(size: MapSize) -> MapPack {
+    let garden = GardenSpec::from_size(size);
+    let mut blocks = HashMap::new();
+    border_wall(&mut blocks, &garden, 2);
+    fill_disk(&mut blocks, 0, 63, 0, 5, END_STONE);
+    portal_pad(&mut blocks, -6, 0, END_STONE, END_STONE); // return
+    // End-city stub: a few pillars
+    for y in 64..72 {
+        put(&mut blocks, 12, y, 12, END_STONE);
+        put(&mut blocks, 14, y, 12, END_STONE);
+        put(&mut blocks, 12, y, 14, END_STONE);
+        put(&mut blocks, 14, y, 14, END_STONE);
+    }
+    put(&mut blocks, 13, 72, 13, DIAMOND_BLOCK);
+    MapPack {
+        garden,
+        blocks,
+        id: format!("builtin:{}:end", size.as_str()),
+    }
+}
+
+/// Built-in pack for any dimension.
+pub fn builtin_pack(size: MapSize, dimension: crate::hakoniwa::DimensionId) -> MapPack {
+    match dimension {
+        crate::hakoniwa::DimensionId::Overworld => builtin_overworld_pack(size),
+        crate::hakoniwa::DimensionId::Nether => builtin_nether_pack(size),
+        crate::hakoniwa::DimensionId::End => builtin_end_pack(size),
+    }
+}
+
+/// Default on-disk pack path for a dimension.
+pub fn pack_path_for(
+    level_name: &str,
+    size: MapSize,
+    dimension: crate::hakoniwa::DimensionId,
+) -> PathBuf {
+    let name = match dimension {
+        crate::hakoniwa::DimensionId::Overworld => format!("{}.rbpk", size.as_str()),
+        other => format!("{}-{}.rbpk", size.as_str(), other.as_str()),
+    };
+    PathBuf::from(level_name).join("packs").join(name)
+}
+
+/// Resolves packs for every dimension (file override, bundled data, or builtin).
+pub fn resolve_all_packs(
+    level_name: &str,
+    size: MapSize,
+) -> HashMap<crate::hakoniwa::DimensionId, MapPack> {
+    let mut out = HashMap::new();
+    for dim in crate::hakoniwa::DimensionId::all() {
+        let file_name = match dim {
+            crate::hakoniwa::DimensionId::Overworld => format!("{}.rbpk", size.as_str()),
+            other => format!("{}-{}.rbpk", size.as_str(), other.as_str()),
+        };
+        let pack = if let Some(path) = crate::container::resolve_pack_file(level_name, &file_name) {
+            match load_pack_file(&path) {
+                Ok(mut pack) => {
+                    pack.garden = GardenSpec::from_size(size);
+                    pack.id = format!("file:{}:{}", size.as_str(), dim.as_str());
+                    eprintln!("hakoniwa: loaded {} from {}", pack.id, path.display());
+                    pack
+                }
+                Err(_) => {
+                    let pack = builtin_pack(size, dim);
+                    eprintln!("hakoniwa: using built-in map pack '{}'", pack.id);
+                    pack
+                }
+            }
+        } else {
+            let pack = builtin_pack(size, dim);
+            eprintln!("hakoniwa: using built-in map pack '{}'", pack.id);
+            pack
+        };
+        out.insert(dim, pack);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -370,8 +522,43 @@ mod tests {
     }
 
     #[test]
+    fn overworld_has_water_pond_and_nether_has_lava() {
+        let ow = builtin_overworld_pack(MapSize::Tiny);
+        assert_eq!(ow.blocks.get(&(0, 63, -12)), Some(&WATER));
+        assert_eq!(ow.blocks.get(&(0, 64, 4)), Some(&CHEST));
+        let n = builtin_nether_pack(MapSize::Tiny);
+        assert_eq!(n.blocks.get(&(10, 63, 0)), Some(&LAVA));
+    }
+
+    #[test]
     fn resolve_pack_falls_back_to_builtin() {
         let pack = resolve_pack("/tmp/rustbound-no-such-level-h2", MapSize::Tiny);
         assert!(pack.id.starts_with("builtin:"));
+    }
+
+    #[test]
+    fn nether_and_end_packs_have_return_pads() {
+        let n = builtin_nether_pack(MapSize::Tiny);
+        assert_eq!(n.blocks.get(&(-6, 64, 0)), Some(&GLOWSTONE));
+        let e = builtin_end_pack(MapSize::Tiny);
+        assert_eq!(e.blocks.get(&(-6, 64, 0)), Some(&END_STONE));
+    }
+
+    #[test]
+    fn overworld_has_portal_pads() {
+        let pack = builtin_overworld_pack(MapSize::Tiny);
+        assert_eq!(pack.blocks.get(&(-6, 64, 0)), Some(&GLOWSTONE));
+        assert_eq!(pack.blocks.get(&(6, 64, 0)), Some(&END_STONE));
+    }
+
+    #[test]
+    fn resolve_all_packs_covers_three_dims() {
+        let packs = resolve_all_packs("/tmp/rustbound-no-such-level-h3", MapSize::Tiny);
+        assert_eq!(packs.len(), 3);
+        assert!(
+            packs[&crate::hakoniwa::DimensionId::Nether]
+                .id
+                .contains("nether")
+        );
     }
 }
