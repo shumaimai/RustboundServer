@@ -12,7 +12,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 
 ## Status
 
-**Hakoniwa Phase H3** — fixed gardens with Overworld / Nether / End switching.
+**Hakoniwa Phase H4** — fixed gardens with Overworld / Nether / End and simple mobs.
 
 | Layer | Status |
 |-------|--------|
@@ -22,7 +22,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 | Block collision | **Done (H1)** |
 | Map packs / 3 sizes of overworld gardens | **Done (H2)** |
 | Nether / End (portals + `/dim`) | **Done (H3)** |
-| Simple mobs | H4 |
+| Simple mobs (wander + light hostility) | **Done (H4)** |
 | Static liquids | H5 |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) (optional) |
 | Forge jars / JVM | **Out of scope** |

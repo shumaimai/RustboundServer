@@ -452,6 +452,15 @@ pub enum TickMessage {
         /// The action ID (0 = Perform respawn, 1 = Request stats).
         action: i32,
     },
+    /// A player attacked or interacted with an entity.
+    InteractEntity {
+        /// The attacking / interacting player.
+        entity_id: i32,
+        /// The target entity ID.
+        target: i32,
+        /// 0 = interact, 1 = attack, 2 = interact at.
+        action: i32,
+    },
 }
 
 /// A message sent from the tick loop to the server.
@@ -708,6 +717,7 @@ fn transfer_player_dimension(
     world: &mut World,
     session_senders: &HashMap<i32, Sender<SessionEvent>>,
     chunk_states: &mut HashMap<i32, PlayerChunkState>,
+    mobs: &[crate::mob::Mob],
     entity_id: i32,
     dest: crate::hakoniwa::DimensionId,
 ) {
@@ -757,6 +767,37 @@ fn transfer_player_dimension(
         spawn_x,
         spawn_z,
     );
+    sync_mobs_for_player(session_senders, mobs, entity_id, dest);
+}
+
+/// Sends RemoveEntities for all mobs, then SpawnMob for those in `dimension`.
+fn sync_mobs_for_player(
+    session_senders: &HashMap<i32, Sender<SessionEvent>>,
+    mobs: &[crate::mob::Mob],
+    entity_id: i32,
+    dimension: crate::hakoniwa::DimensionId,
+) {
+    let Some(sender) = session_senders.get(&entity_id) else {
+        return;
+    };
+    let all_ids: Vec<i32> = mobs.iter().map(|m| m.entity_id).collect();
+    if !all_ids.is_empty() {
+        let _ = sender.send(SessionEvent::RemoveEntities {
+            entity_ids: all_ids,
+        });
+    }
+    for mob in mobs.iter().filter(|m| m.dimension == dimension) {
+        let _ = sender.send(SessionEvent::SpawnMob {
+            entity_id: mob.entity_id,
+            uuid: mob.uuid,
+            entity_type: mob.kind.entity_type_id(),
+            x: mob.x,
+            y: mob.y,
+            z: mob.z,
+            yaw: mob.yaw,
+            pitch: mob.pitch,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -792,6 +833,9 @@ fn run_tick_loop(
     let mut chunk_states: HashMap<i32, PlayerChunkState> = HashMap::new();
     let mut inventories: HashMap<i32, PlayerInventory> = HashMap::new();
     let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
+    let mut next_mob_id: i32 = 10_000;
+    let mut mobs = crate::mob::initial_garden_mobs(&mut next_mob_id);
+    let mut mob_rng: u32 = 0xC0FF_EE01;
 
     // Initialize all registered mods before the first tick
     {
@@ -955,6 +999,14 @@ fn run_tick_loop(
                         });
                     }
 
+                    // Spawn garden mobs already present in the overworld.
+                    sync_mobs_for_player(
+                        &session_senders,
+                        &mobs,
+                        entity_id,
+                        crate::hakoniwa::DimensionId::Overworld,
+                    );
+
                     let _ = event_tx.send(TickEvent::PlayerAdded { entity_id });
                     player_count.fetch_add(1, Ordering::AcqRel);
                 }
@@ -1103,6 +1155,7 @@ fn run_tick_loop(
                                 &mut world,
                                 &session_senders,
                                 &mut chunk_states,
+                                &mobs,
                                 entity_id,
                                 dest,
                             );
@@ -1289,6 +1342,7 @@ fn run_tick_loop(
                             &mut world,
                             &session_senders,
                             &mut chunk_states,
+                            &mobs,
                             entity_id,
                             dest,
                         );
@@ -1381,9 +1435,157 @@ fn run_tick_loop(
                                     spawn_x,
                                     spawn_z,
                                 );
+                                let dim = world
+                                    .get_player(entity_id)
+                                    .map(|p| p.dimension)
+                                    .unwrap_or_default();
+                                sync_mobs_for_player(&session_senders, &mobs, entity_id, dim);
                             }
                         }
                     }
+                }
+                TickMessage::InteractEntity {
+                    entity_id,
+                    target,
+                    action,
+                } => {
+                    if action != 1 {
+                        continue;
+                    }
+                    let (px, py, pz, gamemode, dimension) =
+                        match world.get_player(entity_id).map(|p| {
+                            let (x, y, z) = p.position();
+                            (x, y, z, p.gamemode, p.dimension)
+                        }) {
+                            Some(v) => v,
+                            None => continue,
+                        };
+                    let Some(idx) = mobs.iter().position(|m| m.entity_id == target) else {
+                        continue;
+                    };
+                    if mobs[idx].dimension != dimension {
+                        continue;
+                    }
+                    let dx = px - mobs[idx].x;
+                    let dy = py - mobs[idx].y;
+                    let dz = pz - mobs[idx].z;
+                    if dx * dx + dy * dy + dz * dz > 36.0 {
+                        continue;
+                    }
+                    let damage = if gamemode == GAMEMODE_CREATIVE {
+                        100.0
+                    } else {
+                        4.0
+                    };
+                    let died = mobs[idx].hurt(damage);
+                    if died {
+                        let dead_id = mobs[idx].entity_id;
+                        let dead_dim = mobs[idx].dimension;
+                        mobs.remove(idx);
+                        for (&eid, sender) in &session_senders {
+                            if world.get_player(eid).map(|p| p.dimension) == Some(dead_dim) {
+                                let _ = sender.send(SessionEvent::RemoveEntities {
+                                    entity_ids: vec![dead_id],
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Periodic task: simple mob AI (wander / chase / contact damage).
+        {
+            let player_snapshots: Vec<(i32, crate::hakoniwa::DimensionId, f64, f64, f64, u8)> =
+                world
+                    .players()
+                    .map(|p| {
+                        let (x, y, z) = p.position();
+                        (p.entity_id, p.dimension, x, y, z, p.gamemode)
+                    })
+                    .collect();
+            let mut deaths: Vec<i32> = Vec::new();
+            for mob in mobs.iter_mut() {
+                let nearest = player_snapshots
+                    .iter()
+                    .filter(|(_, dim, _, _, _, _)| *dim == mob.dimension)
+                    .map(|(_, _, x, y, z, _)| (*x, *y, *z))
+                    .min_by(|a, b| {
+                        let da = (a.0 - mob.x).hypot(a.2 - mob.z);
+                        let db = (b.0 - mob.x).hypot(b.2 - mob.z);
+                        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                let old_x = mob.x;
+                let old_y = mob.y;
+                let old_z = mob.z;
+                let moved = crate::mob::tick_mob(mob, &garden, &mut mob_rng, nearest);
+                if moved {
+                    for &(eid, dim, _, _, _, _) in &player_snapshots {
+                        if dim != mob.dimension {
+                            continue;
+                        }
+                        if let Some(sender) = session_senders.get(&eid) {
+                            let _ = sender.send(SessionEvent::EntityMovement {
+                                entity_id: mob.entity_id,
+                                old_x,
+                                old_y,
+                                old_z,
+                                new_x: mob.x,
+                                new_y: mob.y,
+                                new_z: mob.z,
+                                new_yaw: mob.yaw,
+                                new_pitch: mob.pitch,
+                                on_ground: true,
+                            });
+                        }
+                    }
+                }
+                if mob.kind.is_hostile() && mob.attack_cooldown == 0 {
+                    let dmg = mob.kind.contact_damage();
+                    if dmg > 0.0 {
+                        for &(eid, dim, px, py, pz, gm) in &player_snapshots {
+                            if dim != mob.dimension
+                                || gm == GAMEMODE_CREATIVE
+                                || gm == GAMEMODE_SPECTATOR
+                            {
+                                continue;
+                            }
+                            if !crate::mob::in_melee_range(mob, px, py, pz) {
+                                continue;
+                            }
+                            if let Some(inv) = inventories.get_mut(&eid) {
+                                if inv.is_dead {
+                                    continue;
+                                }
+                                inv.health = (inv.health - dmg).max(0.0);
+                                mob.attack_cooldown = 20;
+                                if let Some(sender) = session_senders.get(&eid) {
+                                    let _ = sender.send(SessionEvent::SetHealth {
+                                        health: inv.health,
+                                        food: inv.food,
+                                        food_saturation: inv.food_saturation,
+                                    });
+                                }
+                                if inv.health <= 0.0 {
+                                    inv.kill();
+                                    deaths.push(eid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for eid in deaths {
+                clear_break_animation(&mut break_progress, &session_senders, eid);
+                let username = world
+                    .get_player(eid)
+                    .map(|p| p.username.clone())
+                    .unwrap_or_else(|| "Player".to_string());
+                if let Some(sender) = session_senders.get(&eid) {
+                    let _ = sender.send(SessionEvent::CombatDeath {
+                        player_id: eid,
+                        message: combat_death_message(&username, "was slain"),
+                    });
                 }
             }
         }
@@ -2024,7 +2226,9 @@ mod tests {
                     new_yaw,
                     ..
                 }) => {
-                    assert_eq!(entity_id, 1, "should be player 1's movement");
+                    if entity_id != 1 {
+                        continue; // ignore mob wander packets
+                    }
                     assert!((old_x - 0.5).abs() < f64::EPSILON);
                     assert_eq!(new_x, 1.0);
                     assert_eq!(new_yaw, 90.0);
@@ -2106,12 +2310,15 @@ mod tests {
             on_ground: true,
         })?;
 
-        // Wait and check that player 2 does NOT receive EntityMovement
+        // Wait and check that player 2 does NOT receive EntityMovement for player 1.
+        // Mob wander also emits EntityMovement (entity_id >= 10000); ignore those.
         std::thread::sleep(Duration::from_millis(100));
         let mut got_movement = false;
         while let Ok(event) = event_rx2.try_recv() {
-            if matches!(event, SessionEvent::EntityMovement { .. }) {
-                got_movement = true;
+            if let SessionEvent::EntityMovement { entity_id, .. } = event {
+                if entity_id < 10_000 {
+                    got_movement = true;
+                }
             }
         }
         assert!(
@@ -2746,6 +2953,54 @@ mod tests {
             }
         }
         assert!(got_respawn, "/dim nether should Respawn into the nether");
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_spawns_mobs_on_join() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 1,
+            view_distance: 2,
+            event_sender: event_tx,
+        })?;
+        let start = Instant::now();
+        let mut pig_spawns = 0;
+        let mut zombie_spawns = 0;
+        while start.elapsed() < Duration::from_millis(800) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SpawnMob { entity_type, .. }) => {
+                    if entity_type == crate::mob::entity_type::PIG {
+                        pig_spawns += 1;
+                    }
+                    if entity_type == crate::mob::entity_type::ZOMBIE {
+                        zombie_spawns += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+            if pig_spawns >= 2 && zombie_spawns >= 1 {
+                break;
+            }
+        }
+        assert!(pig_spawns >= 2, "expected overworld pigs, got {pig_spawns}");
+        assert!(
+            zombie_spawns >= 1,
+            "expected overworld zombie, got {zombie_spawns}"
+        );
         handle.shutdown();
         Ok(())
     }

@@ -11,6 +11,7 @@ pub mod dimension;
 pub mod hakoniwa;
 pub mod listener;
 pub mod map_pack;
+pub mod mob;
 pub mod mod_api;
 pub mod mutation;
 pub mod offline_uuid;

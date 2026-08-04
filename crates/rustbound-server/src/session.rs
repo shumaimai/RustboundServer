@@ -270,6 +270,30 @@ pub enum SessionEvent {
         /// Absolute Z.
         z: f64,
     },
+    /// Spawn a non-player entity (mob) via Spawn Entity.
+    SpawnMob {
+        /// Entity ID.
+        entity_id: i32,
+        /// Entity UUID.
+        uuid: Uuid,
+        /// `minecraft:entity_type` registry ID.
+        entity_type: i32,
+        /// Feet X.
+        x: f64,
+        /// Feet Y.
+        y: f64,
+        /// Feet Z.
+        z: f64,
+        /// Yaw degrees.
+        yaw: f32,
+        /// Pitch degrees.
+        pitch: f32,
+    },
+    /// Remove one or more entities from the client.
+    RemoveEntities {
+        /// Entity IDs to destroy.
+        entity_ids: Vec<i32>,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -1141,6 +1165,53 @@ impl PlayerSession {
                     self.send_wire(stream, &wire)?;
                     processed = true;
                 }
+                SessionEvent::SpawnMob {
+                    entity_id,
+                    uuid,
+                    entity_type,
+                    x,
+                    y,
+                    z,
+                    yaw,
+                    pitch,
+                } => {
+                    let yaw_b = degrees_to_angle_byte(yaw);
+                    let pitch_b = degrees_to_angle_byte(pitch);
+                    let packet = rustbound_protocol::play::SpawnEntity {
+                        entity_id,
+                        uuid,
+                        entity_type,
+                        x,
+                        y,
+                        z,
+                        pitch: pitch_b,
+                        yaw: yaw_b,
+                        head_yaw: yaw_b,
+                        data: 0,
+                        velocity_x: 0,
+                        velocity_y: 0,
+                        velocity_z: 0,
+                    };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_spawn_entity(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::RemoveEntities { entity_ids } => {
+                    let packet = rustbound_protocol::play::RemoveEntities { entity_ids };
+                    let mut wire = Vec::new();
+                    rustbound_protocol::play::encode_remove_entities(
+                        &packet,
+                        self.max_frame_length,
+                        &mut wire,
+                    )?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
             }
         }
         Ok(processed)
@@ -1314,6 +1385,14 @@ impl PlayerSession {
                 let _ = self.tick_sender.send(TickMessage::ClientStatus {
                     entity_id: self.entity_id,
                     action: status.action,
+                });
+                Ok(None)
+            }
+            PlayPacket::InteractEntity(interact) => {
+                let _ = self.tick_sender.send(TickMessage::InteractEntity {
+                    entity_id: self.entity_id,
+                    target: interact.entity_id,
+                    action: interact.action,
                 });
                 Ok(None)
             }
@@ -1785,6 +1864,20 @@ fn try_decode_play_packet_inner(
 
     // Player Digging (0x1D)
     match decode_player_digging(&mut input, max_frame_length) {
+        Ok(PlayDecodeOutcome::Complete(packet)) => {
+            let consumed = source.len() - input.len();
+            buffer.drain(..consumed);
+            return Ok(Some(packet));
+        }
+        Ok(PlayDecodeOutcome::Incomplete) => return Ok(None),
+        Err(PlayError::WrongPacketId { .. }) => {
+            input = source;
+        }
+        Err(error) => return Err(SessionError::from(error)),
+    }
+
+    // Interact Entity (0x10)
+    match rustbound_protocol::play::decode_interact_entity(&mut input, max_frame_length) {
         Ok(PlayDecodeOutcome::Complete(packet)) => {
             let consumed = source.len() - input.len();
             buffer.drain(..consumed);

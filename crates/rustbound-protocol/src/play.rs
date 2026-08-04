@@ -75,6 +75,12 @@ pub const PLAYER_INFO_REMOVE_PACKET_ID: i32 = 0x39;
 /// Packet ID for the clientbound Spawn Player packet.
 pub const SPAWN_PLAYER_PACKET_ID: i32 = 0x03;
 
+/// Packet ID for the clientbound Spawn Entity packet.
+pub const SPAWN_ENTITY_PACKET_ID: i32 = 0x01;
+
+/// Packet ID for the serverbound Interact Entity (Use Entity) packet.
+pub const INTERACT_ENTITY_PACKET_ID: i32 = 0x10;
+
 /// Packet ID for the clientbound Remove Entities packet.
 pub const REMOVE_ENTITIES_PACKET_ID: i32 = 0x3E;
 
@@ -324,8 +330,12 @@ pub enum PlayPacket {
     PlayerInfoRemove(PlayerInfoRemove),
     /// Clientbound Spawn Player (Play `0x03`).
     SpawnPlayer(SpawnPlayer),
+    /// Clientbound Spawn Entity (Play `0x01`).
+    SpawnEntity(SpawnEntity),
     /// Clientbound Remove Entities (Play `0x3E`).
     RemoveEntities(RemoveEntities),
+    /// Serverbound Interact Entity (Play `0x10`).
+    InteractEntity(InteractEntity),
     /// Serverbound Player Digging (Play `0x1D`).
     PlayerDigging(PlayerDigging),
     /// Serverbound Use Item On (Play `0x31`).
@@ -2660,6 +2670,53 @@ pub struct SpawnPlayer {
     pub pitch: u8,
 }
 
+/// Clientbound Spawn Entity packet (Play `0x01`).
+///
+/// Used for non-player entities (mobs, items, projectiles, …). Protocol 763
+/// field order: pitch/yaw/head yaw, then data, then velocity shorts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpawnEntity {
+    /// The entity ID.
+    pub entity_id: i32,
+    /// The entity UUID.
+    pub uuid: Uuid,
+    /// Registry ID in `minecraft:entity_type`.
+    pub entity_type: i32,
+    /// The X coordinate.
+    pub x: f64,
+    /// The Y coordinate.
+    pub y: f64,
+    /// The Z coordinate.
+    pub z: f64,
+    /// Pitch angle byte (1/256 of a turn).
+    pub pitch: u8,
+    /// Yaw angle byte (1/256 of a turn).
+    pub yaw: u8,
+    /// Head yaw angle byte (living entities).
+    pub head_yaw: u8,
+    /// Type-dependent data (usually 0 for mobs).
+    pub data: i32,
+    /// Velocity X (units of 1/8000 block per tick).
+    pub velocity_x: i16,
+    /// Velocity Y.
+    pub velocity_y: i16,
+    /// Velocity Z.
+    pub velocity_z: i16,
+}
+
+/// Serverbound Interact Entity packet (Play `0x10`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct InteractEntity {
+    /// Target entity ID.
+    pub entity_id: i32,
+    /// 0 = interact, 1 = attack, 2 = interact at.
+    pub action: i32,
+    /// Hand used for interact / interact-at (0 = main, 1 = off). Unused for attack.
+    pub hand: i32,
+    /// Whether the player is sneaking.
+    pub sneaking: bool,
+}
+
 /// Clientbound Remove Entities packet (Play `0x3E`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoveEntities {
@@ -3944,6 +4001,104 @@ pub fn encode_spawn_player(
     Ok(())
 }
 
+/// Encodes a Spawn Entity packet (clientbound Play `0x01`).
+pub fn encode_spawn_entity(
+    packet: &SpawnEntity,
+    max_frame_length: usize,
+    output: &mut Vec<u8>,
+) -> Result<(), PlayError> {
+    let mut body = Vec::new();
+    encode_var_int(packet.entity_id, &mut body);
+    body.extend_from_slice(&packet.uuid.to_be_bytes());
+    encode_var_int(packet.entity_type, &mut body);
+    encode_f64(packet.x, &mut body);
+    encode_f64(packet.y, &mut body);
+    encode_f64(packet.z, &mut body);
+    encode_u8(packet.pitch, &mut body);
+    encode_u8(packet.yaw, &mut body);
+    encode_u8(packet.head_yaw, &mut body);
+    encode_var_int(packet.data, &mut body);
+    encode_i16(packet.velocity_x, &mut body);
+    encode_i16(packet.velocity_y, &mut body);
+    encode_i16(packet.velocity_z, &mut body);
+    encode_frame(SPAWN_ENTITY_PACKET_ID, &body, max_frame_length, output)
+        .map_err(PlayError::from)?;
+    Ok(())
+}
+
+/// Decodes an Interact Entity packet (serverbound Play `0x10`).
+pub fn decode_interact_entity(
+    input: &mut &[u8],
+    max_frame_length: usize,
+) -> Result<PlayDecodeOutcome, PlayError> {
+    let source = *input;
+    let frame = match decode_frame(input, max_frame_length) {
+        Ok(DecodeOutcome::Complete(frame)) => frame,
+        Ok(DecodeOutcome::Incomplete) => {
+            *input = source;
+            return Ok(PlayDecodeOutcome::Incomplete);
+        }
+        Err(error) => {
+            *input = source;
+            return Err(PlayError::from(error));
+        }
+    };
+    if frame.packet_id != INTERACT_ENTITY_PACKET_ID {
+        *input = source;
+        return Err(PlayError::WrongPacketId {
+            received: frame.packet_id,
+            expected: INTERACT_ENTITY_PACKET_ID,
+        });
+    }
+    let mut body = frame.payload;
+    let entity_id = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let action = decode_var_int(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    let mut hand = 0;
+    if action == 2 {
+        // interact at: skip target xyz
+        let _ = decode_f32(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        let _ = decode_f32(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+        let _ = decode_f32(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+    }
+    if action == 0 || action == 2 {
+        hand = decode_var_int(&mut body).map_err(|e| {
+            *input = source;
+            PlayError::from(e)
+        })?;
+    }
+    let sneaking = decode_bool(&mut body).map_err(|e| {
+        *input = source;
+        PlayError::from(e)
+    })?;
+    if !body.is_empty() {
+        *input = source;
+        return Err(PlayError::TrailingBytes { count: body.len() });
+    }
+    Ok(PlayDecodeOutcome::Complete(PlayPacket::InteractEntity(
+        InteractEntity {
+            entity_id,
+            action,
+            hand,
+            sneaking,
+        },
+    )))
+}
+
 /// Encodes a Remove Entities packet (clientbound Play `0x3E`).
 pub fn encode_remove_entities(
     packet: &RemoveEntities,
@@ -4908,18 +5063,19 @@ mod tests {
         SYSTEM_CHAT_MESSAGE_PACKET_ID, SetBlockDestroyStage, SetCenterChunk, SetContainerContent,
         SetContainerSlot, SetDefaultSpawnPosition, SetHealth, SetHeldItem, SetPlayerPosition,
         SetPlayerPositionAndRotation, SetPlayerRotation, SetRenderDistance, SetSimulationDistance,
-        Slot, SpawnPlayer, SynchronizePlayerPosition, SystemChatMessage, UPDATE_RECIPES_PACKET_ID,
-        UPDATE_TAGS_PACKET_ID, UnloadChunk, UseItemOn, decode_acknowledge_block_change,
-        decode_block_update, decode_change_difficulty, decode_chat_message_serverbound,
-        decode_chunk_data, decode_client_information, decode_client_status, decode_combat_death,
-        decode_confirm_teleportation, decode_disconnect_play, decode_entity_event,
-        decode_entity_teleport, decode_game_event, decode_join_game, decode_keep_alive_clientbound,
-        decode_keep_alive_serverbound, decode_move_entity_pos, decode_move_entity_pos_rot,
-        decode_move_entity_rot, decode_player_abilities, decode_player_digging,
-        decode_plugin_message_clientbound, decode_respawn, decode_set_block_destroy_stage,
-        decode_set_center_chunk, decode_set_container_content, decode_set_container_slot,
-        decode_set_creative_mode_slot, decode_set_default_spawn_position, decode_set_health,
-        decode_set_held_item, decode_set_held_item_serverbound, decode_set_player_position,
+        Slot, SpawnEntity, SpawnPlayer, SynchronizePlayerPosition, SystemChatMessage,
+        UPDATE_RECIPES_PACKET_ID, UPDATE_TAGS_PACKET_ID, UnloadChunk, UseItemOn,
+        decode_acknowledge_block_change, decode_block_update, decode_change_difficulty,
+        decode_chat_message_serverbound, decode_chunk_data, decode_client_information,
+        decode_client_status, decode_combat_death, decode_confirm_teleportation,
+        decode_disconnect_play, decode_entity_event, decode_entity_teleport, decode_game_event,
+        decode_join_game, decode_keep_alive_clientbound, decode_keep_alive_serverbound,
+        decode_move_entity_pos, decode_move_entity_pos_rot, decode_move_entity_rot,
+        decode_player_abilities, decode_player_digging, decode_plugin_message_clientbound,
+        decode_respawn, decode_set_block_destroy_stage, decode_set_center_chunk,
+        decode_set_container_content, decode_set_container_slot, decode_set_creative_mode_slot,
+        decode_set_default_spawn_position, decode_set_health, decode_set_held_item,
+        decode_set_held_item_serverbound, decode_set_player_position,
         decode_set_player_position_and_rotation, decode_set_player_rotation,
         decode_set_render_distance, decode_set_simulation_distance, decode_slot,
         decode_synchronize_player_position, decode_unload_chunk, decode_use_item_on,
@@ -4935,7 +5091,7 @@ mod tests {
         encode_set_default_spawn_position, encode_set_health, encode_set_held_item,
         encode_set_player_position, encode_set_player_position_and_rotation,
         encode_set_player_rotation, encode_set_render_distance, encode_set_simulation_distance,
-        encode_slot, encode_spawn_player, encode_synchronize_player_position,
+        encode_slot, encode_spawn_entity, encode_spawn_player, encode_synchronize_player_position,
         encode_system_chat_message, encode_unload_chunk, encode_update_recipes_empty,
         encode_update_tags_empty, encode_use_item_on, ensure_play_state,
     };
@@ -6126,6 +6282,29 @@ mod tests {
         };
         let mut wire = Vec::new();
         encode_spawn_player(&packet, TEST_MAX_FRAME, &mut wire)?;
+        assert!(!wire.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn spawn_entity_encode() -> Result<(), PlayError> {
+        let packet = SpawnEntity {
+            entity_id: 42,
+            uuid: crate::primitives::Uuid::new(1, 2),
+            entity_type: 72,
+            x: 1.0,
+            y: 64.0,
+            z: -2.0,
+            pitch: 0,
+            yaw: 64,
+            head_yaw: 64,
+            data: 0,
+            velocity_x: 0,
+            velocity_y: 0,
+            velocity_z: 0,
+        };
+        let mut wire = Vec::new();
+        encode_spawn_entity(&packet, TEST_MAX_FRAME, &mut wire)?;
         assert!(!wire.is_empty());
         Ok(())
     }
