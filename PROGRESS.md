@@ -275,18 +275,18 @@ c587232 Establish clean-room Rust workspace.
 
 ## 今後の展望
 
-Phases A–I 完了。ModHost は tick に配線済み。次は **#60 Online mode** または実 mod の登録経路。
+**製品着地は箱庭計画（Hakoniwa）。** 詳細は [docs/hakoniwa.md](docs/hakoniwa.md)。
 
-1. ~~正しさ — #122 / #131 / #123~~
-2. ~~永続化 — #124 / #125 / #126~~
-3. ~~ストリーム／リスポーン — #127 / #128~~
-4. ~~Survival 感 — #129 / #130 / #133~~
-5. ~~Mod API 準備 — #132 / #101 / tick 配線~~
-6. **Offline playability (Phase J)** — バニラ 1.20.1 オフライン参加・掘る/置く/チャット
-7. **Online mode** — #60
-8. **実 mod 登録** — `Server` へ mods を渡す経路
+1. ~~正しさ / 永続化 / Survival 感 / Mod API 配線~~
+2. ~~Offline playability (Phase J) — 参加・平坦台地可視化~~
+3. **H0** — スコープ固定・`hakoniwa-size`・境界クランプ・`dist` プロファイル
+4. **H1** — ブロック衝突
+5. **H2–H6** — マップパック、次元、簡易 Mob、静的液体、極限サイズ
+6. Online mode (#60) / 実 mod 登録 — 任意・後回し可
+
+無限地形生成・Forge 互換・統合版プロトコルは目標外。
 
 ---
 
-*最終更新: Phase J オフライン playability 検証開始*
+*最終更新: 箱庭計画 H0*
 *テスト数: workspace 緑想定*

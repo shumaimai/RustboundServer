@@ -27,10 +27,13 @@ use std::path::{Path, PathBuf};
 /// - `level_name`: World data directory for overrides/players
 /// - `autosave_interval_secs`: Periodic flush interval
 ///
+/// **Hakoniwa (箱庭):**
+/// - `hakoniwa_size`: fixed garden size (`tiny` / `small` / `medium`)
+///
 /// **Intentionally unused (parsed but not enforced):**
 /// - `white_list`: Whitelist enforcement is not implemented
 /// - `pvp`: PvP damage rules not implemented
-/// - `allow_nether`: Multi-dimension support not implemented
+/// - `allow_nether`: deferred until hakoniwa H3 dimension packs
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// The host to bind to.
@@ -66,6 +69,8 @@ pub struct ServerConfig {
     pub keep_alive_timeout_secs: u64,
     /// The autosave interval (in seconds). 0 disables autosave (save only on shutdown).
     pub autosave_interval_secs: u64,
+    /// Fixed garden size preset (`tiny` / `small` / `medium`).
+    pub hakoniwa_size: crate::hakoniwa::MapSize,
 }
 
 impl Default for ServerConfig {
@@ -87,6 +92,7 @@ impl Default for ServerConfig {
             network_compression_threshold: 256,
             keep_alive_timeout_secs: 30,
             autosave_interval_secs: 600, // 10 minutes default
+            hakoniwa_size: crate::hakoniwa::MapSize::Tiny,
         }
     }
 }
@@ -220,6 +226,13 @@ fn apply_config_values(
     }
     if let Some(v) = map.get("autosave-interval") {
         config.autosave_interval_secs = parse_u64(v, "autosave-interval")?;
+    }
+    if let Some(v) = map.get("hakoniwa-size") {
+        config.hakoniwa_size =
+            crate::hakoniwa::MapSize::parse(v).ok_or_else(|| ConfigError::InvalidValue {
+                key: "hakoniwa-size".to_string(),
+                message: format!("expected tiny|small|medium, got '{v}'"),
+            })?;
     }
     Ok(())
 }
@@ -373,6 +386,7 @@ online-mode=true
 view-distance=12
 motd=My Server
 level-name=myworld
+hakoniwa-size=small
 "#;
         let config = parse_config_string(content)?;
         assert_eq!(config.port, 25566);
@@ -381,6 +395,7 @@ level-name=myworld
         assert_eq!(config.view_distance, 12);
         assert_eq!(config.motd, "My Server");
         assert_eq!(config.level_name, "myworld");
+        assert_eq!(config.hakoniwa_size, crate::hakoniwa::MapSize::Small);
         Ok(())
     }
 

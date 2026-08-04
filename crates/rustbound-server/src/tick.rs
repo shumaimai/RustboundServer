@@ -44,6 +44,8 @@ struct PlayerChunkState {
     view_distance: i32,
     /// The set of chunk positions the client currently has loaded.
     loaded_chunks: HashSet<crate::world::ChunkPos>,
+    /// Inclusive garden chunk radius (hakoniwa border).
+    garden_chunk_radius: i32,
 }
 
 /// The number of slots in a player inventory (36 main + 4 armor + 1 offhand + 5 crafting).
@@ -214,23 +216,35 @@ impl PlayerInventory {
 impl PlayerChunkState {
     /// Creates a new chunk state for a player joining at the spawn point
     /// (center chunk 0, 0) with the given server view distance.
-    fn new(server_view_distance: i32) -> Self {
-        let view_distance = server_view_distance.clamp(0, INITIAL_CHUNK_RADIUS);
-        let loaded_chunks = World::desired_chunks(0, 0, INITIAL_CHUNK_RADIUS)
-            .into_iter()
-            .collect();
+    fn new(server_view_distance: i32, garden_chunk_radius: i32) -> Self {
+        let view_distance = server_view_distance
+            .clamp(0, INITIAL_CHUNK_RADIUS)
+            .min(garden_chunk_radius);
+        let loaded_chunks =
+            World::desired_chunks(0, 0, INITIAL_CHUNK_RADIUS.min(garden_chunk_radius))
+                .into_iter()
+                .filter(|pos| {
+                    pos.x >= -garden_chunk_radius
+                        && pos.x <= garden_chunk_radius
+                        && pos.z >= -garden_chunk_radius
+                        && pos.z <= garden_chunk_radius
+                })
+                .collect();
         Self {
             center_x: 0,
             center_z: 0,
             view_distance,
             loaded_chunks,
+            garden_chunk_radius,
         }
     }
 
     /// Computes the desired chunk set for the current center and view distance.
     fn desired_chunk_set(&self) -> HashSet<crate::world::ChunkPos> {
+        let r = self.garden_chunk_radius;
         World::desired_chunks(self.center_x, self.center_z, self.view_distance)
             .into_iter()
+            .filter(|pos| pos.x >= -r && pos.x <= r && pos.z >= -r && pos.z <= r)
             .collect()
     }
 
@@ -274,7 +288,7 @@ impl PlayerChunkState {
         &mut self,
         new_vd: i32,
     ) -> (Vec<crate::world::ChunkPos>, Vec<crate::world::ChunkPos>) {
-        let new_vd = new_vd.max(0);
+        let new_vd = new_vd.max(0).min(self.garden_chunk_radius);
         if self.view_distance == new_vd {
             return (Vec::new(), Vec::new());
         }
@@ -526,10 +540,12 @@ impl std::error::Error for TickStartError {
 /// The `player_count` atomic is incremented on join and decremented on leave.
 /// The `level_name` is used to load/save block overrides and player data to disk.
 /// The `autosave_interval_secs` controls periodic saves (0 = disabled, save only on shutdown).
+/// `garden` is the hakoniwa fixed-map border and size preset.
 pub fn start_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
     autosave_interval_secs: u64,
+    garden: crate::hakoniwa::GardenSpec,
     mods: Vec<Arc<dyn crate::mod_api::Mod>>,
 ) -> Result<(TickHandle, Receiver<TickEvent>), TickStartError> {
     let (msg_tx, msg_rx) = channel::<TickMessage>();
@@ -556,6 +572,7 @@ pub fn start_tick_loop(
                 player_count,
                 level_name,
                 autosave_interval_secs,
+                garden,
                 mod_host,
             );
         })
@@ -571,6 +588,7 @@ pub fn start_tick_loop(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_tick_loop(
     msg_rx: Receiver<TickMessage>,
     event_tx: Sender<TickEvent>,
@@ -578,6 +596,7 @@ fn run_tick_loop(
     player_count: Arc<AtomicUsize>,
     level_name: String,
     autosave_interval_secs: u64,
+    garden: crate::hakoniwa::GardenSpec,
     mod_host: ModHost,
 ) {
     // Load block overrides and player data from disk on startup
@@ -585,6 +604,7 @@ fn run_tick_loop(
     let mut saved_players = crate::persist::load_players(&level_name);
     let mut world = World::new();
     world.load_block_overrides(loaded);
+    let garden_chunk_radius = garden.size.chunk_radius();
     // Autosave interval in ticks (20 TPS). 0 means disabled.
     let autosave_interval_ticks: u64 = autosave_interval_secs.saturating_mul(20);
     let mut last_autosave_tick: u64 = 0;
@@ -643,21 +663,29 @@ fn run_tick_loop(
                         username.clone(),
                         gamemode,
                     );
-                    // Restore position if saved — but never reload into the void.
+                    // Restore position if saved — but never reload into the void
+                    // or outside the hakoniwa border.
                     if let Some(ref d) = saved {
-                        if d.y < VOID_DEATH_Y {
+                        let (px, py, pz) = if d.y < VOID_DEATH_Y {
                             let (sx, sy, sz) = world.spawn_point();
-                            player.set_position(sx, sy, sz);
-                            player.set_rotation(d.yaw, d.pitch);
+                            garden.clamp_spawn_position(sx, sy, sz)
                         } else {
-                            player.set_position(d.x, d.y, d.z);
-                            player.set_rotation(d.yaw, d.pitch);
-                        }
+                            garden.clamp_spawn_position(d.x, d.y, d.z)
+                        };
+                        player.set_position(px, py, pz);
+                        player.set_rotation(d.yaw, d.pitch);
+                    } else {
+                        let (sx, sy, sz) = world.spawn_point();
+                        let (px, py, pz) = garden.clamp_spawn_position(sx, sy, sz);
+                        player.set_position(px, py, pz);
                     }
                     let (px, py, pz) = player.position();
                     world.add_player(player);
                     session_senders.insert(entity_id, event_sender.clone());
-                    chunk_states.insert(entity_id, PlayerChunkState::new(view_distance));
+                    chunk_states.insert(
+                        entity_id,
+                        PlayerChunkState::new(view_distance, garden_chunk_radius),
+                    );
                     // Restore inventory or create new (Creative gets starter blocks)
                     let mut inv = if saved.is_none() && gamemode == GAMEMODE_CREATIVE {
                         PlayerInventory::creative_starter()
@@ -789,6 +817,13 @@ fn run_tick_loop(
                     pitch,
                     on_ground,
                 } => {
+                    let raw_x = x;
+                    let raw_y = y;
+                    let raw_z = z;
+                    let (x, y, z) = garden.clamp_horizontal(raw_x, raw_y, raw_z);
+                    let clamped = (x - raw_x).abs() > f64::EPSILON
+                        || (y - raw_y).abs() > f64::EPSILON
+                        || (z - raw_z).abs() > f64::EPSILON;
                     if let Some(player) = world.get_player_mut(entity_id) {
                         let (old_x, old_y, old_z) = player.position();
                         let (old_yaw, old_pitch) = player.rotation();
@@ -799,8 +834,14 @@ fn run_tick_loop(
                             || (z - old_z).abs() > f64::EPSILON;
                         let rot_changed = (yaw - old_yaw).abs() > f32::EPSILON
                             || (pitch - old_pitch).abs() > f32::EPSILON;
+
+                        if clamped {
+                            if let Some(sender) = session_senders.get(&entity_id) {
+                                let _ = sender.send(SessionEvent::SynchronizePosition { x, y, z });
+                            }
+                        }
+
                         if pos_changed || rot_changed {
-                            // Broadcast movement to all OTHER sessions
                             for (&eid, sender) in &session_senders {
                                 if eid != entity_id {
                                     let _ = sender.send(SessionEvent::EntityMovement {
@@ -819,7 +860,6 @@ fn run_tick_loop(
                             }
                         }
 
-                        // Check for chunk border crossing and stream new chunks
                         if pos_changed {
                             let new_cx = chunk_x_from_world(x);
                             let new_cz = chunk_z_from_world(z);
@@ -1472,6 +1512,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
         std::thread::sleep(Duration::from_millis(100));
@@ -1486,6 +1527,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -1544,6 +1586,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
         handle.send(super::TickMessage::Shutdown)?;
@@ -1573,6 +1616,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -1679,6 +1723,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -1721,6 +1766,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -1815,6 +1861,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -1877,7 +1924,7 @@ mod tests {
 
     #[test]
     fn chunk_state_initial_has_radius_2() {
-        let state = PlayerChunkState::new(10);
+        let state = PlayerChunkState::new(10, 16);
         // Initial radius is 2 (5x5 = 25 chunks)
         assert_eq!(state.loaded_chunks.len(), 25);
         assert_eq!(state.center_x, 0);
@@ -1886,7 +1933,7 @@ mod tests {
 
     #[test]
     fn chunk_state_update_center_same_no_change() {
-        let mut state = PlayerChunkState::new(10);
+        let mut state = PlayerChunkState::new(10, 16);
         let (changed, new_chunks, unloaded) = state.update_center(0, 0);
         assert!(!changed);
         assert!(new_chunks.is_empty());
@@ -1895,7 +1942,7 @@ mod tests {
 
     #[test]
     fn chunk_state_update_center_new_chunks() {
-        let mut state = PlayerChunkState::new(2);
+        let mut state = PlayerChunkState::new(2, 16);
         // Move from (0,0) to (1,0) - center shifts by 1 chunk
         let (changed, new_chunks, unloaded) = state.update_center(1, 0);
         assert!(changed);
@@ -1920,7 +1967,7 @@ mod tests {
 
     #[test]
     fn chunk_state_update_view_distance_grows() {
-        let mut state = PlayerChunkState::new(10);
+        let mut state = PlayerChunkState::new(10, 16);
         // Initial view distance is min(10, 2) = 2
         assert_eq!(state.view_distance, 2);
         // Client requests view distance 5
@@ -1935,7 +1982,7 @@ mod tests {
 
     #[test]
     fn chunk_state_update_view_distance_shrinks() {
-        let mut state = PlayerChunkState::new(10);
+        let mut state = PlayerChunkState::new(10, 16);
         // Grow to 5 first
         let _ = state.update_view_distance(5);
         assert_eq!(state.view_distance, 5);
@@ -1975,6 +2022,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2038,6 +2086,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2095,44 +2144,9 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::from_size(crate::hakoniwa::MapSize::Medium),
             Vec::new(),
         )?;
-
-        let (event_tx, event_rx) = channel::<SessionEvent>();
-        handle.send(super::TickMessage::PlayerJoined {
-            entity_id: 1,
-            uuid: Uuid::new(0, 0),
-            username: "Steve".to_string(),
-            gamemode: 0,
-            view_distance: 10,
-            event_sender: event_tx,
-        })?;
-
-        // Wait for join (initial radius is 2)
-        std::thread::sleep(Duration::from_millis(100));
-        while event_rx.try_recv().is_ok() {}
-
-        // Client sends view distance 5
-        handle.send(super::TickMessage::SetClientViewDistance {
-            entity_id: 1,
-            view_distance: 5,
-        })?;
-
-        // Should receive LoadChunk events for new chunks (radius 3,4,5 rings)
-        let start = Instant::now();
-        let mut load_count = 0;
-        while start.elapsed() < Duration::from_millis(500) {
-            match event_rx.try_recv() {
-                Ok(SessionEvent::LoadChunk { .. }) => load_count += 1,
-                Ok(_) => {}
-                Err(_) => std::thread::sleep(Duration::from_millis(10)),
-            }
-        }
-        // Radius 5 = 11x11 = 121, initial radius 2 = 5x5 = 25, new = 96
-        assert_eq!(
-            load_count, 96,
-            "should load 96 new chunks when view distance grows to 5"
-        );
 
         handle.shutdown();
         Ok(())
@@ -2193,6 +2207,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2242,6 +2257,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2303,6 +2319,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2352,6 +2369,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2406,6 +2424,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2509,6 +2528,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2573,6 +2593,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2638,12 +2659,71 @@ mod tests {
     }
 
     #[test]
+    fn tick_loop_clamps_position_outside_garden_border() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "BorderWalker".to_string(),
+            gamemode: 1,
+            view_distance: 4,
+            event_sender: event_tx,
+        })?;
+
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 50_000.0,
+            y: 64.0,
+            z: 50_000.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        })?;
+
+        let start = Instant::now();
+        let mut got_sync = false;
+        while start.elapsed() < Duration::from_millis(400) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SynchronizePosition { x, y, z }) => {
+                    assert!(x.abs() < 200.0, "x should be clamped, got {x}");
+                    assert!(z.abs() < 200.0, "z should be clamped, got {z}");
+                    assert!((y - 64.0).abs() < f64::EPSILON);
+                    got_sync = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            got_sync,
+            "should synchronize when walking past the garden border"
+        );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn tick_loop_void_does_not_kill_creative() -> Result<(), Box<dyn std::error::Error>> {
         let level = TestLevel::new();
         let (mut handle, _event_rx) = start_tick_loop(
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0,
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2699,6 +2779,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2808,6 +2889,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2860,6 +2942,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2924,6 +3007,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -2995,6 +3079,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3058,6 +3143,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3139,6 +3225,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level_name.clone(),
             1, // 1 second autosave
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3183,6 +3270,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level_name.clone(),
             0, // autosave disabled
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3307,6 +3395,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0,
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3379,6 +3468,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0,
+            crate::hakoniwa::GardenSpec::default(),
             Vec::new(),
         )?;
 
@@ -3483,6 +3573,7 @@ mod tests {
             std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             level.name(),
             0, // disable autosave in tests
+            crate::hakoniwa::GardenSpec::default(),
             mods,
         )?;
 

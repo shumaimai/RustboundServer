@@ -1,6 +1,7 @@
 # Project Rules
 
 - Build a pure Rust server compatible with Minecraft Java Edition 1.20.1. Arbitrary Java Forge mod compatibility is not a goal.
+- Product landing: **hakoniwa** — fixed-size gardens (see `docs/hakoniwa.md`), not infinite vanilla parity.
 - Use public documentation and black-box observation only; maintain a clean-room implementation.
 - Never redistribute or commit Minecraft, Forge, mappings, decompiled output, local reference installations, or other reference artifacts.
 - Do not copy implementation details from decompiled Minecraft code or Forge patches.
