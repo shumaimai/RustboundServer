@@ -219,16 +219,23 @@ pub fn resolve_pack(level_name: &str, size: MapSize) -> MapPack {
     }
 }
 
-// --- Built-in decoration helpers (registry block states) ---
+// --- Built-in decoration helpers (1.20.1 global palette states) ---
 
-const STONE: i32 = 1;
-const BEDROCK: i32 = 7;
-const GRASS: i32 = 8;
-const DIRT: i32 = 10;
-const SAND: i32 = 24;
-const DIAMOND_BLOCK: i32 = 174;
-const EMERALD_BLOCK: i32 = 175;
-const COAL_BLOCK: i32 = 173;
+const STONE: i32 = crate::chunk::STONE_BLOCK_STATE;
+const BEDROCK: i32 = crate::chunk::BEDROCK_BLOCK_STATE;
+const GRASS: i32 = crate::chunk::GRASS_BLOCK_STATE;
+const DIRT: i32 = crate::chunk::DIRT_BLOCK_STATE;
+const SAND: i32 = crate::chunk::SAND_BLOCK_STATE;
+const DIAMOND_BLOCK: i32 = crate::chunk::DIAMOND_BLOCK_STATE;
+const EMERALD_BLOCK: i32 = crate::chunk::EMERALD_BLOCK_STATE;
+const COAL_BLOCK: i32 = crate::chunk::COAL_BLOCK_STATE;
+const GLOWSTONE: i32 = crate::chunk::GLOWSTONE_BLOCK_STATE;
+const NETHERRACK: i32 = crate::chunk::NETHERRACK_BLOCK_STATE;
+const END_STONE: i32 = crate::chunk::END_STONE_BLOCK_STATE;
+const SOUL_SAND: i32 = crate::chunk::SOUL_SAND_BLOCK_STATE;
+const WATER: i32 = crate::fluid::WATER_BLOCK_STATE;
+const LAVA: i32 = crate::fluid::LAVA_BLOCK_STATE;
+const CHEST: i32 = crate::container::CHEST_BLOCK_STATE;
 
 fn put(blocks: &mut HashMap<(i32, i32, i32), i32>, x: i32, y: i32, z: i32, state: i32) {
     blocks.insert((x, y, z), state);
@@ -279,14 +286,6 @@ fn path_east(blocks: &mut HashMap<(i32, i32, i32), i32>, length: i32) {
         put(blocks, x, 63, -1, DIRT);
     }
 }
-
-const GLOWSTONE: i32 = 89;
-const NETHERRACK: i32 = 87;
-const END_STONE: i32 = 121;
-const SOUL_SAND: i32 = 88;
-const WATER: i32 = crate::fluid::WATER_BLOCK_STATE;
-const LAVA: i32 = crate::fluid::LAVA_BLOCK_STATE;
-const CHEST: i32 = crate::container::CHEST_BLOCK_STATE;
 
 /// Digs a shallow static water pond (source blocks, no flow).
 fn water_pond(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {

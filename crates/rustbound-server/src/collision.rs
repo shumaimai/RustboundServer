@@ -206,13 +206,8 @@ pub fn resolve_movement(
         y = snap_to_ground(world, dimension, x, y + PLAYER_HEIGHT, z);
     }
 
-    // H5: static water damps sinking and adds light buoyancy.
-    let (x, y, z, fluid_corrected) =
-        fluid::apply_water_motion(world, dimension, old_x, old_y, old_z, x, y, z);
-
     let on_ground = standing_on_ground(world, dimension, x, y, z);
-    let corrected = fluid_corrected
-        || (x - new_x).abs() > f64::EPSILON
+    let corrected = (x - new_x).abs() > f64::EPSILON
         || (y - new_y).abs() > f64::EPSILON
         || (z - new_z).abs() > f64::EPSILON;
 
@@ -279,6 +274,32 @@ mod tests {
             "water must not act as a solid wall, got x={}",
             r.x
         );
+    }
+
+    #[test]
+    fn falling_into_water_does_not_force_server_correction() {
+        let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
+        for y in 61..=63 {
+            world.set_block(dim, 0, y, 0, fluid::WATER_BLOCK_STATE);
+        }
+        // Client proposes sinking into the water column — server must accept it
+        // without rewriting Y (which would spam teleports / lock look).
+        let r = resolve_movement(&world, dim, 0.5, 64.0, 0.5, 0.5, 62.2, 0.5, 0);
+        assert!(
+            !r.corrected,
+            "water entry must not mark corrected, y={}",
+            r.y
+        );
+        assert!((r.y - 62.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn netherrack_and_end_stone_are_solid() {
+        assert!(is_solid(crate::chunk::NETHERRACK_BLOCK_STATE));
+        assert!(is_solid(crate::chunk::END_STONE_BLOCK_STATE));
+        assert!(is_solid(crate::chunk::GLOWSTONE_BLOCK_STATE));
+        assert!(!is_solid(fluid::WATER_BLOCK_STATE));
     }
 
     #[test]

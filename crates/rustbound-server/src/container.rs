@@ -94,9 +94,9 @@ pub fn apply_window_slot(
 pub fn starter_chest_loot() -> [Slot; CHEST_SLOT_COUNT] {
     let mut slots = std::array::from_fn(|_| Slot::empty());
     // A few useful stubs from the server registry (dirt / stone / oak planks).
-    slots[0] = Slot::item(10, 16); // dirt
+    slots[0] = Slot::item(10, 16); // dirt (stub)
     slots[1] = Slot::item(1, 16); // stone
-    slots[2] = Slot::item(15, 8); // oak planks (registry stub)
+    slots[2] = Slot::item(23, 8); // oak planks
     slots[13] = Slot::item(CHEST_ITEM_ID, 1);
     slots
 }

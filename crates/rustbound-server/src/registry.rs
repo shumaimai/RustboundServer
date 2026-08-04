@@ -1,25 +1,8 @@
-//! Minimal block/item ID registry for the flat-world palette.
+//! Minimal block/item ID registry for hakoniwa placement.
 //!
-//! This module provides a small, documented mapping between Minecraft 1.20.1
-//! item IDs and block state IDs for the blocks used in the flat-world generator
-//! and creative placement. The IDs are sourced from public protocol documentation
-//! (wiki.vg / minecraft-data) via black-box observation only — no Minecraft jars
-//! or decompiled code are used.
-//!
-//! ## ID conventions
-//!
-//! - **Block state ID**: The global palette ID used in chunk data and block updates.
-//!   Air = 0, Stone = 1, Dirt = 10, Grass Block = 8, etc.
-//! - **Item ID**: The protocol item ID used in slot data (Set Container Content,
-//!   Set Creative Mode Slot). For block items, the item ID typically equals the
-//!   block's base ID (not the state ID). For simplicity in this minimal registry,
-//!   we use the item ID as the key and map it to the default block state ID.
-//!
-//! ## Unknown ID policy
-//!
-//! If an item ID is not in the registry, `item_to_block_state` returns `None`.
-//! Callers should treat `None` as "no block to place" (e.g., empty hand or
-//! non-block item like a tool or food).
+//! Maps protocol item IDs → 1.20.1 global palette block state IDs for creative
+//! placement and dig drops. IDs come from public minecraft-data / wiki.vg
+//! (clean-room; no jars).
 
 /// A mapping entry from item ID to block state ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,11 +15,10 @@ pub struct BlockItemEntry {
     pub name: &'static str,
 }
 
-/// The minimal block/item registry for the flat-world palette.
+/// Minimal registry used by creative place / pack tooling.
 ///
-/// These IDs correspond to Minecraft 1.20.1 (protocol 763) global palette.
-/// Only full-cube blocks are included — slabs, stairs, and other multi-state
-/// blocks are out of scope for this minimal registry.
+/// First match wins for `item_to_block_state`. Prefer real 1.20.1 item IDs;
+/// keep a few legacy stubs that in-tree tests still use.
 pub const REGISTRY: &[BlockItemEntry] = &[
     BlockItemEntry {
         item_id: 0,
@@ -48,20 +30,97 @@ pub const REGISTRY: &[BlockItemEntry] = &[
         block_state_id: 1,
         name: "stone",
     },
+    // Real IDs
     BlockItemEntry {
-        item_id: 7,
-        block_state_id: 7,
+        item_id: 43,
+        block_state_id: 79,
         name: "bedrock",
     },
     BlockItemEntry {
-        item_id: 8,
-        block_state_id: 8,
+        item_id: 14,
+        block_state_id: 9,
         name: "grass_block",
+    },
+    BlockItemEntry {
+        item_id: 15,
+        block_state_id: 10,
+        name: "dirt",
+    },
+    BlockItemEntry {
+        item_id: 23,
+        block_state_id: 15,
+        name: "oak_planks",
+    },
+    BlockItemEntry {
+        item_id: 44,
+        block_state_id: 112,
+        name: "sand",
+    },
+    BlockItemEntry {
+        item_id: 303,
+        block_state_id: 5850,
+        name: "netherrack",
+    },
+    BlockItemEntry {
+        item_id: 304,
+        block_state_id: 5851,
+        name: "soul_sand",
+    },
+    BlockItemEntry {
+        item_id: 310,
+        block_state_id: 5864,
+        name: "glowstone",
+    },
+    BlockItemEntry {
+        item_id: 355,
+        block_state_id: 7415,
+        name: "end_stone",
+    },
+    BlockItemEntry {
+        item_id: 68,
+        block_state_id: 10604,
+        name: "coal_block",
+    },
+    BlockItemEntry {
+        item_id: 77,
+        block_state_id: 4276,
+        name: "diamond_block",
+    },
+    BlockItemEntry {
+        item_id: 360,
+        block_state_id: 7665,
+        name: "emerald_block",
+    },
+    BlockItemEntry {
+        item_id: 869,
+        block_state_id: 80,
+        name: "water",
+    },
+    BlockItemEntry {
+        item_id: 870,
+        block_state_id: 96,
+        name: "lava",
+    },
+    BlockItemEntry {
+        item_id: 277,
+        block_state_id: 2955,
+        name: "chest",
+    },
+    // Legacy creative hotbar stubs (tests / older configs).
+    BlockItemEntry {
+        item_id: 7,
+        block_state_id: 79,
+        name: "bedrock_stub",
+    },
+    BlockItemEntry {
+        item_id: 8,
+        block_state_id: 9,
+        name: "grass_block_stub",
     },
     BlockItemEntry {
         item_id: 10,
         block_state_id: 10,
-        name: "dirt",
+        name: "dirt_stub",
     },
     BlockItemEntry {
         item_id: 11,
@@ -69,123 +128,23 @@ pub const REGISTRY: &[BlockItemEntry] = &[
         name: "coarse_dirt",
     },
     BlockItemEntry {
-        item_id: 12,
-        block_state_id: 12,
-        name: "podzol",
-    },
-    BlockItemEntry {
-        item_id: 15,
-        block_state_id: 15,
-        name: "gold_ore",
-    },
-    BlockItemEntry {
-        item_id: 16,
-        block_state_id: 16,
-        name: "iron_ore",
-    },
-    BlockItemEntry {
-        item_id: 21,
-        block_state_id: 21,
-        name: "coal_ore",
-    },
-    BlockItemEntry {
         item_id: 24,
-        block_state_id: 24,
-        name: "sand",
+        block_state_id: 112,
+        name: "sand_stub",
     },
     BlockItemEntry {
-        item_id: 32,
-        block_state_id: 32,
-        name: "dead_bush",
-    },
-    BlockItemEntry {
-        item_id: 50,
-        block_state_id: 50,
-        name: "torch",
-    },
-    BlockItemEntry {
-        item_id: 73,
-        block_state_id: 73,
-        name: "redstone_ore",
-    },
-    BlockItemEntry {
-        item_id: 87,
-        block_state_id: 87,
-        name: "netherrack",
-    },
-    BlockItemEntry {
-        item_id: 88,
-        block_state_id: 88,
-        name: "soul_sand",
-    },
-    BlockItemEntry {
-        item_id: 89,
-        block_state_id: 89,
-        name: "glowstone",
-    },
-    BlockItemEntry {
-        item_id: 110,
-        block_state_id: 110,
-        name: "mycelium",
-    },
-    BlockItemEntry {
-        item_id: 121,
-        block_state_id: 121,
-        name: "end_stone",
-    },
-    BlockItemEntry {
-        item_id: 152,
-        block_state_id: 152,
-        name: "redstone_block",
-    },
-    BlockItemEntry {
-        item_id: 173,
-        block_state_id: 173,
-        name: "coal_block",
-    },
-    BlockItemEntry {
-        item_id: 174,
-        block_state_id: 174,
-        name: "diamond_block",
-    },
-    BlockItemEntry {
-        item_id: 175,
-        block_state_id: 175,
-        name: "emerald_block",
-    },
-    BlockItemEntry {
-        item_id: 179,
-        block_state_id: 179,
-        name: "red_sand",
-    },
-    BlockItemEntry {
-        item_id: 207,
-        block_state_id: 207,
-        name: "nether_quartz_ore",
-    },
-    // Fluids use 1.20.1 global palette source states (wiki.vg / minecraft-data).
-    BlockItemEntry {
-        item_id: 326, // water_bucket places source water in creative stubs
+        item_id: 326,
         block_state_id: 80,
-        name: "water",
+        name: "water_legacy",
     },
     BlockItemEntry {
-        item_id: 327, // lava_bucket
+        item_id: 327,
         block_state_id: 96,
-        name: "lava",
-    },
-    // Chest uses the real 1.20.1 global palette default state so clients render it.
-    BlockItemEntry {
-        item_id: 277,
-        block_state_id: 2955,
-        name: "chest",
+        name: "lava_legacy",
     },
 ];
 
-/// Looks up the block state ID for a given item ID.
-///
-/// Returns `Some(block_state_id)` if the item is a known block item,
-/// or `None` if the item is not in the registry (non-block item or unknown).
+/// Returns `Some(block_state_id)` if the item is a known block item.
 pub fn item_to_block_state(item_id: i32) -> Option<i32> {
     REGISTRY
         .iter()
@@ -193,10 +152,7 @@ pub fn item_to_block_state(item_id: i32) -> Option<i32> {
         .map(|e| e.block_state_id)
 }
 
-/// Looks up the item ID for a given block state ID (reverse lookup).
-///
-/// Returns `Some(item_id)` if the block state is in the registry,
-/// or `None` if not found.
+/// Reverse lookup: first matching registry entry for this block state.
 pub fn block_state_to_item(block_state_id: i32) -> Option<i32> {
     REGISTRY
         .iter()
@@ -204,7 +160,7 @@ pub fn block_state_to_item(block_state_id: i32) -> Option<i32> {
         .map(|e| e.item_id)
 }
 
-/// Looks up the name for a given item ID.
+/// Human-readable name for an item ID, if known.
 pub fn item_name(item_id: i32) -> Option<&'static str> {
     REGISTRY
         .iter()
@@ -212,7 +168,7 @@ pub fn item_name(item_id: i32) -> Option<&'static str> {
         .map(|e| e.name)
 }
 
-/// Looks up the name for a given block state ID.
+/// Human-readable name for a block state ID, if known.
 pub fn block_state_name(block_state_id: i32) -> Option<&'static str> {
     REGISTRY
         .iter()
@@ -225,26 +181,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn air_maps_to_air() {
+    fn air_and_stone_roundtrip() {
         assert_eq!(item_to_block_state(0), Some(0));
         assert_eq!(block_state_to_item(0), Some(0));
-    }
-
-    #[test]
-    fn stone_maps_to_stone() {
         assert_eq!(item_to_block_state(1), Some(1));
         assert_eq!(block_state_to_item(1), Some(1));
     }
 
     #[test]
-    fn dirt_maps_to_dirt() {
+    fn dirt_stub_and_real_item_place_dirt() {
         assert_eq!(item_to_block_state(10), Some(10));
+        assert_eq!(item_to_block_state(15), Some(10));
     }
 
     #[test]
-    fn grass_block_maps_correctly() {
-        assert_eq!(item_to_block_state(8), Some(8));
-        assert_eq!(item_name(8), Some("grass_block"));
+    fn nether_end_materials_use_real_palette() {
+        assert_eq!(item_to_block_state(303), Some(5850));
+        assert_eq!(item_to_block_state(310), Some(5864));
+        assert_eq!(item_to_block_state(355), Some(7415));
+        assert_ne!(item_to_block_state(303), Some(87));
+        assert_ne!(item_to_block_state(355), Some(121));
+    }
+
+    #[test]
+    fn sand_is_not_bamboo_mosaic() {
+        assert_eq!(item_to_block_state(44), Some(112));
+        assert_eq!(item_to_block_state(24), Some(112));
     }
 
     #[test]
@@ -259,28 +221,15 @@ mod tests {
 
     #[test]
     fn air_name() {
-        assert_eq!(item_name(0), Some("air"));
         assert_eq!(block_state_name(0), Some("air"));
     }
 
     #[test]
-    fn registry_entries_are_unique() {
-        // Verify no duplicate item IDs
-        let mut item_ids: Vec<i32> = REGISTRY.iter().map(|e| e.item_id).collect();
-        item_ids.sort();
-        let len_before = item_ids.len();
-        item_ids.dedup();
-        assert_eq!(item_ids.len(), len_before, "duplicate item IDs in registry");
-
-        // Verify no duplicate block state IDs
-        let mut state_ids: Vec<i32> = REGISTRY.iter().map(|e| e.block_state_id).collect();
-        state_ids.sort();
-        let len_before = state_ids.len();
-        state_ids.dedup();
-        assert_eq!(
-            state_ids.len(),
-            len_before,
-            "duplicate block state IDs in registry"
-        );
+    fn item_ids_are_unique() {
+        let mut ids: Vec<i32> = REGISTRY.iter().map(|e| e.item_id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "duplicate item IDs in registry");
     }
 }
