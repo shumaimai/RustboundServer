@@ -392,6 +392,14 @@ pub fn builtin_nether_pack(size: MapSize) -> MapPack {
     let mut blocks = HashMap::new();
     border_wall(&mut blocks, &garden, 2);
     fill_disk(&mut blocks, 0, 63, 0, 4, SOUL_SAND);
+    // Clear spawn column so arrivals at y=65 are not buried.
+    for y in 64..=68 {
+        put(&mut blocks, 0, y, 0, 0);
+        put(&mut blocks, 0, y, 1, 0);
+        put(&mut blocks, 1, y, 0, 0);
+        put(&mut blocks, -1, y, 0, 0);
+        put(&mut blocks, 0, y, -1, 0);
+    }
     portal_pad(&mut blocks, -6, 0, NETHERRACK, GLOWSTONE); // return to overworld
     put(&mut blocks, 3, 64, 0, GLOWSTONE);
     // H5: static lava pool (contact damage).
@@ -409,7 +417,16 @@ pub fn builtin_end_pack(size: MapSize) -> MapPack {
     let mut blocks = HashMap::new();
     border_wall(&mut blocks, &garden, 2);
     fill_disk(&mut blocks, 0, 63, 0, 5, END_STONE);
-    portal_pad(&mut blocks, -6, 0, END_STONE, END_STONE); // return
+    // Clear spawn column for safe arrival at y=65.
+    for y in 64..=68 {
+        put(&mut blocks, 0, y, 0, 0);
+        put(&mut blocks, 0, y, 1, 0);
+        put(&mut blocks, 1, y, 0, 0);
+        put(&mut blocks, -1, y, 0, 0);
+        put(&mut blocks, 0, y, -1, 0);
+    }
+    // Return pad must be glowstone — end stone is the whole plateau.
+    portal_pad(&mut blocks, -6, 0, END_STONE, GLOWSTONE);
     // End-city stub: a few pillars
     for y in 64..72 {
         put(&mut blocks, 12, y, 12, END_STONE);
@@ -540,7 +557,8 @@ mod tests {
         let n = builtin_nether_pack(MapSize::Tiny);
         assert_eq!(n.blocks.get(&(-6, 64, 0)), Some(&GLOWSTONE));
         let e = builtin_end_pack(MapSize::Tiny);
-        assert_eq!(e.blocks.get(&(-6, 64, 0)), Some(&END_STONE));
+        assert_eq!(e.blocks.get(&(-6, 64, 0)), Some(&GLOWSTONE));
+        assert_eq!(e.blocks.get(&(0, 65, 0)), Some(&0));
     }
 
     #[test]

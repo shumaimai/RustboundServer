@@ -825,11 +825,13 @@ fn resync_player_chunks(
 }
 
 /// Moves a player to another enabled dimension (portal or `/dim`).
+#[allow(clippy::too_many_arguments)]
 fn transfer_player_dimension(
     world: &mut World,
     session_senders: &HashMap<i32, Sender<SessionEvent>>,
     chunk_states: &mut HashMap<i32, PlayerChunkState>,
     open_windows: &mut HashMap<i32, OpenContainer>,
+    portal_cooldowns: &mut HashMap<i32, u64>,
     mobs: &[crate::mob::Mob],
     entity_id: i32,
     dest: crate::hakoniwa::DimensionId,
@@ -845,12 +847,13 @@ fn transfer_player_dimension(
     }
     close_open_window(entity_id, open_windows, session_senders, true);
     let gamemode = player.gamemode;
-    let (spawn_x, spawn_y, spawn_z) = world.spawn_point();
+    let (spawn_x, spawn_y, spawn_z) = crate::dimension::arrival_position(world);
     let name = dest.protocol_name().to_string();
     if let Some(player) = world.get_player_mut(entity_id) {
         player.dimension = dest;
         player.set_position(spawn_x, spawn_y, spawn_z);
     }
+    portal_cooldowns.insert(entity_id, crate::dimension::PORTAL_COOLDOWN_TICKS);
     if let Some(sender) = session_senders.get(&entity_id) {
         let _ = sender.send(SessionEvent::RespawnPlayer {
             dimension_type: name.clone(),
@@ -863,11 +866,13 @@ fn transfer_player_dimension(
             has_death_location: false,
             death_dimension_name: String::new(),
             death_location: (0, 0, 0),
-            portal_cooldown: 0,
+            portal_cooldown: crate::dimension::PORTAL_COOLDOWN_TICKS as i32,
             data_kept: 0,
             x: spawn_x,
             y: spawn_y,
             z: spawn_z,
+            // Chunks first, then position — avoids burying the player underground.
+            defer_position_sync: true,
         });
         let _ = sender.send(SessionEvent::SystemChat {
             content: format!(r#"{{"text":"Warped to {}"}}"#, dest.as_str()),
@@ -881,6 +886,13 @@ fn transfer_player_dimension(
         spawn_x,
         spawn_z,
     );
+    if let Some(sender) = session_senders.get(&entity_id) {
+        let _ = sender.send(SessionEvent::SynchronizePosition {
+            x: spawn_x,
+            y: spawn_y,
+            z: spawn_z,
+        });
+    }
     sync_mobs_for_player(session_senders, mobs, entity_id, dest);
 }
 
@@ -960,6 +972,7 @@ fn run_tick_loop(
     let mut break_progress: HashMap<i32, BlockBreakProgress> = HashMap::new();
     let mut open_windows: HashMap<i32, OpenContainer> = HashMap::new();
     let mut next_window_id: u8 = 0;
+    let mut portal_cooldowns: HashMap<i32, u64> = HashMap::new();
     let mut next_mob_id: i32 = 10_000;
     let mut mobs = crate::mob::initial_garden_mobs(&mut next_mob_id);
     let mut mob_rng: u32 = 0xC0FF_EE01;
@@ -1156,6 +1169,7 @@ fn run_tick_loop(
                     // Get the player's UUID before removing
                     let uuid = world.get_player(entity_id).map(|p| p.uuid);
                     open_windows.remove(&entity_id);
+                    portal_cooldowns.remove(&entity_id);
                     world.remove_player(entity_id);
                     session_senders.remove(&entity_id);
                     chunk_states.remove(&entity_id);
@@ -1281,16 +1295,24 @@ fn run_tick_loop(
                             }
                         }
                         let under = crate::dimension::block_under_feet(&world, dimension, x, y, z);
-                        if let Some(dest) = crate::dimension::portal_destination(dimension, under) {
-                            transfer_player_dimension(
-                                &mut world,
-                                &session_senders,
-                                &mut chunk_states,
-                                &mut open_windows,
-                                &mobs,
-                                entity_id,
-                                dest,
-                            );
+                        let on_cooldown = portal_cooldowns
+                            .get(&entity_id)
+                            .is_some_and(|t| *t > 0);
+                        if !on_cooldown {
+                            if let Some(dest) =
+                                crate::dimension::portal_destination(dimension, under)
+                            {
+                                transfer_player_dimension(
+                                    &mut world,
+                                    &session_senders,
+                                    &mut chunk_states,
+                                    &mut open_windows,
+                                    &mut portal_cooldowns,
+                                    &mobs,
+                                    entity_id,
+                                    dest,
+                                );
+                            }
                         }
                     }
                 }
@@ -1342,10 +1364,9 @@ fn run_tick_loop(
                         })
                     });
 
-                    // Prefer opening chests unless Creative is holding a block to place.
-                    if crate::container::is_chest(clicked)
-                        && !(gamemode == GAMEMODE_CREATIVE && holding_block.is_some())
-                    {
+                    // Prefer opening chests whenever the clicked block is a chest
+                    // (held items must not block opening — Creative hotbars are full).
+                    if crate::container::is_chest(clicked) {
                         open_chest_for_player(
                             entity_id,
                             dim,
@@ -1494,6 +1515,7 @@ fn run_tick_loop(
                             &session_senders,
                             &mut chunk_states,
                             &mut open_windows,
+                            &mut portal_cooldowns,
                             &mobs,
                             entity_id,
                             dest,
@@ -1556,6 +1578,7 @@ fn run_tick_loop(
                                         x: spawn_x,
                                         y: spawn_y,
                                         z: spawn_z,
+                                        defer_position_sync: false,
                                     });
                                     // Send updated health after respawn
                                     let _ = sender.send(SessionEvent::SetHealth {
@@ -1871,6 +1894,13 @@ fn run_tick_loop(
                         message: combat_death_message(&username, "tried to swim in lava"),
                     });
                 }
+            }
+        }
+
+        // Periodic task: portal pad cooldown after dimension changes.
+        for remaining in portal_cooldowns.values_mut() {
+            if *remaining > 0 {
+                *remaining -= 1;
             }
         }
 
@@ -3198,18 +3228,43 @@ mod tests {
 
         let start = Instant::now();
         let mut got_respawn = false;
+        let mut got_sync_at_safe_y = false;
         while start.elapsed() < Duration::from_millis(800) {
             match event_rx.try_recv() {
-                Ok(SessionEvent::RespawnPlayer { dimension_name, .. }) => {
+                Ok(SessionEvent::RespawnPlayer {
+                    dimension_name,
+                    defer_position_sync,
+                    y,
+                    ..
+                }) => {
                     assert_eq!(dimension_name, "minecraft:the_nether");
+                    assert!(
+                        defer_position_sync,
+                        "dimension change must defer position until chunks load"
+                    );
+                    assert!(
+                        (y - crate::dimension::DIMENSION_ARRIVAL_Y).abs() < 0.01,
+                        "arrival y should be safe surface, got {y}"
+                    );
                     got_respawn = true;
-                    break;
+                }
+                Ok(SessionEvent::SynchronizePosition { y, .. })
+                    if (y - crate::dimension::DIMENSION_ARRIVAL_Y).abs() < 0.01 =>
+                {
+                    got_sync_at_safe_y = true;
                 }
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(10)),
             }
+            if got_respawn && got_sync_at_safe_y {
+                break;
+            }
         }
         assert!(got_respawn, "/dim nether should Respawn into the nether");
+        assert!(
+            got_sync_at_safe_y,
+            "should sync position after chunks at safe Y"
+        );
         handle.shutdown();
         Ok(())
     }
@@ -3727,6 +3782,57 @@ mod tests {
         })?;
         std::thread::sleep(Duration::from_millis(80));
 
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_creative_with_held_block_still_opens_chest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Creative".to_string(),
+            gamemode: GAMEMODE_CREATIVE,
+            view_distance: 2,
+            event_sender: event_tx,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Creative hotbar has stone in slot 0 — must still open the chest.
+        handle.send(super::TickMessage::PlaceBlock {
+            entity_id: 1,
+            position: (0, 64, 4),
+            face: 1,
+        })?;
+
+        let start = Instant::now();
+        let mut opened = false;
+        while start.elapsed() < Duration::from_millis(500) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::OpenScreen { .. }) => {
+                    opened = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            opened,
+            "creative players holding a block must still open chests"
+        );
         handle.shutdown();
         Ok(())
     }

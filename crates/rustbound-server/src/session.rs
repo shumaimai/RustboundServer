@@ -242,7 +242,7 @@ pub enum SessionEvent {
         /// The player's food saturation (0.0 to 5.0).
         food_saturation: f32,
     },
-    /// Send a Respawn packet and re-synchronize the player after death.
+    /// Send a Respawn packet and optionally re-synchronize position.
     RespawnPlayer {
         /// The dimension type identifier.
         dimension_type: String,
@@ -274,6 +274,9 @@ pub enum SessionEvent {
         y: f64,
         /// The new Z position.
         z: f64,
+        /// When true, only send Respawn — caller sends SynchronizePosition
+        /// after chunk resync (avoids spawning underground / loading terrain).
+        defer_position_sync: bool,
     },
     /// Force the client to an absolute position (garden border clamp).
     SynchronizePosition {
@@ -1149,6 +1152,7 @@ impl PlayerSession {
                     x,
                     y,
                     z,
+                    defer_position_sync,
                 } => {
                     if let Some(dim) = crate::hakoniwa::DimensionId::parse_protocol(&dimension_name)
                     {
@@ -1169,24 +1173,29 @@ impl PlayerSession {
                         portal_cooldown,
                         data_kept,
                     )?;
-                    // After respawn, re-synchronize position to spawn point
-                    self.last_x = x;
-                    self.last_y = y;
-                    self.last_z = z;
-                    let teleport_id = self.next_teleport_id;
-                    self.next_teleport_id += 1;
-                    let sync = SynchronizePlayerPosition {
-                        x,
-                        y,
-                        z,
-                        yaw: 0.0,
-                        pitch: 0.0,
-                        flags: 0,
-                        teleport_id,
-                    };
-                    let mut wire = Vec::new();
-                    encode_synchronize_player_position(&sync, self.max_frame_length, &mut wire)?;
-                    self.send_wire(stream, &wire)?;
+                    if !defer_position_sync {
+                        self.last_x = x;
+                        self.last_y = y;
+                        self.last_z = z;
+                        let teleport_id = self.next_teleport_id;
+                        self.next_teleport_id += 1;
+                        let sync = SynchronizePlayerPosition {
+                            x,
+                            y,
+                            z,
+                            yaw: 0.0,
+                            pitch: 0.0,
+                            flags: 0x18,
+                            teleport_id,
+                        };
+                        let mut wire = Vec::new();
+                        encode_synchronize_player_position(
+                            &sync,
+                            self.max_frame_length,
+                            &mut wire,
+                        )?;
+                        self.send_wire(stream, &wire)?;
+                    }
                     processed = true;
                 }
                 SessionEvent::SynchronizePosition { x, y, z } => {
