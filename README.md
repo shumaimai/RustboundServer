@@ -1,63 +1,63 @@
 # Rustbound
 
-Clean-room Minecraft Java Edition **1.20.1** (protocol **763**) server written in Rust.
+Minecraft Java Edition **1.20.1**（プロトコル **763**）向けのクリーンルーム実装サーバ。Rust で記述する。
 
-Built from public documentation and black-box observation only. Minecraft, Forge, mappings, decompiled output, and other reference artifacts are never incorporated or redistributed.
+公開ドキュメントとブラックボックス観測のみを根拠とする。Minecraft・Forge・mappings・逆コンパイル成果物などの参照用アーティファクトは、取り込み・再配布しない。
 
-This project is not affiliated with Mojang Studios, Microsoft, or the Forge project. Minecraft and related marks belong to their respective owners.
+本プロジェクトは Mojang Studios、Microsoft、Forge プロジェクトとは無関係である。Minecraft および関連商標は、それぞれの権利者に帰属する。
 
-## Status: complete (Hakoniwa)
+## 状態: 完了（箱庭）
 
-The product scope is **Hakoniwa (箱庭)**: a fixed-size garden, not infinite vanilla generation and not Forge compatibility.
+製品スコープは **箱庭（Hakoniwa）** である。固定サイズの庭であり、無限バニラ生成や Forge 互換は対象外とする。
 
-| Capability | Status |
-|------------|--------|
-| Offline join, Play session, 20 TPS tick | Complete |
-| Fixed gardens (`tiny` / `small` / `medium`) with world border | Complete |
-| Block collision, dig / place | Complete |
-| Map packs (overworld / nether / end) | Complete |
-| Dimension transfer (portal pads, `/dim`) | Complete |
-| Simple mobs | Complete |
-| Static water / lava | Complete |
-| Chests (minimal containers) | Complete |
-| Size-optimized `dist` binary | Complete |
-| Online mode | Optional ([#60](https://github.com/shumaimai/RustboundServer/issues/60)) |
-| Forge / Bedrock / infinite terrain | Out of scope |
+| 項目 | 状態 |
+|------|------|
+| オフライン参加、Play セッション、20 TPS tick | 完了 |
+| 固定箱庭（`tiny` / `small` / `medium`）とワールド境界 | 完了 |
+| ブロック衝突、破壊／設置 | 完了 |
+| マップパック（現世／ネザー／エンド） | 完了 |
+| 次元移動（ポータル、`/dim`） | 完了 |
+| 簡易 Mob | 完了 |
+| 静的な水／溶岩 | 完了 |
+| チェスト（最低限のコンテナ） | 完了 |
+| `dist` プロファイルによる小型バイナリ | 完了 |
+| オンラインモード | 任意（[#60](https://github.com/shumaimai/RustboundServer/issues/60)） |
+| Forge／Bedrock／無限地形 | 対象外 |
 
-Specification: [docs/hakoniwa.md](docs/hakoniwa.md). Engineering history: [PROGRESS.md](PROGRESS.md).
+仕様: [docs/hakoniwa.md](docs/hakoniwa.md)。経緯: [PROGRESS.md](PROGRESS.md)。
 
-## Run (offline)
+## 起動（オフライン）
 
 ```console
 cp server.properties.example server.properties
 cargo run -p rustbound-server --release -- --config server.properties
 ```
 
-Connect a **1.20.1** offline client to `localhost:25565`. Example config defaults to Creative and `hakoniwa-size=tiny`.
+**1.20.1** のオフラインクライアントで `localhost:25565` に接続する。例示設定の既定は Creative と `hakoniwa-size=tiny` である。
 
-Distribution build:
+配布用ビルド:
 
 ```console
 cargo build -p rustbound-server --profile dist
 ```
 
-Smoke checks:
+スモーク確認:
 
 ```console
 ./scripts/smoke_offline_join.sh
 cargo test -p rustbound-server --lib server_offline_playability_smoke
 ```
 
-## Workspace
+## ワークスペース
 
 ```
 crates/
-  rustbound-protocol/     # Wire codecs, Login / Play state machines
-  rustbound-server/       # Listener, session, tick, world, hakoniwa
-  rustbound-conformance/  # Black-box probes and differential helpers
+  rustbound-protocol/     # ワイヤコーデック、Login / Play 状態機械
+  rustbound-server/       # リスナ、セッション、tick、ワールド、箱庭
+  rustbound-conformance/  # ブラックボックス探査と差分適合
 ```
 
-## Build and test
+## ビルドとテスト
 
 ```console
 cargo build --workspace
@@ -66,14 +66,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-## Design constraints
+## 設計上の制約
 
-- Single authoritative tick thread (20 TPS); sessions communicate via channels.
-- Prefer existing `LoginStateMachine` / `PlayStateMachine`.
-- Forge may be used locally as an oracle only; never commit its artifacts.
-- `unsafe` is forbidden at the workspace level unless isolated and audited.
-- Contributors must follow [AGENTS.md](AGENTS.md).
+- 権威ある tick は単一スレッド（20 TPS）。セッション間はチャネルで連携する。
+- 既存の `LoginStateMachine` / `PlayStateMachine` を優先して用いる。
+- Forge はローカルでの oracle に限り利用可。成果物はコミットしない。
+- `unsafe` はワークスペース既定では禁止。隔離・文書化・監査されたモジュールに限る。
+- 貢献者は [AGENTS.md](AGENTS.md) に従う。
 
-## License
+## ライセンス
 
-MIT OR Apache-2.0, at your option.
+MIT OR Apache-2.0（選択可）。
