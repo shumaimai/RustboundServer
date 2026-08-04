@@ -20,10 +20,25 @@ pub const NUM_SECTIONS: usize = 24;
 pub const SECTION_BLOCK_COUNT: usize = 4096;
 
 /// Block state ID for air.
-const AIR_BLOCK_STATE: i32 = 0;
+pub const AIR_BLOCK_STATE: i32 = 0;
 
 /// Block state ID for stone (1.20.1 global palette).
-const STONE_BLOCK_STATE: i32 = 1;
+pub const STONE_BLOCK_STATE: i32 = 1;
+
+/// Inclusive min Y of the generated stone plateau.
+pub const FLAT_STONE_MIN_Y: i32 = -64;
+
+/// Inclusive max Y of the generated stone plateau (stand at y=64 on top).
+pub const FLAT_STONE_MAX_Y: i32 = 63;
+
+/// Returns the generated flat-world block state (ignores dig/place overrides).
+pub fn generated_flat_block(_x: i32, y: i32, _z: i32) -> i32 {
+    if (FLAT_STONE_MIN_Y..=FLAT_STONE_MAX_Y).contains(&y) {
+        STONE_BLOCK_STATE
+    } else {
+        AIR_BLOCK_STATE
+    }
+}
 
 /// Biome ID for plains (matches registry codec fixture).
 const PLAINS_BIOME_ID: i32 = 0;
