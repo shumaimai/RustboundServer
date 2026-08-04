@@ -25,11 +25,38 @@ pub const AIR_BLOCK_STATE: i32 = 0;
 /// Block state ID for stone (1.20.1 global palette).
 pub const STONE_BLOCK_STATE: i32 = 1;
 
+/// Block state ID for bedrock (1.20.1 global palette).
+pub const BEDROCK_BLOCK_STATE: i32 = 79;
+
+/// Block state ID for grass block, snowy=false (1.20.1).
+pub const GRASS_BLOCK_STATE: i32 = 9;
+
+/// Block state ID for dirt (1.20.1 global palette).
+pub const DIRT_BLOCK_STATE: i32 = 10;
+
+/// Block state ID for sand (1.20.1 global palette).
+pub const SAND_BLOCK_STATE: i32 = 112;
+
 /// Block state ID for netherrack (1.20.1 global palette).
-pub const NETHERRACK_BLOCK_STATE: i32 = 87;
+pub const NETHERRACK_BLOCK_STATE: i32 = 5850;
+
+/// Block state ID for soul sand (1.20.1 global palette).
+pub const SOUL_SAND_BLOCK_STATE: i32 = 5851;
+
+/// Block state ID for glowstone (1.20.1 global palette).
+pub const GLOWSTONE_BLOCK_STATE: i32 = 5864;
 
 /// Block state ID for end stone (1.20.1 global palette).
-pub const END_STONE_BLOCK_STATE: i32 = 121;
+pub const END_STONE_BLOCK_STATE: i32 = 7415;
+
+/// Block state ID for diamond block (1.20.1 global palette).
+pub const DIAMOND_BLOCK_STATE: i32 = 4276;
+
+/// Block state ID for emerald block (1.20.1 global palette).
+pub const EMERALD_BLOCK_STATE: i32 = 7665;
+
+/// Block state ID for coal block (1.20.1 global palette).
+pub const COAL_BLOCK_STATE: i32 = 10604;
 
 /// Inclusive min Y of the generated solid plateau.
 pub const FLAT_STONE_MIN_Y: i32 = -64;

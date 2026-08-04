@@ -1195,13 +1195,17 @@ impl PlayerSession {
                     self.last_z = z;
                     let teleport_id = self.next_teleport_id;
                     self.next_teleport_id += 1;
+                    // Absolute XYZ, but keep the client's look direction.
+                    // flags bit3=yaw relative, bit4=pitch relative (delta 0 ⇒ unchanged).
+                    // Resetting yaw/pitch to 0 every correction locks the camera and
+                    // can push vanilla into the "loading terrain" screen.
                     let sync = SynchronizePlayerPosition {
                         x,
                         y,
                         z,
                         yaw: 0.0,
                         pitch: 0.0,
-                        flags: 0,
+                        flags: 0x18,
                         teleport_id,
                     };
                     let mut wire = Vec::new();

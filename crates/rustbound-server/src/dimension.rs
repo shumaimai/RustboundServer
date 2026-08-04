@@ -3,9 +3,9 @@
 use crate::hakoniwa::DimensionId;
 use crate::world::World;
 
-/// Block states used as portal pads.
-pub const PORTAL_GLOWSTONE: i32 = 89;
-pub const PORTAL_END_STONE: i32 = 121;
+/// Block states used as portal pads (1.20.1 global palette).
+pub const PORTAL_GLOWSTONE: i32 = crate::chunk::GLOWSTONE_BLOCK_STATE;
+pub const PORTAL_END_STONE: i32 = crate::chunk::END_STONE_BLOCK_STATE;
 
 /// Destination when standing on a portal pad in `current`.
 pub fn portal_destination(current: DimensionId, block_under_feet: i32) -> Option<DimensionId> {
