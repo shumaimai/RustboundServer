@@ -284,6 +284,36 @@ const GLOWSTONE: i32 = 89;
 const NETHERRACK: i32 = 87;
 const END_STONE: i32 = 121;
 const SOUL_SAND: i32 = 88;
+const WATER: i32 = crate::fluid::WATER_BLOCK_STATE;
+const LAVA: i32 = crate::fluid::LAVA_BLOCK_STATE;
+
+/// Digs a shallow static water pond (source blocks, no flow).
+fn water_pond(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx * dx + dz * dz > radius * radius {
+                continue;
+            }
+            // Hollow the plateau and fill with still water.
+            put(blocks, cx + dx, 63, cz + dz, WATER);
+            put(blocks, cx + dx, 62, cz + dz, WATER);
+            put(blocks, cx + dx, 61, cz + dz, DIRT);
+        }
+    }
+}
+
+/// Digs a shallow static lava pool.
+fn lava_pool(blocks: &mut HashMap<(i32, i32, i32), i32>, cx: i32, cz: i32, radius: i32) {
+    for dx in -radius..=radius {
+        for dz in -radius..=radius {
+            if dx * dx + dz * dz > radius * radius {
+                continue;
+            }
+            put(blocks, cx + dx, 63, cz + dz, LAVA);
+            put(blocks, cx + dx, 62, cz + dz, NETHERRACK);
+        }
+    }
+}
 
 fn portal_pad(
     blocks: &mut HashMap<(i32, i32, i32), i32>,
@@ -344,6 +374,8 @@ pub fn builtin_overworld_pack(size: MapSize) -> MapPack {
     // Nether = glowstone west of spawn; End = end stone east of spawn.
     portal_pad(&mut blocks, -6, 0, NETHERRACK, GLOWSTONE);
     portal_pad(&mut blocks, 6, 0, END_STONE, END_STONE);
+    // H5: static water pond south of spawn (swim / damp fall).
+    water_pond(&mut blocks, 0, -12, 3);
 
     MapPack {
         garden,
@@ -360,6 +392,8 @@ pub fn builtin_nether_pack(size: MapSize) -> MapPack {
     fill_disk(&mut blocks, 0, 63, 0, 4, SOUL_SAND);
     portal_pad(&mut blocks, -6, 0, NETHERRACK, GLOWSTONE); // return to overworld
     put(&mut blocks, 3, 64, 0, GLOWSTONE);
+    // H5: static lava pool (contact damage).
+    lava_pool(&mut blocks, 10, 0, 2);
     MapPack {
         garden,
         blocks,
@@ -473,6 +507,14 @@ mod tests {
         assert!(m.blocks.len() > s.blocks.len());
         assert!(s.blocks.len() > t.blocks.len());
         assert_ne!(t.blocks.get(&(3, 64, 0)), s.blocks.get(&(3, 64, 0)));
+    }
+
+    #[test]
+    fn overworld_has_water_pond_and_nether_has_lava() {
+        let ow = builtin_overworld_pack(MapSize::Tiny);
+        assert_eq!(ow.blocks.get(&(0, 63, -12)), Some(&WATER));
+        let n = builtin_nether_pack(MapSize::Tiny);
+        assert_eq!(n.blocks.get(&(10, 63, 0)), Some(&LAVA));
     }
 
     #[test]

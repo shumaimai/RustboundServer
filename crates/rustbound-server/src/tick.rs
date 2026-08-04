@@ -1629,6 +1629,56 @@ fn run_tick_loop(
             }
         }
 
+        // Periodic task: static lava contact damage (H5).
+        if tick_count % crate::fluid::LAVA_DAMAGE_INTERVAL_TICKS == 0 && tick_count > 0 {
+            let mut lava_deaths: Vec<i32> = Vec::new();
+            for (&entity_id, inv) in inventories.iter_mut() {
+                if inv.is_dead {
+                    continue;
+                }
+                let Some(player) = world.get_player(entity_id) else {
+                    continue;
+                };
+                if player.gamemode == GAMEMODE_CREATIVE || player.gamemode == GAMEMODE_SPECTATOR {
+                    continue;
+                }
+                if !crate::fluid::touching_lava(
+                    &world,
+                    player.dimension,
+                    player.x,
+                    player.y,
+                    player.z,
+                ) {
+                    continue;
+                }
+                inv.health = (inv.health - crate::fluid::LAVA_DAMAGE).max(0.0);
+                if let Some(sender) = session_senders.get(&entity_id) {
+                    let _ = sender.send(SessionEvent::SetHealth {
+                        health: inv.health,
+                        food: inv.food,
+                        food_saturation: inv.food_saturation,
+                    });
+                }
+                if inv.health <= 0.0 {
+                    inv.kill();
+                    lava_deaths.push(entity_id);
+                }
+            }
+            for eid in lava_deaths {
+                clear_break_animation(&mut break_progress, &session_senders, eid);
+                let username = world
+                    .get_player(eid)
+                    .map(|p| p.username.clone())
+                    .unwrap_or_else(|| "Player".to_string());
+                if let Some(sender) = session_senders.get(&eid) {
+                    let _ = sender.send(SessionEvent::CombatDeath {
+                        player_id: eid,
+                        message: combat_death_message(&username, "tried to swim in lava"),
+                    });
+                }
+            }
+        }
+
         // Periodic task: Survival food drain and starvation damage
         // Creative players are exempt. Food drains every FOOD_DRAIN_INTERVAL_TICKS.
         if tick_count % FOOD_DRAIN_INTERVAL_TICKS == 0 && tick_count > 0 {
@@ -3328,6 +3378,62 @@ mod tests {
         }
         assert!(!got_death, "creative players must not be void-killed");
 
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_lava_damages_survival_player() -> Result<(), Box<dyn std::error::Error>> {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "Steve".to_string(),
+            gamemode: 0, // Survival
+            view_distance: 2,
+            event_sender: event_tx,
+        })?;
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        // Place lava under/at the player feet in overworld.
+        handle.send(super::TickMessage::SetBlock {
+            entity_id: Some(1),
+            position: (0, 64, 0),
+            block_state: crate::fluid::LAVA_BLOCK_STATE,
+        })?;
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.5,
+            y: 64.0,
+            z: 0.5,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: true,
+        })?;
+
+        let start = Instant::now();
+        let mut saw_damage = false;
+        while start.elapsed() < Duration::from_millis(1200) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SetHealth { health, .. }) if health < DEFAULT_HEALTH => {
+                    saw_damage = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        assert!(saw_damage, "standing in lava should reduce health");
         handle.shutdown();
         Ok(())
     }

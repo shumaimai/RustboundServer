@@ -163,6 +163,17 @@ pub const REGISTRY: &[BlockItemEntry] = &[
         block_state_id: 207,
         name: "nether_quartz_ore",
     },
+    // Fluids use 1.20.1 global palette source states (wiki.vg / minecraft-data).
+    BlockItemEntry {
+        item_id: 326, // water_bucket places source water in creative stubs
+        block_state_id: 80,
+        name: "water",
+    },
+    BlockItemEntry {
+        item_id: 327, // lava_bucket
+        block_state_id: 96,
+        name: "lava",
+    },
 ];
 
 /// Looks up the block state ID for a given item ID.

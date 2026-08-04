@@ -8,6 +8,7 @@ pub mod collision;
 pub mod config;
 pub mod connection;
 pub mod dimension;
+pub mod fluid;
 pub mod hakoniwa;
 pub mod listener;
 pub mod map_pack;

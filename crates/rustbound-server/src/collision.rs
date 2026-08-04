@@ -4,6 +4,7 @@
 //! non-air block state as a full solid cube. Spectator mode skips collision.
 
 use crate::chunk::AIR_BLOCK_STATE;
+use crate::fluid;
 use crate::world::World;
 
 /// Spectator gamemode wire value (matches `tick::GAMEMODE_SPECTATOR`).
@@ -38,9 +39,11 @@ pub struct CollisionResult {
     pub corrected: bool,
 }
 
-/// Returns true if the block state is a full solid for H1 collision.
+/// Returns true if the block state is a full solid for collision.
+///
+/// Air and static fluids (water / lava) are non-solid so players can enter them.
 pub fn is_solid(block_state: i32) -> bool {
-    block_state != AIR_BLOCK_STATE
+    block_state != AIR_BLOCK_STATE && !fluid::is_fluid(block_state)
 }
 
 /// Axis-aligned player box at feet position `(x, y, z)`.
@@ -203,8 +206,13 @@ pub fn resolve_movement(
         y = snap_to_ground(world, dimension, x, y + PLAYER_HEIGHT, z);
     }
 
+    // H5: static water damps sinking and adds light buoyancy.
+    let (x, y, z, fluid_corrected) =
+        fluid::apply_water_motion(world, dimension, old_x, old_y, old_z, x, y, z);
+
     let on_ground = standing_on_ground(world, dimension, x, y, z);
-    let corrected = (x - new_x).abs() > f64::EPSILON
+    let corrected = fluid_corrected
+        || (x - new_x).abs() > f64::EPSILON
         || (y - new_y).abs() > f64::EPSILON
         || (z - new_z).abs() > f64::EPSILON;
 
@@ -252,6 +260,25 @@ mod tests {
     fn air_is_not_solid_stone_is() {
         assert!(!is_solid(AIR_BLOCK_STATE));
         assert!(is_solid(STONE_BLOCK_STATE));
+        assert!(!is_solid(fluid::WATER_BLOCK_STATE));
+        assert!(!is_solid(fluid::LAVA_BLOCK_STATE));
+    }
+
+    #[test]
+    fn player_can_enter_water_column() {
+        let mut world = World::new();
+        let dim = crate::hakoniwa::DimensionId::Overworld;
+        // Clear stone under a water column and fill with water.
+        for y in 61..=65 {
+            world.set_block(dim, 2, y, 0, fluid::WATER_BLOCK_STATE);
+        }
+        let r = resolve_movement(&world, dim, 0.5, 64.0, 0.5, 2.5, 64.0, 0.5, 0);
+        // Should be able to walk into the water x without being blocked by fluid.
+        assert!(
+            (r.x - 2.5).abs() < 0.01,
+            "water must not act as a solid wall, got x={}",
+            r.x
+        );
     }
 
     #[test]

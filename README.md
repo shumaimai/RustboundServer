@@ -12,7 +12,7 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 
 ## Status
 
-**Hakoniwa Phase H4** — fixed gardens with Overworld / Nether / End and simple mobs.
+**Hakoniwa Phase H5** — fixed gardens with dimensions, simple mobs, and static fluids.
 
 | Layer | Status |
 |-------|--------|
@@ -23,7 +23,8 @@ We do **not** chase full vanilla worldgen or Forge mods. Play happens inside siz
 | Map packs / 3 sizes of overworld gardens | **Done (H2)** |
 | Nether / End (portals + `/dim`) | **Done (H3)** |
 | Simple mobs (wander + light hostility) | **Done (H4)** |
-| Static liquids | H5 |
+| Static liquids (swim damp + lava damage) | **Done (H5)** |
+| Containers + size polish | H6 |
 | Online mode | [#60](https://github.com/shumaimai/RustboundServer/issues/60) (optional) |
 | Forge jars / JVM | **Out of scope** |
 | Thin Rust Mod API | Façade + ModHost wired |
