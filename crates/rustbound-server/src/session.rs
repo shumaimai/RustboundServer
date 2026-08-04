@@ -261,6 +261,15 @@ pub enum SessionEvent {
         /// The new Z position.
         z: f64,
     },
+    /// Force the client to an absolute position (garden border clamp).
+    SynchronizePosition {
+        /// Absolute X.
+        x: f64,
+        /// Absolute Y.
+        y: f64,
+        /// Absolute Z.
+        z: f64,
+    },
 }
 
 /// An error encountered while running a player session.
@@ -1080,6 +1089,26 @@ impl PlayerSession {
                         data_kept,
                     )?;
                     // After respawn, re-synchronize position to spawn point
+                    self.last_x = x;
+                    self.last_y = y;
+                    self.last_z = z;
+                    let teleport_id = self.next_teleport_id;
+                    self.next_teleport_id += 1;
+                    let sync = SynchronizePlayerPosition {
+                        x,
+                        y,
+                        z,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        flags: 0,
+                        teleport_id,
+                    };
+                    let mut wire = Vec::new();
+                    encode_synchronize_player_position(&sync, self.max_frame_length, &mut wire)?;
+                    self.send_wire(stream, &wire)?;
+                    processed = true;
+                }
+                SessionEvent::SynchronizePosition { x, y, z } => {
                     self.last_x = x;
                     self.last_y = y;
                     self.last_z = z;

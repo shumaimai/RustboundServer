@@ -61,10 +61,14 @@ impl Server {
     /// Starts the server with the given configuration.
     pub fn start(config: ServerConfig) -> Result<Self, ServerError> {
         let player_count = Arc::new(AtomicUsize::new(0));
+        let garden = crate::hakoniwa::GardenSpec::from_size(config.hakoniwa_size);
+        let view_distance = config.view_distance.min(garden.recommended_view_distance());
+        let simulation_distance = config.simulation_distance.min(view_distance);
         let (tick_handle, _event_rx) = start_tick_loop(
             player_count.clone(),
             config.level_name.clone(),
             config.autosave_interval_secs,
+            garden,
             Vec::new(), // no mods registered yet
         )?;
 
@@ -81,8 +85,8 @@ impl Server {
             player_count: player_count.clone(),
             max_players,
             default_gamemode: config.default_gamemode,
-            view_distance: config.view_distance,
-            simulation_distance: config.simulation_distance,
+            view_distance,
+            simulation_distance,
             motd: config.motd.clone(),
             keep_alive_timeout: Duration::from_secs(config.keep_alive_timeout_secs),
         });

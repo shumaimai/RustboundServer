@@ -6,6 +6,7 @@
 pub mod chunk;
 pub mod config;
 pub mod connection;
+pub mod hakoniwa;
 pub mod listener;
 pub mod mod_api;
 pub mod mutation;

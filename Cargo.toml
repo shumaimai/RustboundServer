@@ -22,3 +22,17 @@ unused_qualifications = "warn"
 all = { level = "warn", priority = -1 }
 expect_used = "warn"
 unwrap_used = "warn"
+
+# Default release: keep symbols light for normal `--release` runs.
+[profile.release]
+strip = "debuginfo"
+
+# Extreme miniaturization for distribution (箱庭計画).
+#   cargo build -p rustbound-server --profile dist
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true
+panic = "abort"
