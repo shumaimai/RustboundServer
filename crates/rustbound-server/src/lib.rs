@@ -4,6 +4,7 @@
 //! tick loop, world management, and player session orchestration.
 
 pub mod chunk;
+pub mod collision;
 pub mod config;
 pub mod connection;
 pub mod hakoniwa;

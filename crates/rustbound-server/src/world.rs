@@ -217,11 +217,13 @@ impl World {
 
     /// Gets the block state at the given absolute position.
     ///
-    /// Returns the override if present, otherwise 0 (air) for unloaded
-    /// chunks. For loaded chunks without an override, returns 0 (air) as
-    /// well since the flat generator produces air above the surface.
+    /// Prefers dig/place overrides; otherwise returns the generated flat
+    /// plateau (stone for y in [-64, 63], air above/below).
     pub fn get_block(&self, x: i32, y: i32, z: i32) -> i32 {
-        self.block_overrides.get(&(x, y, z)).copied().unwrap_or(0)
+        self.block_overrides
+            .get(&(x, y, z))
+            .copied()
+            .unwrap_or_else(|| crate::chunk::generated_flat_block(x, y, z))
     }
 
     /// Returns the number of block overrides.
@@ -456,9 +458,11 @@ mod tests {
     #[test]
     fn set_and_get_block_override() {
         let mut world = World::new();
-        // Default is air (0)
+        // Above the plateau is air
         assert_eq!(world.get_block(10, 64, -20), 0);
-        // Set to stone (1)
+        // Generated stone on the plateau
+        assert_eq!(world.get_block(10, 63, -20), 1);
+        // Set to stone (1) above surface
         world.set_block(10, 64, -20, 1);
         assert_eq!(world.get_block(10, 64, -20), 1);
         assert_eq!(world.block_override_count(), 1);
@@ -466,6 +470,9 @@ mod tests {
         world.set_block(10, 64, -20, 0);
         assert_eq!(world.get_block(10, 64, -20), 0);
         assert_eq!(world.block_override_count(), 1);
+        // Digging stone away leaves air via override
+        world.set_block(10, 63, -20, 0);
+        assert_eq!(world.get_block(10, 63, -20), 0);
     }
 
     #[test]

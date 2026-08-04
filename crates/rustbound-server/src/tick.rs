@@ -820,12 +820,36 @@ fn run_tick_loop(
                     let raw_x = x;
                     let raw_y = y;
                     let raw_z = z;
+                    let (old_x, old_y, old_z, gamemode) =
+                        match world.get_player(entity_id).map(|p| {
+                            let (ox, oy, oz) = p.position();
+                            (ox, oy, oz, p.gamemode)
+                        }) {
+                            Some(v) => v,
+                            None => continue,
+                        };
                     let (x, y, z) = garden.clamp_horizontal(raw_x, raw_y, raw_z);
-                    let clamped = (x - raw_x).abs() > f64::EPSILON
+                    let border_clamped = (x - raw_x).abs() > f64::EPSILON
                         || (y - raw_y).abs() > f64::EPSILON
                         || (z - raw_z).abs() > f64::EPSILON;
+                    // Below the void line: do not snap back onto terrain so void death works.
+                    let (x, y, z, phys_corrected, server_on_ground) = if raw_y < VOID_DEATH_Y {
+                        (x, y, z, false, false)
+                    } else {
+                        let collision = crate::collision::resolve_movement(
+                            &world, old_x, old_y, old_z, x, y, z, gamemode,
+                        );
+                        (
+                            collision.x,
+                            collision.y,
+                            collision.z,
+                            collision.corrected,
+                            collision.on_ground,
+                        )
+                    };
+                    let corrected = border_clamped || phys_corrected;
+                    let _ = on_ground;
                     if let Some(player) = world.get_player_mut(entity_id) {
-                        let (old_x, old_y, old_z) = player.position();
                         let (old_yaw, old_pitch) = player.rotation();
                         player.set_position(x, y, z);
                         player.set_rotation(yaw, pitch);
@@ -835,7 +859,7 @@ fn run_tick_loop(
                         let rot_changed = (yaw - old_yaw).abs() > f32::EPSILON
                             || (pitch - old_pitch).abs() > f32::EPSILON;
 
-                        if clamped {
+                        if corrected {
                             if let Some(sender) = session_senders.get(&entity_id) {
                                 let _ = sender.send(SessionEvent::SynchronizePosition { x, y, z });
                             }
@@ -854,7 +878,7 @@ fn run_tick_loop(
                                         new_z: z,
                                         new_yaw: yaw,
                                         new_pitch: pitch,
-                                        on_ground,
+                                        on_ground: server_on_ground,
                                     });
                                 }
                             }
@@ -2711,6 +2735,60 @@ mod tests {
             got_sync,
             "should synchronize when walking past the garden border"
         );
+
+        handle.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn tick_loop_collision_rejects_fall_through_terrain() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let level = TestLevel::new();
+        let (mut handle, _event_rx) = start_tick_loop(
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            level.name(),
+            0,
+            crate::hakoniwa::GardenSpec::default(),
+            Vec::new(),
+        )?;
+
+        let (event_tx, event_rx) = channel::<SessionEvent>();
+        handle.send(super::TickMessage::PlayerJoined {
+            entity_id: 1,
+            uuid: Uuid::new(0, 0),
+            username: "ClipTest".to_string(),
+            gamemode: 1,
+            view_distance: 4,
+            event_sender: event_tx,
+        })?;
+
+        std::thread::sleep(Duration::from_millis(100));
+        while event_rx.try_recv().is_ok() {}
+
+        handle.send(super::TickMessage::PlayerPositionUpdate {
+            entity_id: 1,
+            x: 0.5,
+            y: 50.0,
+            z: 0.5,
+            yaw: 0.0,
+            pitch: 0.0,
+            on_ground: false,
+        })?;
+
+        let start = Instant::now();
+        let mut got_sync = false;
+        while start.elapsed() < Duration::from_millis(400) {
+            match event_rx.try_recv() {
+                Ok(SessionEvent::SynchronizePosition { y, .. }) => {
+                    assert!(y >= 63.9, "should sit on plateau, y={y}");
+                    got_sync = true;
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(got_sync, "should correct fall-through into solid stone");
 
         handle.shutdown();
         Ok(())
